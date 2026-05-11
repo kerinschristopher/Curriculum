@@ -1,15 +1,15 @@
-##Week 0a Journal
+## Week 0a Journal
 
-#####I've thus far installed the following items
+##### I've thus far installed the following items
 
-*WSL
-*Ubuntu
-*VSCode
-*Git
-*Github Desktop
-*Docker
-*Minikube
-*Claude
+* WSL
+* Ubuntu
+* VSCode
+* Git
+* Github Desktop
+* Docker
+* Minikube
+* Claude
 
 Decided to settle on vim as a text editor to learn over nano, though everything I've done thus far has been in VS Code.
 
