@@ -1,0 +1,68 @@
+name: terraform-plan
+
+# The role's trust policy only accepts tokens from a push (or manual run) on mod3.
+# A pull_request trigger would produce a different `sub` claim and be rejected.
+on:
+  push:
+    branches: [mod3]
+    paths:
+      # Paths are relative to the git repo root. Adjust if your root differs.
+      - "acme/infra/terraform/**"
+      - ".github/workflows/terraform-plan.yml"
+  workflow_dispatch:
+
+# id-token: write is required, or GitHub will not issue an OIDC token at all.
+permissions:
+  contents: read
+  id-token: write
+
+# One run at a time so two plans don't fight over the state lock.
+# Never cancel mid-run: a killed plan can leave a stale lock behind.
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false
+
+env:
+  TF_DIR: acme/infra/terraform/environments/dev
+  AWS_REGION: us-east-1
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Assume the plan-only role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::401352756330:role/dev-github-actions-plan
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-terraform-plan
+
+      # Proves the OIDC exchange worked: should show assumed-role/dev-github-actions-plan
+      - name: Show AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.X.Y" # replace with the output of `terraform version` on your machine
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform fmt
+        working-directory: acme/infra/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform plan -input=false -lock-timeout=60s -no-color
