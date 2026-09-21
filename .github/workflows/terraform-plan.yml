@@ -6,8 +6,7 @@ on:
   push:
     branches: [mod3]
     paths:
-      # Paths are relative to the git repo root. Adjust if your root differs.
-      - "acme/infra/terraform/**"
+      - "Acme/infra/terraform/**"
       - ".github/workflows/terraform-plan.yml"
   workflow_dispatch:
 
@@ -23,7 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TF_DIR: acme/infra/terraform/environments/dev
+  TF_DIR: Acme/infra/terraform/environments/dev
   AWS_REGION: us-east-1
 
 jobs:
@@ -49,14 +48,14 @@ jobs:
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.X.Y" # replace with the output of `terraform version` on your machine
+          terraform_version: "1.16.3"
 
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -input=false
 
       - name: Terraform fmt
-        working-directory: acme/infra/terraform
+        working-directory: Acme/infra/terraform
         run: terraform fmt -check -recursive
 
       - name: Terraform validate
