@@ -1,8 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sample-api-config
-  labels:
-    app: sample-api
-data:
-  APP_VERSION: "0.1.0-kind"
