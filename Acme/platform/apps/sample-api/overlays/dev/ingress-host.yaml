@@ -1,7 +1,5 @@
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: sample-api
-spec:
-  rules:
-    - host: sample-api.dev.local
+# JSON 6902 patch: rules has no merge key, so a strategic merge patch would
+# replace the whole list (dropping http.paths). Target the one field instead.
+- op: replace
+  path: /spec/rules/0/host
+  value: sample-api.dev.local

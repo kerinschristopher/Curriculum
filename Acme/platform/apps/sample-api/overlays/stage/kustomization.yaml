@@ -14,3 +14,6 @@ patches:
   - path: replicas.yaml
   - path: resources.yaml
   - path: ingress-host.yaml
+    target:
+      kind: Ingress
+      name: sample-api

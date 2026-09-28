@@ -13,3 +13,6 @@ configMapGenerator:
 patches:
   - path: replicas.yaml
   - path: ingress-host.yaml
+    target:
+      kind: Ingress
+      name: sample-api
