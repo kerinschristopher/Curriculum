@@ -1,0 +1,7 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sample-api
+spec:
+  rules:
+    - host: sample-api.example.local

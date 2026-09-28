@@ -27,3 +27,15 @@ spec:
                 configMapKeyRef:
                   name: sample-api-config
                   key: APP_VERSION
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: sample-api-config
+                  key: LOG_LEVEL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
