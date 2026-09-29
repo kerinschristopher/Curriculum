@@ -1,0 +1,15 @@
+# kind cluster for local Module 5 testing.
+# extraPortMappings forward the host's ports 80/443 into the kind node container,
+# where the ingress-nginx controller binds via hostPort.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: sample-api
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

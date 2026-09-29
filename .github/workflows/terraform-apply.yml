@@ -1,0 +1,96 @@
+name: terraform-apply
+
+# After a merge to main, apply the dev Terraform -- but only once a required
+# reviewer approves the `dev-apply` environment. Until then the job waits and
+# creates nothing (it gives up after 30 days).
+#
+# Can also be started by hand ("Run workflow") to re-apply or to DESTROY,
+# which goes through the same approval gate.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Acme/infra/terraform/environments/dev/**"
+      - "Acme/infra/terraform/modules/**"
+      - ".github/workflows/terraform-apply.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "apply = create/update resources; destroy = delete everything in environments/dev"
+        type: choice
+        options: [apply, destroy]
+        default: apply
+
+permissions:
+  contents: read
+
+# One apply at a time, queued in order. Never cancel mid-apply: a killed apply
+# can leave half-made resources and a stale state lock.
+concurrency:
+  group: terraform-dev-apply
+  cancel-in-progress: false
+
+env:
+  TF_DIR: Acme/infra/terraform/environments/dev
+  AWS_REGION: us-east-1
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The approval gate. This job does not start until a required reviewer
+    # approves, and the apply role trusts ONLY tokens from this environment.
+    environment: dev-apply
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.3"
+          terraform_wrapper: false
+
+      - name: Assume the apply role via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::401352756330:role/dev-github-actions-apply
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-terraform-apply-${{ github.run_id }}
+
+      - name: Show AWS identity (expect assumed-role/dev-github-actions-apply)
+        run: aws sts get-caller-identity --query Arn --output text
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      # Plan and apply the SAME saved plan file, so what's shown in the summary
+      # is exactly what gets applied. The action comes from an env var, never
+      # interpolated straight into the script.
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_ACTION: ${{ inputs.action || 'apply' }}
+        run: |
+          if [ "$TF_ACTION" = "destroy" ]; then
+            terraform plan -destroy -input=false -no-color -out=tfplan
+          else
+            terraform plan -input=false -no-color -out=tfplan
+          fi
+          {
+            echo "### Terraform ${TF_ACTION}: \`environments/dev\`"
+            echo '```'
+            terraform show -no-color tfplan
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -no-color tfplan

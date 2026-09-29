@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Store these as LF in the repo regardless of the editor's OS.
+*.go    text eol=lf
+*.mod   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.tf    text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+Dockerfile text eol=lf

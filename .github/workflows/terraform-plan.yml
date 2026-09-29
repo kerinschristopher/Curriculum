@@ -1,0 +1,139 @@
+name: terraform-plan
+
+# On every pull request that touches the dev Terraform: check formatting and
+# validity, run `terraform plan` as the READ-ONLY plan role, and post the plan
+# as a comment on the PR so reviewers see exactly what a merge would change.
+
+on:
+  pull_request:
+    paths:
+      - "Acme/infra/terraform/environments/dev/**"
+      - "Acme/infra/terraform/modules/**"
+      - ".github/workflows/terraform-plan.yml"
+
+permissions:
+  contents: read
+
+# A newer push to the same PR supersedes the old plan, so cancel it.
+# Safe because PR plans run with -lock=false: a cancelled plan can't leave a stale lock.
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TF_ROOT: Acme/infra/terraform
+  TF_DIR: Acme/infra/terraform/environments/dev
+  AWS_REGION: us-east-1
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write       # lets GitHub issue the OIDC token AWS trusts
+      pull-requests: write  # lets the job post the plan comment
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.3"
+          terraform_wrapper: false
+
+      # fmt and validate need no cloud access, so they run BEFORE any credentials exist.
+      - name: Terraform fmt
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform fmt -check -recursive -diff
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Assume the read-only plan role via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::401352756330:role/dev-github-actions-plan
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-terraform-plan-pr${{ github.event.pull_request.number }}
+
+      - name: Show AWS identity (expect assumed-role/dev-github-actions-plan)
+        run: aws sts get-caller-identity --query Arn --output text
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      # -lock=false: a PR plan is a read-only preview. Skipping the lock means an
+      # open PR can never block (or be blocked by) a real apply.
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -lock=false -no-color -out=tfplan
+          terraform show -no-color tfplan > "${RUNNER_TEMP}/plan.txt"
+
+      # Reads the plan from a file: no ${{ }} expressions inside the script,
+      # so nothing from the PR can be injected into the JavaScript.
+      - name: Comment plan on the PR
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- terraform-plan:dev -->';
+            let plan = fs.readFileSync(`${process.env.RUNNER_TEMP}/plan.txt`, 'utf8');
+
+            const summary =
+              (plan.match(/^(Plan: .*|No changes\..*)$/m) || ['(no summary line found)'])[0];
+
+            const limit = 60000; // GitHub comments max out at 65,536 characters
+            if (plan.length > limit) {
+              plan = plan.slice(0, limit) + '\n\n... truncated; see the workflow log for the full plan.';
+            }
+
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              marker,
+              '### Terraform plan: `environments/dev`',
+              '',
+              `**${summary}**`,
+              '',
+              `Commit \`${context.sha.slice(0, 7)}\` · [workflow run](${runUrl})`,
+              '',
+              '<details><summary>Full plan</summary>',
+              '',
+              '```',
+              plan,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+
+            // Update our earlier comment instead of adding a new one on every push.
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

@@ -1,0 +1,8 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+# Saved Terraform plans can contain sensitive values
+*.tfplan
+tfplan
