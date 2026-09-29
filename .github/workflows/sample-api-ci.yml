@@ -1,0 +1,182 @@
+name: sample-api-ci
+
+# What "passing" means for sample-api:
+#   formatted + vetted + linted, tests pass (with the race detector),
+#   the container builds, and Trivy finds no fixable HIGH/CRITICAL vulnerabilities.
+# Only a change that meets all of that, on main, gets pushed to GHCR.
+
+on:
+  pull_request:
+    paths:
+      - "Acme/apps/sample-api/**"
+      - ".github/workflows/sample-api-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "Acme/apps/sample-api/**"
+      - ".github/workflows/sample-api-ci.yml"
+  workflow_dispatch:
+
+# Least privilege by default: every job can only read the repo.
+# The one job that needs more (push) asks for it explicitly.
+permissions:
+  contents: read
+
+# A new push to the same PR makes the old run pointless, so cancel it.
+# Never cancel runs on main: each one may be publishing an image.
+concurrency:
+  group: sample-api-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  APP_DIR: Acme/apps/sample-api
+  # GHCR image names must be lowercase.
+  IMAGE_NAME: ghcr.io/kerinschristopher/sample-api
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Acme/apps/sample-api
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go (version read from go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: Acme/apps/sample-api/go.mod
+          cache-dependency-path: Acme/apps/sample-api/go.mod
+
+      # gofmt -l exits 0 even when it finds problems, so turn "any output" into a failure.
+      - name: Check formatting (gofmt)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files need 'gofmt -w':"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint (golangci-lint)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+          working-directory: Acme/apps/sample-api
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Acme/apps/sample-api
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go (version read from go.mod)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: Acme/apps/sample-api/go.mod
+          cache-dependency-path: Acme/apps/sample-api/go.mod
+
+      # -count=1 bypasses Go's test cache so the tests really run.
+      # -race catches unsynchronized access between goroutines (HTTP handlers run concurrently).
+      - name: Test
+        run: go test -race -count=1 -v ./...
+
+  build-scan:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # This job runs a third-party scanner, so it gets NO secrets and NO write permissions.
+    # Even a compromised scanner would find nothing here worth stealing.
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Build once, save the image as a tarball. The push job pushes this exact file,
+      # so what gets published is byte-for-byte what was scanned.
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ env.APP_DIR }}
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=docker,dest=${{ runner.temp }}/sample-api.tar
+          provenance: false
+          # Reuse unchanged layers from earlier runs (GitHub Actions cache).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          input: ${{ runner.temp }}/sample-api.tar
+          version: v0.74.0
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Upload scanned image for the push job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sample-api-image
+          path: ${{ runner.temp }}/sample-api.tar
+          retention-days: 1
+          if-no-files-found: error
+
+  push:
+    needs: build-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job allowed to write packages. It never checks out code and runs no
+    # third-party tools other than the official Docker login action.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download scanned image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sample-api-image
+          path: ${{ runner.temp }}
+
+      - name: Load image
+        run: docker load --input "${{ runner.temp }}/sample-api.tar"
+
+      # GITHUB_TOKEN is created for this run and expires when it ends: no stored credential.
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and push
+        run: |
+          docker tag "${IMAGE_NAME}:sha-${GITHUB_SHA}" "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          docker push "${IMAGE_NAME}:latest"
