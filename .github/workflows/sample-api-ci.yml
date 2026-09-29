@@ -35,7 +35,7 @@ env:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
@@ -72,7 +72,7 @@ jobs:
           working-directory: Acme/apps/sample-api
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
@@ -96,7 +96,7 @@ jobs:
 
   build-scan:
     needs: [lint, test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # This job runs a third-party scanner, so it gets NO secrets and NO write permissions.
     # Even a compromised scanner would find nothing here worth stealing.
@@ -150,7 +150,7 @@ jobs:
   push:
     needs: build-scan
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The only job allowed to write packages. It never checks out code and runs no
     # third-party tools other than the official Docker login action.

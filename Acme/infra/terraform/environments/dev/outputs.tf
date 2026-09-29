@@ -1,10 +1,11 @@
+output "vpc_id" {
+  value = module.vpc.vpc_id
+}
+
 output "cluster_name" {
-  value = module.eks.cluster_name
+  value = try(module.eks[0].cluster_name, null)
 }
 
 output "cluster_endpoint" {
-  value = module.eks.cluster_endpoint
-}
-output "ci_role_arn" {
-  value = module.iam_roles.ci_role_arn
+  value = try(module.eks[0].cluster_endpoint, null)
 }

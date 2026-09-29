@@ -8,13 +8,18 @@ variable "github_repo" {
   type        = string
 }
 
-variable "github_branches" {
-  description = "Branches whose workflows may assume the role"
-  type        = list(string)
+variable "apply_environment" {
+  description = "GitHub environment whose jobs may assume the apply role (must have a required reviewer)"
+  type        = string
 }
 
 variable "state_bucket" {
   description = "Name of the S3 bucket holding Terraform state"
+  type        = string
+}
+
+variable "state_key" {
+  description = "State object key the apply role may write, e.g. dev/terraform.tfstate"
   type        = string
 }
 
@@ -24,7 +29,7 @@ variable "lock_table" {
 }
 
 variable "create_oidc_provider" {
-  description = "false if this account already has a GitHub OIDC provider"
+  description = "false if this account already has a GitHub OIDC provider managed elsewhere"
   type        = bool
   default     = true
 }
