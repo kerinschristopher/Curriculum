@@ -4,27 +4,13 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   github_url = "https://token.actions.githubusercontent.com"
 
-  oidc_provider_arn = (
-    var.create_oidc_provider
-    ? aws_iam_openid_connect_provider.github[0].arn
-    : data.aws_iam_openid_connect_provider.github[0].arn
-  )
+  oidc_provider_arn = data.aws_iam_openid_connect_provider.github.arn
 }
 
 # --- Identity provider: AWS trusts GitHub as a token issuer ---
 
-resource "aws_iam_openid_connect_provider" "github" {
-  count = var.create_oidc_provider ? 1 : 0
-
-  url            = local.github_url
-  client_id_list = ["sts.amazonaws.com"]
-
-  tags = var.tags
-}
-
+# One per account, owned by the account stack (infra/terraform/account); look it up here
 data "aws_iam_openid_connect_provider" "github" {
-  count = var.create_oidc_provider ? 0 : 1
-
   url = local.github_url
 }
 
@@ -47,7 +33,7 @@ data "aws_iam_policy_document" "trust" {
     }
 
     condition {
-      test     = "StringEquals"
+      test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values   = [for b in var.github_branches : "repo:${var.github_repo}:ref:refs/heads/${b}"]
     }

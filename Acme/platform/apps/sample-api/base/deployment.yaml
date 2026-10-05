@@ -22,7 +22,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: sample-api
-          image: sample-api:0.1.0
+          image: sample-api
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

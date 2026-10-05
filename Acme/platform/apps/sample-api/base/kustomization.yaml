@@ -9,5 +9,4 @@ resources:
 configMapGenerator:
   - name: sample-api-config
     literals:
-      - APP_VERSION=0.1.0-kind
       - LOG_LEVEL=info

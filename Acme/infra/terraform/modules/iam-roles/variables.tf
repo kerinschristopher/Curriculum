@@ -9,8 +9,9 @@ variable "github_repo" {
 }
 
 variable "github_branches" {
-  description = "Branches whose workflows may assume the role"
+  description = "Branch patterns whose workflows may assume the role; \"*\" means any branch"
   type        = list(string)
+  default     = ["*"]
 }
 
 variable "state_bucket" {
@@ -21,12 +22,6 @@ variable "state_bucket" {
 variable "lock_table" {
   description = "Name of the DynamoDB lock table"
   type        = string
-}
-
-variable "create_oidc_provider" {
-  description = "false if this account already has a GitHub OIDC provider"
-  type        = bool
-  default     = true
 }
 
 variable "tags" {

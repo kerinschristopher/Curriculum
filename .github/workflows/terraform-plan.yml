@@ -1,10 +1,9 @@
 name: terraform-plan
 
-# The role's trust policy only accepts tokens from a push (or manual run) on mod3.
+# The role's trust policy accepts tokens from a push (or manual run) on any branch of this repo.
 # A pull_request trigger would produce a different `sub` claim and be rejected.
 on:
   push:
-    branches: [mod3]
     paths:
       - "Acme/infra/terraform/**"
       - ".github/workflows/terraform-plan.yml"
@@ -32,10 +31,12 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Assume the plan-only role via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: arn:aws:iam::401352756330:role/dev-github-actions-plan
           aws-region: ${{ env.AWS_REGION }}
@@ -46,7 +47,7 @@ jobs:
         run: aws sts get-caller-identity
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "1.16.3"
 
