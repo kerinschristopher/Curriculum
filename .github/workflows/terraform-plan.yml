@@ -1,6 +1,7 @@
 name: terraform-plan
 
-# The role's trust policy accepts tokens from a push (or manual run) on any branch of this repo.
+# The role's trust policy accepts tokens from a push (or manual run) on `main` and `mod*` branches only
+# (github_branches in environments/dev/main.tf). Other branches fail at the assume-role step.
 # A pull_request trigger would produce a different `sub` claim and be rejected.
 on:
   push:
