@@ -41,6 +41,9 @@ module "iam_roles" {
   state_bucket = "ckerins-tfstate-12345"
   lock_table   = "terraform-locks"
 
+  # "mod*" matches every module branch (mod5, mod6, ...) with no further edits
+  github_branches = ["main", "mod*"]
+
   tags = {
     Environment = "dev"
     ManagedBy   = "terraform"

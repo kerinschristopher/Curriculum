@@ -9,9 +9,9 @@ variable "github_repo" {
 }
 
 variable "github_branches" {
-  description = "Branch patterns whose workflows may assume the role; \"*\" means any branch"
+  description = "Branch patterns (StringLike, e.g. \"mod*\") whose workflows may assume the role"
   type        = list(string)
-  default     = ["*"]
+  default     = ["main"]
 }
 
 variable "state_bucket" {
