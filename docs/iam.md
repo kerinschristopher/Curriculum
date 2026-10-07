@@ -177,7 +177,7 @@ accounts would remove it, and that's out of scope here.
 | [`simulate-plan-role.sh`](../Acme/infra/scripts/tests/simulate-plan-role.sh) (IAM policy simulator, 34 cases) | The policy logic: allowed actions are allowed, out-of-scope ones denied (including every lock write), user data explicitly denied. Condition values are supplied by hand | Passing |
 | `terraform-plan` workflow on `mod5` | The real trust match, plus real condition values for the region lock, the SSM AMI lookup, the state read and the checksum read, with `-lock=false` | Passing |
 | Negative trust test: push from throwaway branch `trust-check` (run `37536403620`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted |
-| Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM statements against real resources. `terraform plan` only calls APIs for resources already in state | **Not yet done** |
+| Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM statements against real resources. `terraform plan` only calls APIs for resources already in state | Passed: 58 resources refreshed with no AccessDenied, and `No changes` at `eb34972`, after naming the cluster admin explicitly (see `modules/eks/main.tf`) |
 
 Run the simulator from WSL with AWS credentials that can call `iam:SimulatePrincipalPolicy`:
 
