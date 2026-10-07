@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# AWS manifest for EKS: a LoadBalancer Service annotated for an NLB, --publish-service so Ingress
+# status carries the NLB's address, and a 300s grace period so rollouts drain in-flight requests.
+# The local kind cluster uses ../ingress-nginx-kind instead.
+resources:
+  - https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.15.1/deploy/static/provider/aws/deploy.yaml

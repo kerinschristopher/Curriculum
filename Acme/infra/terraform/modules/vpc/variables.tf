@@ -31,3 +31,8 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+variable "enable_nat_gateway" {
+  description = "Create a single NAT gateway for private subnet egress (about $0.045/hr plus per-GB)"
+  type        = bool
+  default     = true
+}

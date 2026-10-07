@@ -1,2 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts run under bash/WSL; CRLF breaks them
+*.sh text eol=lf
+
+# gofmt requires LF; a CRLF checkout makes it flag every line
+*.go   text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf

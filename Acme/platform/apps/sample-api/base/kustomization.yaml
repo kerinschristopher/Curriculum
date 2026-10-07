@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+configMapGenerator:
+  - name: sample-api-config
+    literals:
+      - LOG_LEVEL=info
+      # Every key the Deployment references must exist here; overlays override it via merge
+      - APP_VERSION=unset
