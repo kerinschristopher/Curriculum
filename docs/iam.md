@@ -204,7 +204,7 @@ accounts would remove it, and that's out of scope here.
 | Negative trust test, dispatch: `gh workflow run --ref trust-check` (run `37571573254`) | Same rejection with the manual trigger | Passed, branch deleted |
 | No push trigger: push `mod5` (`47e5e06`) and create `trust-check` by push | A push starts no workflow run | Passed |
 | Ruleset coverage: `gh api repos/kerinschristopher/Curriculum/rules/branches/<name>` (encode `/` as `%2F`) | `main`, `mod5`, `modern`, `mod/evil` and `mod/a/b` get all four rules, and `trust-check` and `feature/mod5` get none | Passed |
-| Ruleset enforcement: push `HEAD:mod/evil` with admin bypass set to "pull requests only" | A push that doesn't bypass is rejected | Pending |
+| Ruleset enforcement: push `HEAD:mod/evil` with admin bypass set to "pull requests only" | A push that doesn't bypass is rejected | Passed: `GH013 ... Cannot create ref due to creations being restricted`; bypass restored to Always |
 | Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM statements against real resources. `terraform plan` only calls APIs for resources already in state | Passed: 58 resources refreshed with no AccessDenied, and `No changes` at `eb34972`, after naming the cluster admin explicitly (see `modules/eks/main.tf`) |
 
 Run the simulator from WSL with AWS credentials that can call `iam:SimulatePrincipalPolicy`:
