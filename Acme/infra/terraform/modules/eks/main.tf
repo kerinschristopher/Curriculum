@@ -12,8 +12,30 @@ module "eks" {
   # Tighten with endpoint_public_access_cidrs later.
   endpoint_public_access = true
 
-  # Gives whoever runs Terraform an EKS access entry with cluster-admin
-  enable_cluster_creator_admin_permissions = true
+  # Cluster admin is a named principal, not "whoever runs Terraform".
+  # enable_cluster_creator_admin_permissions (and the KMS default below) derive the admin from the
+  # caller's identity, so the same code plans differently for each caller: a local apply as the human
+  # admin and a CI plan as dev-github-actions-plan would each try to hand cluster-admin and KMS key
+  # admin to themselves. CI could never show "No changes", and a future CI apply role would silently
+  # take over the cluster. Naming the admin makes the result independent of who runs Terraform.
+  enable_cluster_creator_admin_permissions = false
+
+  # Key "cluster_creator" / policy key "admin" deliberately match the module's built-in entry, so
+  # existing clusters keep the same resource addresses (no replace) when switching to this.
+  access_entries = {
+    cluster_creator = {
+      principal_arn = var.cluster_admin_arn
+      policy_associations = {
+        admin = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+  }
+
+  # Same reason: the module defaults the KMS key administrator to the caller's identity
+  kms_key_administrators = [var.cluster_admin_arn]
 
   addons = {
     coredns                = {}

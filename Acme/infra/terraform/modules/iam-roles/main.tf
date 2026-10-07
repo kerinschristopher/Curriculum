@@ -15,8 +15,8 @@
 #   each environment's plan role can see the other environments' network/LB/ASG configuration
 #   (configuration only, never data). This is an accepted residual exposure; only separate
 #   per-environment accounts would remove it, and that is out of scope.
-# - The apply role (Module 6) follows the same per-environment pattern. Note that the EKS module's
-#   enable_cluster_creator_admin_permissions grants whoever applies cluster-admin.
+# - The apply role (Module 6) follows the same per-environment pattern. Cluster-admin and KMS key admin
+#   are an explicit cluster_admin_arn (modules/eks), so applying as that role won't hand it the cluster.
 
 data "aws_caller_identity" "current" {}
 

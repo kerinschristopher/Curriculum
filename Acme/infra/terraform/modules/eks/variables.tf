@@ -38,6 +38,11 @@ variable "node_max_size" {
   default = 3
 }
 
+variable "cluster_admin_arn" {
+  description = "IAM principal ARN granted EKS cluster-admin and KMS key administration (explicit, not the Terraform caller)"
+  type        = string
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

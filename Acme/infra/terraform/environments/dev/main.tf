@@ -26,6 +26,9 @@ module "eks" {
   vpc_id             = module.vpc.vpc_id
   subnet_ids         = module.vpc.private_subnet_ids
 
+  # Human admin; see modules/eks/main.tf for why this isn't "whoever runs Terraform"
+  cluster_admin_arn = "arn:aws:iam::401352756330:user/ckerins"
+
   tags = {
     Environment = "dev"
     ManagedBy   = "terraform"
