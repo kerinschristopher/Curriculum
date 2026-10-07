@@ -297,7 +297,7 @@ data "aws_iam_policy_document" "state" {
   # Lock item and the digest item plan reads; nothing for other environments' state
   statement {
     sid       = "StateLock"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
     resources = ["arn:aws:dynamodb:${local.region}:${local.account_id}:table/${var.lock_table}"]
 
     condition {
