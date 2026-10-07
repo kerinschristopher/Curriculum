@@ -21,7 +21,6 @@ configMapGenerator:
 patches:
   - path: replicas.yaml
   - path: resources.yaml
-  - path: ingress-host.yaml
-    target:
-      kind: Ingress
-      name: sample-api
+  # No ingress host patch: prod inherits sample-api.example.com from base.
+  # That is a non-functional placeholder (example.com is reserved by RFC 2606);
+  # replace it in base/ingress.yaml with the real domain once one exists.
