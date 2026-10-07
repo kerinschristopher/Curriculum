@@ -1,0 +1,74 @@
+name: terraform-plan
+
+# Manual runs only: gh workflow run terraform-plan.yml --ref <branch>
+# The OIDC `sub` follows the ref the run is dispatched on. The role trusts `main` and `mod*` only
+# (github_branches in environments/dev/main.tf); other refs fail at the assume-role step.
+# Who can create or push those refs is set by the trusted-branches ruleset (Acme/infra/github/).
+# The trigger, the trust list and the ruleset move together: change one, check the other two.
+# A pull_request trigger would produce a different `sub` claim and be rejected.
+on:
+  workflow_dispatch:
+
+# id-token: write is required, or GitHub will not issue an OIDC token at all.
+permissions:
+  contents: read
+  id-token: write
+
+# One run at a time; plans don't take the state lock (see the plan step).
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false
+
+env:
+  TF_DIR: Acme/infra/terraform/environments/dev
+  AWS_REGION: us-east-1
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Assume the plan-only role via OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::401352756330:role/dev-github-actions-plan
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-terraform-plan
+
+      # Proves the OIDC exchange worked: should show assumed-role/dev-github-actions-plan
+      - name: Show AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "1.16.3"
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform fmt
+        working-directory: Acme/infra/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      # -lock=false: this job runs as a plan-only role that has no DynamoDB delete permission
+      # (DeleteItem was removed on purpose: it would let CI release a lock held by someone's apply).
+      # Terraform releases a DynamoDB lock by deleting it, so a locked plan here would leave a stale lock.
+      # Skipping the lock is safe because this job never writes state; the worst case is a plan computed
+      # against the state from just before a concurrent apply, which a rerun fixes. Applies still lock.
+      # To lock CI plans again without re-adding DeleteItem on the table, move the backend to S3 native
+      # locking (use_lockfile = true): release then needs s3:DeleteObject on one .tflock object only.
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform plan -input=false -lock=false -no-color
