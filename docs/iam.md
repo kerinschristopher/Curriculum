@@ -199,10 +199,10 @@ accounts would remove it, and that's out of scope here.
 | Check | What it proves | Status |
 |---|---|---|
 | [`simulate-plan-role.sh`](../Acme/infra/scripts/tests/simulate-plan-role.sh) (IAM policy simulator, 34 cases) | The policy logic: allowed actions are allowed, out-of-scope ones denied (including every lock write), user data explicitly denied. Condition values are supplied by hand | Passing |
-| `terraform-plan` workflow on `mod5` | The real trust match, plus real condition values for the region lock, the SSM AMI lookup, the state read and the checksum read, with `-lock=false` | Passing (push-triggered); re-check with `gh workflow run --ref mod5` pending |
+| `terraform-plan` workflow on `mod5` | The real trust match, plus real condition values for the region lock, the SSM AMI lookup, the state read and the checksum read, with `-lock=false` | Passing, dispatched with `gh workflow run --ref mod5` (run `37571571242`) |
 | Negative trust test: push from throwaway branch `trust-check` (run `37536403620`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted. Historical: ran under the old push trigger |
-| Negative trust test, dispatch: `gh workflow run --ref trust-check` | Same rejection with the manual trigger | Pending |
-| No push trigger: push `mod5` | A push starts no workflow run | Pending |
+| Negative trust test, dispatch: `gh workflow run --ref trust-check` (run `37571573254`) | Same rejection with the manual trigger | Passed, branch deleted |
+| No push trigger: push `mod5` (`47e5e06`) and create `trust-check` by push | A push starts no workflow run | Passed |
 | Ruleset coverage: `gh api repos/kerinschristopher/Curriculum/rules/branches/<name>` (encode `/` as `%2F`) | `main`, `mod5`, `modern`, `mod/evil` and `mod/a/b` get all four rules, and `trust-check` and `feature/mod5` get none | Passed |
 | Ruleset enforcement: push `HEAD:mod/evil` with admin bypass set to "pull requests only" | A push that doesn't bypass is rejected | Pending |
 | Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM statements against real resources. `terraform plan` only calls APIs for resources already in state | Passed: 58 resources refreshed with no AccessDenied, and `No changes` at `eb34972`, after naming the cluster admin explicitly (see `modules/eks/main.tf`) |
