@@ -54,8 +54,6 @@ sim allowed logs:ListTagsForResource "arn:aws:logs:$R:$ACCT:log-group:/aws/eks/$
 sim allowed ssm:GetParameter "arn:aws:ssm:$R::parameter/aws/service/eks/optimized-ami/1.36/amazon-linux-2023/x86_64/standard/recommended/release_version" "$REGION"
 sim allowed s3:GetObject "arn:aws:s3:::$BUCKET/$ENV/terraform.tfstate"
 sim allowed s3:ListBucket "arn:aws:s3:::$BUCKET" "ContextKeyName=s3:prefix,ContextKeyValues=$ENV/,ContextKeyType=string"
-sim allowed dynamodb:PutItem "arn:aws:dynamodb:$R:$ACCT:table/$TABLE" \
-  "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=$BUCKET/$ENV/terraform.tfstate,ContextKeyType=stringList"
 sim allowed dynamodb:GetItem "arn:aws:dynamodb:$R:$ACCT:table/$TABLE" \
   "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=$BUCKET/$ENV/terraform.tfstate-md5,ContextKeyType=stringList"
 
@@ -77,6 +75,13 @@ sim implicitDeny s3:PutObject "arn:aws:s3:::$BUCKET/$ENV/terraform.tfstate"
 sim implicitDeny s3:ListBucket "arn:aws:s3:::$BUCKET" "ContextKeyName=s3:prefix,ContextKeyValues=account/,ContextKeyType=string"
 sim implicitDeny dynamodb:PutItem "arn:aws:dynamodb:$R:$ACCT:table/$TABLE" \
   "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=$BUCKET/account/terraform.tfstate,ContextKeyType=stringList"
+# CI plans run with -lock=false: the role can't take, release or read its own environment's lock either
+sim implicitDeny dynamodb:PutItem "arn:aws:dynamodb:$R:$ACCT:table/$TABLE" \
+  "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=$BUCKET/$ENV/terraform.tfstate,ContextKeyType=stringList"
+sim implicitDeny dynamodb:DeleteItem "arn:aws:dynamodb:$R:$ACCT:table/$TABLE" \
+  "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=$BUCKET/$ENV/terraform.tfstate,ContextKeyType=stringList"
+sim implicitDeny dynamodb:GetItem "arn:aws:dynamodb:$R:$ACCT:table/$TABLE" \
+  "ContextKeyName=dynamodb:LeadingKeys,ContextKeyValues=$BUCKET/$ENV/terraform.tfstate,ContextKeyType=stringList"
 
 echo
 echo "== Should be denied (explicit) =="

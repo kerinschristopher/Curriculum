@@ -15,8 +15,7 @@ permissions:
   contents: read
   id-token: write
 
-# One run at a time so two plans don't fight over the state lock.
-# Never cancel mid-run: a killed plan can leave a stale lock behind.
+# One run at a time; plans don't take the state lock (see the plan step).
 concurrency:
   group: terraform-dev
   cancel-in-progress: false
@@ -64,6 +63,13 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform validate
 
+      # -lock=false: this job runs as a plan-only role that has no DynamoDB delete permission
+      # (DeleteItem was removed on purpose: it would let CI release a lock held by someone's apply).
+      # Terraform releases a DynamoDB lock by deleting it, so a locked plan here would leave a stale lock.
+      # Skipping the lock is safe because this job never writes state; the worst case is a plan computed
+      # against the state from just before a concurrent apply, which a rerun fixes. Applies still lock.
+      # To lock CI plans again without re-adding DeleteItem on the table, move the backend to S3 native
+      # locking (use_lockfile = true): release then needs s3:DeleteObject on one .tflock object only.
       - name: Terraform plan
         working-directory: ${{ env.TF_DIR }}
-        run: terraform plan -input=false -lock-timeout=60s -no-color
+        run: terraform plan -input=false -lock=false -no-color

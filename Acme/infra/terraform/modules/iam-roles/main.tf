@@ -274,7 +274,7 @@ resource "aws_iam_role_policy" "plan_read" {
   policy = data.aws_iam_policy_document.plan_read.json
 }
 
-# Remote state access: plan reads this environment's state and takes its lock, but never writes state
+# Remote state access: plan reads this environment's state and checksum; it takes no lock and never writes state
 data "aws_iam_policy_document" "state" {
   statement {
     sid       = "StateBucketList"
@@ -294,19 +294,18 @@ data "aws_iam_policy_document" "state" {
     resources = ["arn:aws:s3:::${var.state_bucket}/${var.name}/*"]
   }
 
-  # Lock item and the digest item plan reads; nothing for other environments' state
+  # State checksum (digest item) that plan verifies the state against.
+  # CI plans run with -lock=false (see .github/workflows/terraform-plan.yml), so no PutItem/DeleteItem:
+  # the role can't take, hold or release any lock.
   statement {
-    sid       = "StateLock"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+    sid       = "StateDigestRead"
+    actions   = ["dynamodb:GetItem"]
     resources = ["arn:aws:dynamodb:${local.region}:${local.account_id}:table/${var.lock_table}"]
 
     condition {
       test     = "ForAllValues:StringEquals"
       variable = "dynamodb:LeadingKeys"
-      values = [
-        "${var.state_bucket}/${local.state_key}",
-        "${var.state_bucket}/${local.state_key}-md5",
-      ]
+      values   = ["${var.state_bucket}/${local.state_key}-md5"]
     }
   }
 }

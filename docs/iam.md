@@ -9,7 +9,7 @@ why each statement exists, so you can change it without guessing.
 | Role | `dev-github-actions-plan` (one per environment: `<env>-github-actions-plan`) |
 | Defined in | [`Acme/infra/terraform/modules/iam-roles/main.tf`](../Acme/infra/terraform/modules/iam-roles/main.tf), called from [`environments/dev/main.tf`](../Acme/infra/terraform/environments/dev/main.tf) |
 | Used by | [`.github/workflows/terraform-plan.yml`](../.github/workflows/terraform-plan.yml) |
-| Capability | Plan only: reads configuration and state, takes the state lock, writes nothing |
+| Capability | Plan only: reads configuration and state, takes no state lock, writes nothing |
 | Session length | 1 hour (`max_session_duration = 3600`) |
 | Account / region | `401352756330` / `us-east-1` |
 
@@ -135,15 +135,29 @@ the cluster exists.
 |---|---|---|---|
 | `StateBucketList` | `s3:ListBucket` | the state bucket, **with** `s3:prefix` = `N/` or `N/*` | Lets the backend check for this environment's state objects. Without `ListBucket`, S3 reports a missing object as AccessDenied instead of NotFound. The prefix condition hides other environments' keys |
 | `StateRead` | `s3:GetObject` | `ckerins-tfstate-12345/N/*` | Read this environment's state. State stores values in plaintext, so `account/` and other environments' state stay unreadable |
-| `StateLock` | `dynamodb:GetItem`, `PutItem`, `DeleteItem` | the lock table, **with** `dynamodb:LeadingKeys` = `<bucket>/N/terraform.tfstate` and `…-md5` | Take and release this environment's lock, and read its state checksum. The role can't hold or clear another environment's lock |
+| `StateDigestRead` | `dynamodb:GetItem` | the lock table, **with** `dynamodb:LeadingKeys` = `<bucket>/N/terraform.tfstate-md5` | Read this environment's state checksum, which plan verifies the downloaded state against. This is the digest item only, not the lock item |
 
-There is no `s3:PutObject`. Plan never writes state.
+There is no `s3:PutObject`, so plan never writes state. There is also no `dynamodb:PutItem` or `DeleteItem`, so the role can't take, hold or release any lock.
+
+#### Why CI plans don't lock
+The workflow runs `terraform plan -lock=false`. Terraform releases a DynamoDB lock by deleting the lock item, so a plan that
+locks would need `DeleteItem`. That permission was removed on purpose, because it would let a CI job release a lock held by someone's
+`apply` and let a second writer in. IAM can't limit `DeleteItem` to "locks this role created": `LeadingKeys` scopes the item key, and every
+dev run uses the same key. So with DynamoDB locking, the choice is either "CI can delete dev's lock" or "CI plans don't lock".
+
+Skipping the lock is safe here because this role never writes state. The worst case is a plan computed against the state from just before
+a concurrent apply. S3 writes state as a whole object, so the plan sees the old state or the new one, never a partial one, and a rerun fixes it.
+Applies still lock as normal. The workflow's `concurrency` group keeps CI plans from overlapping each other.
+
+To lock CI plans again, don't re-add `DeleteItem` on the table. Instead, move the backend to S3 native locking (`use_lockfile = true`, Terraform 1.10+).
+Releasing the lock then needs `s3:DeleteObject` on a single `N/terraform.tfstate.tflock` object, which is a much narrower grant.
 
 This policy assumes each environment's backend key is `"<env>/terraform.tfstate"`, set in `environments/<env>/terraform.tf`.
 If a backend key changes, this policy has to change with it.
 
 ### What the role deliberately can't do
-- Read any other environment's state, or hold or clear its lock.
+- Read any other environment's state.
+- Take, hold or release any state lock, its own environment's included.
 - Read data: S3 objects outside its state prefix, your SSM parameters, Secrets Manager values, DynamoDB rows, Lambda code.
 - Decrypt with KMS.
 - Read EC2 instance user data.
@@ -160,8 +174,8 @@ accounts would remove it, and that's out of scope here.
 
 | Check | What it proves | Status |
 |---|---|---|
-| [`simulate-plan-role.sh`](../Acme/infra/scripts/tests/simulate-plan-role.sh) (IAM policy simulator, 32 cases) | The policy logic: allowed actions are allowed, out-of-scope ones denied, user data explicitly denied. Condition values are supplied by hand | Passing |
-| `terraform-plan` workflow on `mod5` | The real trust match, plus real condition values for the region lock, the SSM AMI lookup, state read and the DynamoDB lock | Passing |
+| [`simulate-plan-role.sh`](../Acme/infra/scripts/tests/simulate-plan-role.sh) (IAM policy simulator, 34 cases) | The policy logic: allowed actions are allowed, out-of-scope ones denied (including every lock write), user data explicitly denied. Condition values are supplied by hand | Passing |
+| `terraform-plan` workflow on `mod5` | The real trust match, plus real condition values for the region lock, the SSM AMI lookup, the state read and the checksum read, with `-lock=false` | Passing |
 | Negative trust test: push from throwaway branch `trust-check` (run `37536403620`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted |
 | Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM statements against real resources. `terraform plan` only calls APIs for resources already in state | **Not yet done** |
 
@@ -180,6 +194,7 @@ Acme/infra/scripts/tests/simulate-plan-role.sh stage  # once a stage role exists
   stage gets `["main"]`, and prod gets `["main"]` before moving to a GitHub Environment with required reviewers.
   Before you do this, give the node group role an environment-scoped name. The full checklist is in the future-environments note at the top of
   [`modules/iam-roles/main.tf`](../Acme/infra/terraform/modules/iam-roles/main.tf).
+- **Lock CI plans.** Switch the backend to S3 native locking (see [Why CI plans don't lock](#why-ci-plans-dont-lock)). Don't re-add DynamoDB `DeleteItem`.
 - **Run plan on pull requests.** Add the `repo:<repo>:pull_request` `sub` value to the trust policy on purpose. It isn't a branch pattern.
 - **Plan fails with AccessDenied.** The error names the action and the resource. Add the action to the statement for that
   service, with the narrowest scope the action supports. Check the service's IAM reference before falling back to `*`. Then rerun the simulator and add a case for it.
