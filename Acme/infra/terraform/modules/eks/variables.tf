@@ -18,6 +18,16 @@ variable "subnet_ids" {
   type        = list(string)
 }
 
+variable "endpoint_public_access_cidrs" {
+  description = "CIDRs allowed to reach the public Kubernetes API endpoint. No default, so callers can't inherit the module's 0.0.0.0/0."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.endpoint_public_access_cidrs) > 0 && !contains(var.endpoint_public_access_cidrs, "0.0.0.0/0")
+    error_message = "Provide at least one CIDR, and not 0.0.0.0/0."
+  }
+}
+
 variable "node_instance_types" {
   type    = list(string)
   default = ["t3.small"]

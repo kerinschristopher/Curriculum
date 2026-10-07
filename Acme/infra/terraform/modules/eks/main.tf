@@ -8,9 +8,11 @@ module "eks" {
   vpc_id     = var.vpc_id
   subnet_ids = var.subnet_ids
 
-  # Public API endpoint so your laptop and GitHub's runners can reach it.
-  # Tighten with endpoint_public_access_cidrs later.
-  endpoint_public_access = true
+  # Public Kubernetes API endpoint, reachable only from the allowlisted CIDRs (the module default is
+  # 0.0.0.0/0). Nodes use the private endpoint, and Terraform and CI talk to the AWS EKS API rather
+  # than this endpoint, so the list only needs the hosts that run kubectl.
+  endpoint_public_access       = true
+  endpoint_public_access_cidrs = var.endpoint_public_access_cidrs
 
   # Cluster admin is a named principal, not "whoever runs Terraform".
   # enable_cluster_creator_admin_permissions (and the KMS default below) derive the admin from the
