@@ -8,7 +8,7 @@ resources:
   - ../../base
 
 images:
-  - name: sample-api
+  - name: ghcr.io/kerinschristopher/sample-api
     newTag: 0.1.1
 
 configMapGenerator:
