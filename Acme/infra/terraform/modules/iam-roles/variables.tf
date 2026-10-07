@@ -8,10 +8,20 @@ variable "github_repo" {
   type        = string
 }
 
+# Required on purpose: a caller that forgets it should fail, not inherit a value.
 variable "github_branches" {
-  description = "Branch patterns (StringLike, e.g. \"mod*\") whose workflows may assume the role"
+  description = "Branch patterns (StringLike, e.g. \"mod*\") whose workflows may assume the role. StringLike's * also matches /, so every pattern needs a matching GitHub ruleset target (mod* -> mod* and mod*/**/*)"
   type        = list(string)
-  default     = ["main"]
+
+  validation {
+    condition     = length(var.github_branches) > 0
+    error_message = "github_branches must name at least one branch."
+  }
+
+  validation {
+    condition     = alltrue([for b in var.github_branches : !startswith(b, "*")])
+    error_message = "github_branches entries can't start with *. Name branches explicitly, or use a prefix pattern (e.g. \"mod*\") backed by a GitHub ruleset."
+  }
 }
 
 variable "state_bucket" {

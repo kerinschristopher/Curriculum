@@ -44,7 +44,8 @@ module "iam_roles" {
   state_bucket = "ckerins-tfstate-12345"
   lock_table   = "terraform-locks"
 
-  # "mod*" matches every module branch (mod5, mod6, ...) with no further edits
+  # "mod*" is only safe because the trusted-branches ruleset (Acme/infra/github/) limits who can
+  # create, push to or delete main, mod* and mod*/**/*. Change this list and the ruleset together.
   github_branches = ["main", "mod*"]
 
   tags = {

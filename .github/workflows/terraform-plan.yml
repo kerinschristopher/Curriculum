@@ -1,13 +1,12 @@
 name: terraform-plan
 
-# The role's trust policy accepts tokens from a push (or manual run) on `main` and `mod*` branches only
-# (github_branches in environments/dev/main.tf). Other branches fail at the assume-role step.
+# Manual runs only: gh workflow run terraform-plan.yml --ref <branch>
+# The OIDC `sub` follows the ref the run is dispatched on. The role trusts `main` and `mod*` only
+# (github_branches in environments/dev/main.tf); other refs fail at the assume-role step.
+# Who can create or push those refs is set by the trusted-branches ruleset (Acme/infra/github/).
+# The trigger, the trust list and the ruleset move together: change one, check the other two.
 # A pull_request trigger would produce a different `sub` claim and be rejected.
 on:
-  push:
-    paths:
-      - "Acme/infra/terraform/**"
-      - ".github/workflows/terraform-plan.yml"
   workflow_dispatch:
 
 # id-token: write is required, or GitHub will not issue an OIDC token at all.
