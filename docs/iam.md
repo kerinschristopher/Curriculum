@@ -77,10 +77,34 @@ The `sub` claim identifies where the job ran. For a push or manual run, it looks
   any repo on GitHub could assume this role. It is the most important line in the policy.
 - **Pins the branches.** Dev allows `main` and `mod*` (set in `environments/dev/main.tf` via `github_branches`). The operator is
   `StringLike`, so `mod*` matches `mod5`, `mod6` … `mod12` without editing Terraform for each new module branch.
-  The module itself defaults to `["main"]`, so a new environment is locked down unless its caller opens it up.
+  The module has no default for `github_branches`, and validation rejects any entry starting with `*`. A new environment has to
+  name its branches; forgetting the argument fails instead of inheriting something.
 
-Why not allow every branch (`*`)? Then anyone who can push any branch, such as a scratch branch or a compromised contributor's,
-gets the role. Narrowing to known branch patterns means a push to `feature/x` gets a valid GitHub token that AWS rejects.
+A pattern in the trust list is only as narrow as the set of people who can create a branch matching it. That half lives in GitHub,
+in the `trusted-branches` ruleset ([`Acme/infra/github/trusted-branches-ruleset.json`](../Acme/infra/github/trusted-branches-ruleset.json)).
+It covers `main`, `mod*` and `mod*/**/*`, and only repository admins can create, push to, delete or force-push those branches.
+The two systems read `*` differently. IAM's `*` matches `/`, so trust `mod*` accepts `mod/anything`. GitHub matches ruleset patterns
+with `fnmatch` in pathname mode, where `*` stops at `/`, and so does `**` unless it's written as `**/`. A ruleset on `mod*` alone, or on `mod**`
+(tried, and confirmed with the `rules/branches` API), leaves `mod/anything` open to collaborators while AWS still trusts it.
+`mod*/**/*` closes that gap.
+
+Why not allow every branch (`*`)? The workflow file lives in the same repo, so whoever can push a trusted branch can edit the
+workflow and run anything with the role. Trusting `*` hands the role to anyone who can push any branch. Narrowing to ruleset-protected
+patterns means a push to `feature/x` gets a valid GitHub token that AWS rejects.
+
+### Triggering the workflow
+The workflow runs on `workflow_dispatch` only, with no `push` trigger. A push trigger would run on whatever branch the pusher
+chose, with whatever workflow they had written. Dispatch from a branch with:
+
+```bash
+gh workflow run terraform-plan.yml --ref mod5
+```
+
+The run's ref sets the `sub` claim, so every branch you dispatch from has to be in `github_branches`. Don't add an input that
+checks out a different branch while the run sits on `main`. That would run untrusted code under `main`'s trust. GitHub only offers
+dispatch for workflows whose file exists on the default branch, so the workflow file has to be on `main` before any branch can run it.
+
+The trigger, the trust list and the ruleset move together. Changing one means checking the other two.
 
 ### What the trust policy deliberately doesn't accept (yet)
 - **`pull_request` events.** A PR-triggered job has `sub = repo:<repo>:pull_request`, which matches no pattern here, so PR plans are
@@ -175,8 +199,12 @@ accounts would remove it, and that's out of scope here.
 | Check | What it proves | Status |
 |---|---|---|
 | [`simulate-plan-role.sh`](../Acme/infra/scripts/tests/simulate-plan-role.sh) (IAM policy simulator, 34 cases) | The policy logic: allowed actions are allowed, out-of-scope ones denied (including every lock write), user data explicitly denied. Condition values are supplied by hand | Passing |
-| `terraform-plan` workflow on `mod5` | The real trust match, plus real condition values for the region lock, the SSM AMI lookup, the state read and the checksum read, with `-lock=false` | Passing |
-| Negative trust test: push from throwaway branch `trust-check` (run `37536403620`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted |
+| `terraform-plan` workflow on `mod5` | The real trust match, plus real condition values for the region lock, the SSM AMI lookup, the state read and the checksum read, with `-lock=false` | Passing (push-triggered); re-check with `gh workflow run --ref mod5` pending |
+| Negative trust test: push from throwaway branch `trust-check` (run `37536403620`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted. Historical: ran under the old push trigger |
+| Negative trust test, dispatch: `gh workflow run --ref trust-check` | Same rejection with the manual trigger | Pending |
+| No push trigger: push `mod5` | A push starts no workflow run | Pending |
+| Ruleset coverage: `gh api repos/kerinschristopher/Curriculum/rules/branches/<name>` (encode `/` as `%2F`) | `main`, `mod5`, `modern`, `mod/evil` and `mod/a/b` get all four rules, and `trust-check` and `feature/mod5` get none | Passed |
+| Ruleset enforcement: push `HEAD:mod/evil` with admin bypass set to "pull requests only" | A push that doesn't bypass is rejected | Pending |
 | Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM statements against real resources. `terraform plan` only calls APIs for resources already in state | Passed: 58 resources refreshed with no AccessDenied, and `No changes` at `eb34972`, after naming the cluster admin explicitly (see `modules/eks/main.tf`) |
 
 Run the simulator from WSL with AWS credentials that can call `iam:SimulatePrincipalPolicy`:
@@ -188,8 +216,9 @@ Acme/infra/scripts/tests/simulate-plan-role.sh stage  # once a stage role exists
 
 ## Changing the role
 
-- **Allow another branch.** Add a pattern to `github_branches` in `environments/<env>/main.tf`. New `modN` branches already
-  match `mod*` and need no change.
+- **Allow another branch.** Add it to `github_branches` in `environments/<env>/main.tf` **and** to the `trusted-branches` ruleset's
+  include list, then re-apply the ruleset (`gh api -X PUT repos/kerinschristopher/Curriculum/rulesets/<id> --input Acme/infra/github/trusted-branches-ruleset.json`).
+  A trusted branch that the ruleset doesn't cover is open to every collaborator. New `modN` branches already match both and need no change.
 - **Add stage or prod.** Call the same module with `name = "stage"` or `"prod"`. Tighten trust as you go from dev to stage to prod:
   stage gets `["main"]`, and prod gets `["main"]` before moving to a GitHub Environment with required reviewers.
   Before you do this, give the node group role an environment-scoped name. The full checklist is in the future-environments note at the top of
