@@ -248,15 +248,23 @@ jobs:
           [ "$CHANGES" = success ] && { [ "$PLAN" = success ] || [ "$PLAN" = skipped ]; }
 
   # Separate from the plan so that only this job can write to the PR, and it never has AWS access.
+  # It also runs when the plan failed or was skipped, so an earlier push's plan is never left
+  # looking current. Not for fork PRs (no plan, and their token can't comment) or a cancelled
+  # plan (the newer run that cancelled it will comment).
   comment:
     needs: plan-dev
-    if: github.event_name == 'pull_request'
+    if: >-
+      always()
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && needs.plan-dev.result != 'cancelled'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       pull-requests: write # lets the job post the plan comment
     steps:
       - name: Download the text plan
+        if: needs.plan-dev.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: plan-dev-text
@@ -266,40 +274,59 @@ jobs:
       # controls (branch name, title, plan text) can be injected into the JavaScript.
       - name: Comment the plan on the PR
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PLAN_RESULT: ${{ needs.plan-dev.result }} # success, failure or skipped
         with:
           script: |
             const fs = require('fs');
             const marker = '<!-- terraform-plan:dev -->';
-            let plan = fs.readFileSync(`${process.env.RUNNER_TEMP}/plan.txt`, 'utf8');
-
-            // An outputs-only plan has no "Plan:" line.
-            const summary =
-              (plan.match(/^(Plan: .*|No changes\..*)$/m) || [])[0]
-              || (/^Changes to Outputs:/m.test(plan) ? 'No resource changes; only output values change.' : '(no summary line found)');
-
-            const limit = 60000; // GitHub comments max out at 65,536 characters
-            if (plan.length > limit) {
-              plan = plan.slice(0, limit) + '\n\n... truncated; see the workflow run summary for the full plan.';
-            }
-
+            const result = process.env.PLAN_RESULT;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const sha = context.payload.pull_request.head.sha.slice(0, 7);
-            const body = [
-              marker,
-              '### Terraform plan: `environments/dev`',
-              '',
-              `**${summary}**`,
-              '',
-              `Commit \`${sha}\` · [workflow run](${runUrl})`,
-              '',
-              '<details><summary>Full plan</summary>',
-              '',
-              '```',
-              plan,
-              '```',
-              '',
-              '</details>',
-            ].join('\n');
+
+            let body;
+            if (result === 'success') {
+              let plan = fs.readFileSync(`${process.env.RUNNER_TEMP}/plan.txt`, 'utf8');
+
+              // An outputs-only plan has no "Plan:" line.
+              const summary =
+                (plan.match(/^(Plan: .*|No changes\..*)$/m) || [])[0]
+                || (/^Changes to Outputs:/m.test(plan) ? 'No resource changes; only output values change.' : '(no summary line found)');
+
+              const limit = 60000; // GitHub comments max out at 65,536 characters
+              if (plan.length > limit) {
+                plan = plan.slice(0, limit) + '\n\n... truncated; see the workflow run summary for the full plan.';
+              }
+
+              body = [
+                marker,
+                '### Terraform plan: `environments/dev`',
+                '',
+                `**${summary}**`,
+                '',
+                `Commit \`${sha}\` · [workflow run](${runUrl})`,
+                '',
+                '<details><summary>Full plan</summary>',
+                '',
+                '```',
+                plan,
+                '```',
+                '',
+                '</details>',
+              ].join('\n');
+            } else {
+              const why = result === 'failure'
+                ? 'The plan **failed** (or the policy check rejected it).'
+                : 'No plan ran: this push doesn\'t change dev, or fmt, validate or policy failed first.';
+              body = [
+                marker,
+                '### Terraform plan: `environments/dev`',
+                '',
+                `**No current plan for commit \`${sha}\`.** ${why} See the [workflow run](${runUrl}).`,
+                '',
+                'Any plan shown here earlier was for an older commit and has been removed.',
+              ].join('\n');
+            }
 
             // Update our earlier comment instead of adding a new one on every push.
             const comments = await github.paginate(github.rest.issues.listComments, {
@@ -309,7 +336,9 @@ jobs:
             });
             const existing = comments.find(c => c.user.type === 'Bot' && c.body && c.body.includes(marker));
 
-            if (existing) {
+            if (!existing && result === 'skipped') {
+              core.info('No plan ran and there is no earlier plan comment: nothing to update.');
+            } else if (existing) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,

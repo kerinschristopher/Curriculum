@@ -98,7 +98,7 @@ from the default branch, and GitHub disables them after 60 days without reposito
 | `policy` | Terraform changed | `contents: read` | none | Installs Conftest 0.71.1 (SHA-256 checked), runs `conftest verify`, and requires exactly 3 denies and 1 warning from the seeded bad plan |
 | `plan-dev` | dev changed, on a same-repo PR or a manual run; needs fmt, validate-result, policy | `contents: read`, `id-token: write` | **plan role**, `sub = …:pull_request` or `…:ref:refs/heads/<main or mod*>` | Calls `terraform-plan-reusable.yml` for `environments/dev` |
 | `plan-result` | always | `contents: read` | none | Aggregates `plan-dev` |
-| `comment` | `pull_request`, after plan-dev | `pull-requests: write` only | none | Posts the text plan as one PR comment (marker `<!-- terraform-plan:dev -->`), edited in place on later pushes, truncated at 60,000 characters |
+| `comment` | same-repo `pull_request`, after plan-dev, unless plan-dev was cancelled | `pull-requests: write` only | none | Posts the text plan as one PR comment (marker `<!-- terraform-plan:dev -->`), edited in place on later pushes, truncated at 60,000 characters. If the latest plan failed or was skipped, it replaces the old plan with a "no current plan for `<sha>`" note, so an older commit's plan never looks current (a skipped plan with no earlier comment posts nothing) |
 
 - **Pushes to `main`/`mod*`** run fmt, validate and policy only: no plan, no OIDC token.
 - **Fork PRs skip `plan-dev`**, because GitHub gives them no OIDC token. The post-merge plan in `terraform-apply.yml` still shows the reviewer the plan before anything is applied.
