@@ -230,6 +230,23 @@ jobs:
       role-arn: arn:aws:iam::401352756330:role/dev-github-actions-plan
       artifact-name: plan-dev
 
+  # The required check (main-merge-gate), not plan-dev: a job that calls a reusable workflow is
+  # reported as "plan-dev / plan" when it runs but as "plan-dev" when it's skipped, so requiring
+  # either name would leave some PRs waiting forever for a check that never reports.
+  plan-result:
+    needs: [changes, plan-dev]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: The dev plan passed (or the change didn't need one)
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          PLAN: ${{ needs.plan-dev.result }}
+        run: |
+          echo "changes=$CHANGES plan-dev=$PLAN"
+          [ "$CHANGES" = success ] && { [ "$PLAN" = success ] || [ "$PLAN" = skipped ]; }
+
   # Separate from the plan so that only this job can write to the PR, and it never has AWS access.
   comment:
     needs: plan-dev
