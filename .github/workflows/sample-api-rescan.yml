@@ -1,0 +1,90 @@
+name: sample-api-rescan
+
+# Daily re-scan of the published sample-api images. The image didn't change but the vulnerability
+# database did, so a scan that passed when the image was built says nothing about today. Scans:
+#   - the newest sha-* image: the most recent commit on main that has one (what main last built)
+#   - the newest release: the highest semver tag (what the overlays pin)
+# with the same thresholds as build-scan in sample-api-ci.yml. A finding turns the run red on the
+# Actions tab. Fix by rebuilding on a patched base or Go release, then tagging a new release.
+#
+# Scheduled workflows run only from the default branch, and GitHub disables them after 60 days
+# without repository activity.
+#
+# No token at all: the package is public, so listing tags and pulling need no credentials, and
+# the third-party scanner gets nothing worth stealing. If the package is ever made private, add
+# packages: read and a GHCR login to both jobs.
+#
+# Design: docs/design/module-6-ci-cd.md, Components §1a.
+
+on:
+  schedule:
+    - cron: "17 6 * * *" # daily, off the hour to avoid the top-of-hour rush
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sample-api-rescan
+  cancel-in-progress: true
+
+env:
+  REPOSITORY: kerinschristopher/sample-api
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.pick.outputs.images }}
+    steps:
+      # main's history orders the sha-* tags; tag names alone don't.
+      - name: Check out main (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pick the newest sha-* and the newest release
+        id: pick
+        run: |
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:${REPOSITORY}:pull" | jq -r .token)"
+          tags="$(curl -fsS -H "Authorization: Bearer $token" "https://ghcr.io/v2/${REPOSITORY}/tags/list" | jq -r '.tags[]')"
+          echo "Tags in GHCR:"; echo "$tags"
+
+          images=()
+          # sha-<7 chars of the commit>, as sample-api-ci.yml tags it
+          for c in $(git log --format=%H -n 500 origin/main); do
+            if grep -qx "sha-${c:0:7}" <<<"$tags"; then images+=("sha-${c:0:7}"); break; fi
+          done
+          [ ${#images[@]} -gt 0 ] || echo "::warning::No sha-* image for the last 500 commits on main"
+
+          release="$(grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags" | sort -V | tail -1 || true)"
+          if [ -n "$release" ]; then images+=("$release"); else echo "::warning::No semver release tag"; fi
+
+          [ ${#images[@]} -gt 0 ] || { echo "::error::Nothing to scan"; exit 1; }
+          json="$(printf '%s\n' "${images[@]}" | jq -R . | jq -cs .)"
+          echo "Scanning: $json"
+          echo "images=$json" >> "$GITHUB_OUTPUT"
+
+  rescan:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false # one vulnerable image shouldn't hide the other's result
+      matrix:
+        tag: ${{ fromJSON(needs.resolve.outputs.images) }}
+    steps:
+      - name: Scan ghcr.io/${{ env.REPOSITORY }}:${{ matrix.tag }} (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ env.REPOSITORY }}:${{ matrix.tag }}
+          version: v0.75.0 # same scanner and thresholds as build-scan in sample-api-ci.yml
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+          # Off until Module 7 adds caching deliberately (see sample-api-ci.yml).
+          cache: false
