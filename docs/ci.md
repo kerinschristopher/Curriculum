@@ -80,12 +80,12 @@ The first push needs a one-time manual setting: in the `sample-api` package's se
 | Job | Needs | Permissions | Does |
 |---|---|---|---|
 | `resolve` | none | `contents: read` | Lists the package's tags (anonymously: the package is public). Picks the newest `sha-*` image (walking `main`'s history from the tip) and the highest semver tag |
-| `rescan` (matrix: one leg per picked image) | resolve | `contents: read` | Trivy v0.75.0 against each image with `build-scan`'s thresholds. `fail-fast: false`, so one vulnerable image doesn't hide the other's result |
+| `rescan` (matrix: one leg per picked image) | resolve | none (`permissions: {}`) | Trivy v0.75.0 against each image with `build-scan`'s thresholds. `fail-fast: false`, so one vulnerable image doesn't hide the other's result |
 
 The image doesn't change between scans, but the vulnerability database does. A red run means a fix is available for something in a
 published image: rebuild (merge anything to the app, or bump Go or the base image), release, and move the overlays. Scheduled workflows run only
-from the default branch, and GitHub disables them after 60 days without repository activity. This workflow uses no token, so the scanner has
-nothing worth stealing. If the package is ever made private, both jobs need `packages: read` and a GHCR login.
+from the default branch, and GitHub disables them after 60 days without repository activity. Neither job logs in to GHCR, and the scanner job's
+`GITHUB_TOKEN` has no permissions, so the scanner has nothing worth stealing. If the package is ever made private, both jobs need `packages: read` and a GHCR login.
 
 ## `terraform-plan.yml`
 
