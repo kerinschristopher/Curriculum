@@ -160,7 +160,7 @@ merge to main ─────► sample-api-ci  ──► push image to GHCR    
 | A7 | The existing GHCR package `sample-api` (public, tag `0.1.1`) can be linked to the repo with Actions write access | Anonymous `tags/list` works, but package settings couldn't be read (no `read:packages` scope) |
 | A8 | GitHub-hosted runners (`ubuntu-24.04`) are acceptable. Actions minutes are free for public repos | Public repo |
 | P1 | Conftest is installed in WSL for local policy development | **Met** (2026-10-10): Conftest 0.71.1 (OPA 1.21.1) at `~/.local/bin/conftest` in WSL |
-| P2 | Python venv in WSL with `boto3` and `pytest` for the IAM policy tests (K1). Python 3.12.3 is present; `boto3` and `pytest` aren't installed yet | `python3 -c "import boto3"` fails in WSL (2026-10-10) |
+| P2 | Python venv in WSL with `boto3` and `pytest` for the IAM policy tests (K1) | **Met** (2026-10-10): `~/.venvs/iam-tests` (boto3 1.43.111, pytest 9.1.1). `python3-venv` isn't installed and sudo needs a password, so the venv is created `--without-pip` and bootstrapped with `get-pip.py` (steps in the test file's docstring) |
 
 ---
 
@@ -532,6 +532,23 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
   - `sample-api-ci.yml` also runs on `push` to `mod*`, keeping the old checks workflow's behaviour, so module branches get feedback before a PR exists. Only `main` publishes.
   - `go.mod` now says `go 1.26`, the minimum supported release, and the module is renamed from `myservice` to `sample-api` (F9).
   - Trivy's built-in DB cache is explicitly off until Module 7.
+
+**Phase 2 result (2026-10-10, on `mod6`, commits `c45a9f5` and `6761a81`):**
+- **K1, the simulator rewrite (its own commit):** `test_iam_policies.py` passes the same 34 plan-role cases as the bash script (9s against 22s). With bogus credentials it reports 34 ERRORs, where bash reported 34 policy FAILs.
+- **Apply-role cases tested before the apply:** 39 cases against the planned policies (`SIM_PLAN_JSON`) found one gap. Deleting dev's own state was only implicitly denied, so I added an explicit `DenyStateDeletes`, after which 73/73 passed. Against the live roles *before* the apply, 16 apply-role cases failed, which shows how broad the 9/29 role was: it could create untagged VPCs, read `account` state, and change CI identity. Against the live roles *after* the apply: 73/73.
+- **Plans, read before applying either:**
+  - `ci-iam`: 5 import, 4 add, 1 change, 0 destroy. The plan role was imported with no diff. The one change narrows the apply role's state policy from every key in the bucket to dev's. The 8 stale 9/29 entries, including the OIDC provider, are forgotten, not destroyed.
+  - `dev` with `-target=module.iam_roles`: 0/0/0, forgetting 3 entries.
+- **Applied the saved plans:** `ci-iam` first, then `dev`. Afterwards:
+  - Re-plans: `ci-iam` and `account` show **No changes**; `dev` holds no IAM.
+  - Neither role has a managed policy attached.
+  - A dispatched `terraform-plan` run on `mod6` assumed `dev-github-actions-plan` and planned dev with no AccessDenied (run `38030595372`).
+- **Deviations from this design:**
+  - **No `terraform state rm`.** The stale `ci-iam` entries are dropped by a `removed` block, so the step shows up in the plan and the commit and can be reviewed.
+  - **The module call is named `module "dev"`**, and the plan role's addresses were renamed (`aws_iam_role.plan`, `plan_state`).
+  - **Managed policies are detached** by `aws_iam_role_policy_attachments_exclusive` with an empty list, which also stops them coming back.
+  - **Dev's apply must be targeted** while dev is torn down: an untargeted apply would also create the 55 VPC/EKS resources.
+  - **The `removed`/`import` blocks can be deleted** in a later commit, once the handover has been applied.
 
 ---
 
