@@ -595,6 +595,18 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 - **Pending after merge:** the first scheduled or dispatched re-scan (the workflow must be on `main` to be dispatched).
 - **Follow-up after merge:** tag a release from `main` (for example `v0.2.0`), then move the three overlays off `0.1.1`.
 
+**Phase 5 result (2026-10-10):**
+- **`plan-result` first (`2bf9441`).** PR #9 showed that a job calling a reusable workflow reports as `plan-dev / plan` when it runs but as `plan-dev` when it's skipped, so neither name could be required. `plan-result` aggregates it, like `test-result`.
+- **Ruleset created:** `main-merge-gate` (id `24832716`, active) from `Acme/infra/github/main-merge-gate-ruleset.json`, with your OK. It requires a PR with 0 approvals (you can't approve your own PR). It requires 8 checks pinned to GitHub Actions (`integration_id` 15368, checked against PR #9's check runs): `lint`, `test-result`, `kustomize`, `build-scan`, `fmt`, `validate-result`, `policy`, `plan-result`. Admin bypass is `pull_request` only.
+- **Checks:**
+  - `GET rules/branches/main` lists both rulesets with the 8 contexts.
+  - PR #9 reports all 8 as required, and all pass.
+  - A direct push to `main` of an empty test commit was **refused** with GH013 ("Changes must be made through a pull request", "8 of 8 required status checks are expected"); `main` stayed at `895d3b6`. Admin bypass of `trusted-branches` doesn't carry over: each ruleset has its own bypass list.
+- **Not yet shown:** a PR with a *failing* required check is blocked. PR #9 has none failing, and I didn't open a second throwaway PR. It's observable on any PR whose check fails, or with a deliberately broken branch.
+- **Live bypass state (K4), 2026-10-10:**
+  - `trusted-branches` (`24627971`): `{actor_id: 5, RepositoryRole (admin), bypass_mode: always}`.
+  - `main-merge-gate` (`24832716`): `{actor_id: 5, RepositoryRole (admin), bypass_mode: pull_request}`.
+
 ---
 
 ## Risks / Constraints
