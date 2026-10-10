@@ -202,7 +202,7 @@ The old Module 6 attempt (PR #6, now `depmod6`) was rejected with a review (2026
 | T3 | Layout: provider in `account/`, both CI roles in `ci-iam/`, no IAM in `dev` | Follow-up "IAM handover" | **Matches Q1** | Components §5 |
 | T4 | No graceful shutdown (SIGTERM drops in-flight requests) | Review; inline `main.go:51` | **Module 6 phase 1** | FR8; F21 |
 | T5 | No readiness/liveness probes | Review; inline `deployment.yaml:18` | **Resolved in Module 5** | `base/deployment.yaml:48,54` |
-| T6 | `terraform-apply.yml` approves destroy blind (gate before any plan exists) | Review; inline `terraform-apply.yml:44` | **Module 6 phase 3** | Ungated `plan` job, then the env-gated `apply` job consumes the saved plan (Components §3; Q3) |
+| T6 | `terraform-apply.yml` approves destroy blind (gate before any plan exists) | Review; inline `terraform-apply.yml:44` | **Module 6 phase 3: built (`385270c`); the after-merge check is pending** | Ungated `plan` job, then the env-gated `apply` job consumes the saved plan (Components §3; Q3) |
 | T7 | `docs/ci.md` documents Trivy caches that don't exist | Review; inline `docs/ci.md:140` | **Module 6 phase 6** | `docs/ci.md` is written last and describes only what exists (FR7). Trivy/layer caching is Module 7 |
 | T8 | No `securityContext` | Review; inline `deployment.yaml:18` | **Resolved in Module 5** | `base/deployment.yaml:17-21,61-63` |
 | T9 | No `namespace` per overlay | Review; inline `overlays/dev/kustomization.yaml:4` | **Resolved in Module 5** | `namespace: sample-api-{dev,stage,prod}` |
@@ -236,7 +236,7 @@ The PR #5 approval (bgblackmore, 2026-10-07) deferred these items to Module 6.
 | K2 | Document that the simulator **can't run on PRs**: it needs `iam:SimulatePrincipalPolicy`, which the plan role deliberately lacks, so it would need a second, more privileged principal | **Module 6 phase 6** | `docs/iam.md`, next to the verification table, so the tests don't look automatable when they aren't |
 | K3 | `go test` in CI, with the **first test written test-first for `LOG_LEVEL` parsing** (a "do-over, not a backfill") | **Module 6 phase 1** | Extract `parseLogLevel(raw string) (slog.Level, error)`; write its failing table test (case-insensitive, whitespace, unknown value rejected) before moving the code; then `healthHandler` and `newMux` tests (FR8) |
 | K4 | Paste the **live ruleset bypass state** into `docs/iam.md` so the doc matches reality (the reviewer can't see bypass actors with write access) | **Module 6 phase 6** | Captured 2026-10-10: `trusted-branches` (`24627971`) `bypass_actors: [{actor_type: RepositoryRole, actor_id: 5 (admin), bypass_mode: always}]`, `current_user_can_bypass: always`. Proven in practice: the PR #8 merge needed admin bypass (`mergeStateStatus: BLOCKED` without it) |
-| K5 | `endpoint_public_access_cidrs = ["68.237.90.102/32"]` (a home IP) is committed in a public repo: a disclosure, and it breaks when the ISP rotates the address | **Open (Q14)** | `environments/dev/main.tf:31` |
+| K5 | `endpoint_public_access_cidrs` held a home IP committed in a public repo: a disclosure, and it breaks when the ISP rotates the address | **Resolved in Module 6 phase 3 (`2928b8e`, Q14)** | `eks_public_access_cidrs` in `environments/dev/variables.tf`: sensitive, no committed value, gitignored `dev.auto.tfvars` locally. The old IP stays in git history |
 
 ---
 
@@ -483,7 +483,7 @@ Why a separate `ci-iam` root: if CI applied the root containing its own roles, t
 |---|---|---|
 | Environment `dev-apply` (exists) | Required reviewer `kerinschristopher`; deployment branches: `main` only; no secrets | New `dev-apply-environment.json` plus the `gh api -X PUT` command in `docs/ci.md` |
 | Ruleset `trusted-branches` (exists) | Unchanged | `trusted-branches-ruleset.json` |
-| Ruleset `main-merge-gate` (new) | Target `main`: require a PR; required checks `test-result` (never the per-version matrix legs), `lint`, `kustomize`, `build-scan`, `terraform-plan / plan-dev`, `fmt`, `validate`; admin bypass "pull requests only" | New `main-merge-gate-ruleset.json` |
+| Ruleset `main-merge-gate` (new) | Target `main`: require a PR; required checks `test-result` (never the per-version matrix legs), `lint`, `kustomize`, `build-scan`, `terraform-plan / plan-dev`, `fmt`, `validate-result` (never the per-root `validate` legs); admin bypass "pull requests only" | New `main-merge-gate-ruleset.json` |
 | GHCR package `sample-api` | Manage Actions access: `Curriculum` gets **Write** | Manual. Documented in `docs/ci.md` |
 
 #### 7. Documentation
@@ -517,7 +517,7 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | 2 | **IAM handover, alone in its own commit.** Preceded by its own commit: the Python/pytest IAM policy tests (K1), with plan-role parity shown and apply-role cases passing before anything is applied. Then: New `ci-iam/` root on current code; `terraform state rm` the stale `ci-iam` entries (or use a new state key); `import` **both** the plan role and the existing apply role (F20); replace the apply role's managed policies with the narrow VPC-only inline policy; `removed { destroy = false }` in `dev` | Plan **both** stacks and read them before applying either: `dev` shows a state-only removal with nothing destroyed; `ci-iam` shows 2 imports, 0 creates, **0 destroys/replaces** (in-place policy updates on the apply role only). **Stop on any destroy or replace.** After apply, `aws iam list-attached-role-policies` is empty for both roles | Revert the commit; re-import the plan role into `dev` |
 | 3 | Plan/apply split and the gate: the plan role trusts `pull_request`; `terraform-plan.yml` on PRs (absorbs and deletes `terraform-checks.yml`); `terraform-apply.yml` (ungated plan job, then the env-gated apply job that applies the saved plan); `dev-apply-environment.json` | PR gets a plan comment; `Show AWS identity` prints `assumed-role/dev-github-actions-plan`. After merge: "Waiting for review" shows the plan **before** approval; rejecting creates nothing; approving applies; a dispatch from a non-`main` branch is rejected by the environment | Remove the trust value; restore the dispatch-only plan file; delete the apply workflow (the apply role is unused without it) |
 | 4 | Remaining concepts: extract `terraform-plan-reusable.yml` (`workflow_call`, no behaviour change), `sample-api-rescan.yml` (`schedule`), and the Conftest policy + tests wired into the reusable plan | The PR plan comment is identical before and after the refactor; `conftest verify -p Acme/infra/policies/terraform` passes and a seeded-bad fixture fails; a manual dispatch of the re-scan is green | Revert the commit |
-| 5 | `main-merge-gate` ruleset (required checks: `test-result`, `build-scan`, `kustomize`, `lint`, `fmt`, `validate`, `plan-dev`) | A PR with a failing check can't be merged | Disable the ruleset |
+| 5 | `main-merge-gate` ruleset (required checks: `test-result`, `build-scan`, `kustomize`, `lint`, `fmt`, `validate-result`, `plan-dev`) | A PR with a failing check can't be merged | Disable the ruleset |
 | 6 | `docs/ci.md` (new, including the self-hosted vs GitHub-hosted runner section) and `docs/iam.md` (the simulator-can't-run-on-PRs note, K2; the live bypass state, K4), **written last** so they describe what exists | Every claim maps to a file or a run (no documented caches or steps that don't exist) | Revert the commit |
 
 **Phase 0 result (2026-10-10, `main` at `895d3b6`):** all 9 Kustomize trees render (sample-api base + dev/stage/prod; infrastructure base + dev/stage/prod/kind). `account/`: **No changes**. `environments/dev`: **55 to add, 0 to change, 0 to destroy**. Every add is the deliberately torn-down VPC (14) and EKS (41) (A5); nothing existing is updated or destroyed, and the plan role is untouched. "Clean" for dev therefore means *no changes to anything that exists*. Conftest 0.71.1 was already installed (P1).
@@ -549,6 +549,29 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
   - **Managed policies are detached** by `aws_iam_role_policy_attachments_exclusive` with an empty list, which also stops them coming back.
   - **Dev's apply must be targeted** while dev is torn down: an untargeted apply would also create the 55 VPC/EKS resources.
   - **The `removed`/`import` blocks can be deleted** in a later commit, once the handover has been applied.
+
+**Phase 3 result (2026-10-10, on `mod6`, commits `cc311d2` to `8896f93`; the after-merge checks are pending):**
+- **Plan role trusts `pull_request` (`cc311d2`, its own commit).** A `trust_pull_requests` module variable (default `false`) is set in `ci-iam`.
+  - **Trust tests:** the simulator can't evaluate web-identity trust, so `test_iam_policies.py` gained a small StringEquals/StringLike evaluator and 17 trust cases. They cover other repos, the wrong `aud`, tags, case, `mainline` and the environment `sub`.
+  - **Before the apply:** the live roles failed exactly one case (the plan role allows `pull_request`), which shows the test can fail. The planned policies passed 90/90.
+  - **Apply:** `ci-iam` planned 0 add, 1 change, 0 destroy, and the saved plan was applied by a human after approval. Re-plan: **No changes**. Live roles: 90/90.
+- **`terraform-plan.yml` (`7eeba25`)** absorbs and deletes `terraform-checks.yml`.
+  - **Push run on `mod6`:** `changes`, `fmt`, the four `validate` legs and `validate-result` passed; `plan-dev` skipped, by design.
+  - **Dispatched run `38032295497`:** `plan-dev` printed `assumed-role/dev-github-actions-plan/...` and `Plan: 13 to add`.
+- **`enable_eks` (`4a7c950`):** a dev plan with the default (`false`) shows 13 adds, all VPC. With `enable_eks=true` it shows 55 adds, the same as phase 0.
+- **Q14 (`2928b8e`):**
+  - With EKS on and no CIDR, the plan exits 1 with the validation message, and the saved plan is `errored`/not `applyable`.
+  - With a CIDR, the plan shows 55 adds, and the CIDR appears only as `(sensitive value)`.
+- **`terraform-apply.yml` (`385270c`):** actionlint is clean. The plan and summary steps, extracted from the YAML and run locally against dev, set `has_changes` correctly and call out destroy and replace lines.
+- **`dev-apply` captured (`8896f93`):** both JSON files match the live environment field by field, compared read-only.
+- **Deviations from this design:**
+  - **`validate-result` aggregates the `validate` matrix** and is the phase 5 required check, for the same reason as `test-result`.
+  - **The NAT gateway and its EIP follow `enable_eks`.** Without this, the "$0 per merge while EKS is off" claim (Quality attributes, Cost) was false: both are billed hourly.
+  - **`terraform-plan.yml` also runs on `push` to `main`/`mod*`** (fmt and validate only, as `terraform-checks.yml` did). Fork PRs skip `plan-dev`, because they get no OIDC token.
+  - **Output-only plans:** dev's state still holds the pre-phase-2 `ci_role_arn` output, so a destroy dispatch on the torn-down dev is an outputs-only change. The summaries say so instead of "(no summary line found)".
+  - **The environment is captured as two files**, because the allowed branch is a separate API call. `can_admins_bypass: true` is captured as it is live: the only admin is the only reviewer.
+  - **New revisit trigger (R4):** with `enable_eks = true`, the public `tfplan` artifact would contain `eks_public_access_cidrs`.
+- **Pending:** when the module PR is opened, it should get the plan comment. After it merges, the run shows "Waiting for review" with the plan visible; rejecting applies nothing; approving applies 13 VPC resources; a dispatch of `terraform-apply` from `mod6` is refused by the environment (the workflow must exist on `main` before it can be dispatched). The apply role's multi-resource authorization (for example, `AssociateRouteTable` on the subnet and the route table) is first exercised by that real apply.
 
 ---
 
@@ -681,4 +704,4 @@ External references:
 | Q11 | AWS account and region: stay on the single account `401352756330` / `us-east-1`? | kerinschristopher | Decided (2026-10-09): single account `401352756330`, `us-east-1` |
 | Q12 | Migrate state locking to S3 `use_lockfile` during Module 6 or afterwards? | kerinschristopher | Decided (2026-10-09): afterwards, as its own change |
 | Q13 | Tell the PR #6 reviewer that `dev-github-actions-apply` and a stale `ci-iam` state already exist (F20), so the handover imports **both** roles, and that `LOG_LEVEL` and the EKS endpoint are already fixed (F22). Do it before phase 2 | kerinschristopher | Resolved (2026-10-10): the reviewer is aware of all relevant imports |
-| Q14 | How to stop committing the home IP (K5)? Suggested: a root variable with **no committed value** and `sensitive = true` (so plan output and PR comments show `(sensitive value)`), supplied locally from a gitignored `dev.auto.tfvars` (`*.tfvars` is already ignored) and in CI from a repository variable as `TF_VAR_…`. Only needed while `enable_eks = true`, so it can default to `[]` with validation conditional on the toggle | kerinschristopher | Open |
+| Q14 | How to stop committing the home IP (K5)? Suggested: a root variable with **no committed value** and `sensitive = true` (so plan output and PR comments show `(sensitive value)`), supplied locally from a gitignored `dev.auto.tfvars` (`*.tfvars` is already ignored) and in CI from a repository variable as `TF_VAR_…`. Only needed while `enable_eks = true`, so it can default to `[]` with validation conditional on the toggle | kerinschristopher | Decided (2026-10-10): yes, as suggested. Done in phase 3 (`2928b8e`) |
