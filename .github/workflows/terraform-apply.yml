@@ -1,0 +1,139 @@
+name: terraform-apply
+
+# After a merge to main that touches the dev Terraform: plan, show the plan, wait for a human to
+# approve it, then apply exactly that plan.
+#
+#   plan   (no gate)  read-only plan role; saves tfplan, writes it to the run summary, uploads it
+#   apply  (gated)    environment dev-apply: waits for the required reviewer, then assumes the
+#                     apply role and applies the saved tfplan. Skipped when the plan has no changes.
+#
+# The plan job finishes before the approval request appears, so the reviewer reads the plan on
+# the run page first. Rejecting (or never approving) applies nothing; approval requests expire
+# after 30 days, but the saved plan only lives 1 day, so approve within 24 h or re-run.
+#
+# Trigger/trust/environment coupling:
+#   plan  assumes dev-github-actions-plan with sub "repo:<repo>:ref:refs/heads/main" (push), or
+#         the dispatched branch (trusted only for main and mod*).
+#   apply assumes dev-github-actions-apply, whose trust accepts only
+#         sub "repo:<repo>:environment:dev-apply". GitHub issues that token only after the
+#         environment's rules pass: required reviewer kerinschristopher
+#         (Acme/infra/github/dev-apply-environment.json), deployment branch main
+#         (dev-apply-branch-policy.json). A dispatch from any other branch can plan but is
+#         refused at the environment, before any credential exists. The environment allows admin
+#         bypass (can_admins_bypass); the only admin is the reviewer, see docs/iam.md.
+# Roles live in Acme/infra/terraform/ci-iam (human-applied). Change these together.
+#
+# Design: docs/design/module-6-ci-cd.md, Components §3.
+
+on:
+  # Not a required check, so a path filter is safe here.
+  push:
+    branches: [main]
+    paths:
+      - Acme/infra/terraform/environments/dev/**
+      - Acme/infra/terraform/modules/**
+      - .github/workflows/terraform-apply.yml
+      - .github/workflows/terraform-plan-reusable.yml
+  # Re-apply, or tear dev down at the end of the day. Goes through the same gate.
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "apply = create/update dev; destroy = delete everything in environments/dev"
+        type: choice
+        options: [apply, destroy]
+        default: apply
+
+permissions:
+  contents: read
+
+# One run at a time, in order. Never cancel: a killed apply can leave half-made resources and a
+# held state lock. A newer run waits; if several pile up, GitHub keeps only the newest pending one.
+concurrency:
+  group: terraform-dev-apply
+  cancel-in-progress: false
+
+env:
+  TF_DIR: Acme/infra/terraform/environments/dev
+  # Keep equal to TF_VERSION in terraform-plan-reusable.yml and terraform-plan.yml.
+  TF_VERSION: "1.16.3"
+  AWS_REGION: us-east-1
+  PLAN_ARTIFACT: tfplan-dev
+
+jobs:
+  # The plan (OIDC as the read-only plan role, init, plan -lock=false -detailed-exitcode, run
+  # summary, artifacts) is shared with terraform-plan.yml. With save-plan, the binary tfplan and
+  # lock file are uploaded for the apply job below; see the reusable workflow for why that
+  # artifact is short-lived and deleted. `env` isn't available in a `with:` for a called
+  # workflow, hence the literals (they must match PLAN_ARTIFACT and TF_DIR).
+  plan:
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/terraform-plan-reusable.yml
+    with:
+      working-directory: Acme/infra/terraform/environments/dev
+      role-arn: arn:aws:iam::401352756330:role/dev-github-actions-plan
+      artifact-name: tfplan-dev
+      save-plan: true
+      destroy: ${{ inputs.action == 'destroy' }}
+      gated: true
+
+  apply:
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04
+    # Waiting for approval doesn't count; this bounds the apply itself (EKS takes ~15 min).
+    timeout-minutes: 60
+    # The gate: this job doesn't start until the required reviewer approves (or an admin bypasses
+    # the environment), and the apply role trusts only tokens issued for this environment.
+    environment: dev-apply
+    permissions:
+      contents: read
+      id-token: write
+      actions: write # delete the plan artifact afterwards
+    steps:
+      - name: Check out the commit that was planned
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Download the saved plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ env.PLAN_ARTIFACT }}
+          path: ${{ env.TF_DIR }}
+
+      - name: Assume the apply role via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::401352756330:role/dev-github-actions-apply
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-terraform-apply-${{ github.run_id }}
+
+      # Should print assumed-role/dev-github-actions-apply/...
+      - name: Show AWS identity
+        run: aws sts get-caller-identity --query Arn --output text
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false -lockfile=readonly
+
+      # Applies the approved plan and nothing else. Takes the state lock.
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -no-color tfplan
+
+      # always(): a failed apply also cleans up, instead of leaving the plan until it expires.
+      - name: Delete the plan artifact
+        if: always() && needs.plan.outputs.plan_artifact_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.plan.outputs.plan_artifact_id }}
+        run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"

@@ -1,75 +1,421 @@
 name: terraform-plan
 
-# Manual runs only: gh workflow run terraform-plan.yml --ref <branch>
-# The OIDC `sub` follows the ref the run is dispatched on. The role trusts `main` and `mod*` only
-# (github_branches in environments/dev/main.tf); other refs fail at the assume-role step.
-# Who can create or push those refs is set by the trusted-branches ruleset (Acme/infra/github/).
-# The trigger, the trust list and the ruleset move together: change one, check the other two.
-# A pull_request trigger would produce a different `sub` claim and be rejected.
-# fmt/validate of every root (not just dev) runs automatically in terraform-checks.yml.
-on:
-  workflow_dispatch:
+# What "passing" means for Terraform: every root is formatted and valid, and the dev plan runs
+# cleanly as the read-only plan role. On a PR the dev plan is posted as one comment (updated on
+# every push), so the reviewer sees what a merge would change before it's merged.
+#
+# Nightly drift check (schedule): plans dev from main and fails if the plan isn't empty, i.e. AWS
+# no longer matches main (a manual change in the console, or an approved apply that never ran).
+# It stays red until the first approved terraform-apply has created dev.
+#
+# Trigger/trust/ruleset coupling: plan-dev assumes dev-github-actions-plan, whose trust policy
+# (Acme/infra/terraform/ci-iam/main.tf) accepts the OIDC sub of:
+#   - pull_request runs ("repo:<repo>:pull_request", from any same-repo branch; forks get no token)
+#   - workflow_dispatch runs on main or mod*, and the schedule (which always runs on main)
+#     ("repo:<repo>:ref:refs/heads/<branch>")
+# Who can create or push main and mod* is set by the trusted-branches ruleset (Acme/infra/github/).
+# The triggers, the trust list and the ruleset move together: change one, check the other two.
+#
+# Design: docs/design/module-6-ci-cd.md, Components §2.
 
-# id-token: write is required, or GitHub will not issue an OIDC token at all.
+on:
+  # No workflow-level path filters: a required check that never reports would block unrelated
+  # PRs forever. The `changes` job decides instead, and skipped jobs count as passing.
+  pull_request:
+  push:
+    # fmt/validate feedback on module branches before a PR exists (no plan, no credentials).
+    branches: [main, "mod*"]
+  # Manual plan of dev from main or mod*: gh workflow run terraform-plan.yml --ref <branch>
+  workflow_dispatch:
+  # Nightly drift check. Scheduled runs only run on the default branch, and GitHub disables them
+  # after 60 days without repository activity.
+  schedule:
+    - cron: "41 5 * * *" # daily, off the hour
+
+# Least privilege by default. Only plan-dev asks for an OIDC token, and only comment for PR write access.
 permissions:
   contents: read
-  id-token: write
 
-# One run at a time; plans don't take the state lock (see the plan step).
+# A newer push to the same PR supersedes the old plan, so cancel it. Safe because these plans
+# run with -lock=false: a cancelled plan can't leave a stale lock.
 concurrency:
-  group: terraform-dev
-  cancel-in-progress: false
+  group: terraform-plan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  TF_DIR: Acme/infra/terraform/environments/dev
-  AWS_REGION: us-east-1
+  TF_ROOT: Acme/infra/terraform
+  # Keep equal to TF_VERSION in terraform-plan-reusable.yml and terraform-apply.yml.
+  TF_VERSION: "1.16.3"
 
 jobs:
-  plan:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      terraform: ${{ steps.diff.outputs.terraform }}
+      dev: ${{ steps.diff.outputs.dev }}
+    steps:
+      - name: Check out code (full history, to diff against the base)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
+      - name: Did any Terraform, its policies, the dev root or this workflow change?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ] || [ "$EVENT" = schedule ]; then
+            echo "$EVENT run; running all jobs"
+            { echo "terraform=true"; echo "dev=true"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$EVENT" = pull_request ]; then
+            base="$PR_BASE"; head="$PR_HEAD"
+          else
+            base="$PUSH_BEFORE"; head="$GITHUB_SHA"
+          fi
+          # A new branch (before = 000...0) or a force-push leaves no usable base: run everything.
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "No usable base ($base); running all jobs"
+            { echo "terraform=true"; echo "dev=true"; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$base...$head")"
+          echo "$changed"
+          workflow='^\.github/workflows/terraform-plan(-reusable)?\.yml$'
+          if grep -qE "^Acme/infra/(terraform|policies)/|$workflow" <<<"$changed"; then
+            echo "terraform=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "terraform=false" >> "$GITHUB_OUTPUT"
+          fi
+          # The dev plan depends on the dev root, the modules it calls and the policies it must pass.
+          if grep -qE "^Acme/infra/(terraform/(environments/dev|modules)|policies)/|$workflow" <<<"$changed"; then
+            echo "dev=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dev=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  fmt:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - name: Check out code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Assume the plan-only role via OIDC
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
-        with:
-          role-to-assume: arn:aws:iam::401352756330:role/dev-github-actions-plan
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: gha-terraform-plan
-
-      # Proves the OIDC exchange worked: should show assumed-role/dev-github-actions-plan
-      - name: Show AWS identity
-        run: aws sts get-caller-identity
-
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
-          terraform_version: "1.16.3"
-
-      - name: Terraform init
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform init -input=false
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform fmt
-        working-directory: Acme/infra/terraform
-        run: terraform fmt -check -recursive
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform fmt -check -recursive -diff
+
+  validate:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every root module (a directory with its own backend and lockfile). Modules under modules/
+        # are validated through the roots that call them. Add new roots here.
+        root:
+          - account
+          - ci-iam
+          - environments/dev
+          - state-backend
+    defaults:
+      run:
+        working-directory: ${{ env.TF_ROOT }}/${{ matrix.root }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false -input=false
 
       - name: Terraform validate
-        working-directory: ${{ env.TF_DIR }}
         run: terraform validate
 
-      # -lock=false: this job runs as a plan-only role that has no DynamoDB delete permission
-      # (DeleteItem was removed on purpose: it would let CI release a lock held by someone's apply).
-      # Terraform releases a DynamoDB lock by deleting it, so a locked plan here would leave a stale lock.
-      # Skipping the lock is safe because this job never writes state; the worst case is a plan computed
-      # against the state from just before a concurrent apply, which a rerun fixes. Applies still lock.
-      # To lock CI plans again without re-adding DeleteItem on the table, move the backend to S3 native
-      # locking (use_lockfile = true): release then needs s3:DeleteObject on one .tflock object only.
-      - name: Terraform plan
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform plan -input=false -lock=false -no-color
+  # Module unit tests (`terraform test`, modules/<name>/tests/*.tftest.hcl). The AWS provider is
+  # mocked, so they need no credentials and create nothing. The real-AWS counterpart is Terratest
+  # (Acme/infra/terraform/test/), run by hand; see docs/ci.md, "Testing the Terraform".
+  module-test:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Modules that have a tests/ directory. Add a module here when it gets tests.
+        module:
+          - vpc
+    defaults:
+      run:
+        working-directory: ${{ env.TF_ROOT }}/modules/${{ matrix.module }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform test (mocked AWS provider)
+        run: terraform test
+
+  # The required check (main-merge-gate), not the matrix legs: their names include the root, so
+  # adding a root (stage, prod) would leave the ruleset waiting for checks that no longer exist.
+  # It also covers module-test, so module tests are required without another ruleset entry.
+  validate-result:
+    needs: [changes, validate, module-test]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Every validate leg and module test passed (or the change didn't touch Terraform)
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          VALIDATE: ${{ needs.validate.result }}
+          MODULE_TEST: ${{ needs.module-test.result }}
+        run: |
+          echo "changes=$CHANGES validate=$VALIDATE module-test=$MODULE_TEST"
+          ok() { [ "$1" = success ] || [ "$1" = skipped ]; }
+          [ "$CHANGES" = success ] && ok "$VALIDATE" && ok "$MODULE_TEST"
+
+  # The policy's own tests, plus proof that it still catches a real (seeded) bad plan. The plan
+  # jobs then run the same policy against each real plan (terraform-plan-reusable.yml).
+  policy:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: Acme/infra/policies/terraform
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same pinned version and checksum as terraform-plan-reusable.yml; change both together.
+      - name: Install Conftest
+        working-directory: ${{ runner.temp }}
+        env:
+          VERSION: "0.71.1"
+          SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+        run: |
+          tarball="conftest_${VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$tarball" "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/${tarball}"
+          echo "${SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" conftest
+          install -m 0755 conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Policy unit tests
+        run: conftest verify --no-color -p .
+
+      # testdata/seeded-bad/plan.json is a real plan (main.tf next to it) with SSH open to the
+      # world in each of the three resource shapes, plus one CIDR unknown until apply. If the policy
+      # stops reporting exactly that, a rule has silently stopped matching.
+      - name: Seeded bad plan is caught (3 denies, 1 warning)
+        run: |
+          conftest test --no-color -p . testdata/seeded-bad/plan.json || true
+          result="$(conftest test -o json -p . testdata/seeded-bad/plan.json || true)"
+          failures="$(jq '[.[].failures // [] | length] | add' <<<"$result")"
+          warnings="$(jq '[.[].warnings // [] | length] | add' <<<"$result")"
+          echo "failures=$failures warnings=$warnings"
+          [ "$failures" = 3 ] && [ "$warnings" = 1 ]
+
+  plan-dev:
+    needs: [changes, fmt, validate-result, policy]
+    # Fork PRs get no OIDC token, so the assume step could only fail; skip them. The post-merge
+    # plan in terraform-apply.yml still shows the reviewer the plan before anything is applied.
+    if: >-
+      needs.changes.outputs.dev == 'true'
+      && github.event_name != 'push'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      id-token: write # lets GitHub issue the OIDC token AWS trusts
+    # The plan itself (OIDC, init, plan -lock=false, run summary, text plan artifact) is shared
+    # with terraform-apply.yml. `env` isn't available in a `with:` for a called workflow, hence
+    # the literals.
+    uses: ./.github/workflows/terraform-plan-reusable.yml
+    with:
+      working-directory: Acme/infra/terraform/environments/dev
+      role-arn: arn:aws:iam::401352756330:role/dev-github-actions-plan
+      artifact-name: plan-dev
+
+  # The required check (main-merge-gate), not plan-dev: a job that calls a reusable workflow is
+  # reported as "plan-dev / plan" when it runs but as "plan-dev" when it's skipped, so requiring
+  # either name would leave some PRs waiting forever for a check that never reports.
+  plan-result:
+    needs: [changes, plan-dev]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: The dev plan passed (or the change didn't need one)
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          PLAN: ${{ needs.plan-dev.result }}
+        run: |
+          echo "changes=$CHANGES plan-dev=$PLAN"
+          [ "$CHANGES" = success ] && { [ "$PLAN" = success ] || [ "$PLAN" = skipped ]; }
+
+  # The curriculum's "minimum viable test": the plan must be empty when nothing is expected to
+  # change. On the nightly run, any change means dev has drifted from main. The plan itself is in
+  # the plan job's run summary. Not a required check (it never runs on PRs).
+  drift:
+    needs: plan-dev
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Dev matches main (the nightly plan is empty)
+        env:
+          HAS_CHANGES: ${{ needs.plan-dev.outputs.has_changes }}
+        run: |
+          echo "has_changes=$HAS_CHANGES"
+          if [ "$HAS_CHANGES" != false ]; then
+            echo "::error::Drift: planning main against dev's real state would change something. Read the plan in the plan-dev job's summary, then fix AWS or the code (merge to main and approve the apply)."
+            exit 1
+          fi
+
+  # Separate from the plan so that only this job can write to the PR, and it never has AWS access.
+  # It also runs when the plan failed or was skipped, so an earlier push's plan is never left
+  # looking current. Not for fork PRs (no plan, and their token can't comment) or a cancelled
+  # plan (the newer run that cancelled it will comment).
+  comment:
+    needs: plan-dev
+    if: >-
+      always()
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && needs.plan-dev.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # lets the job post the plan comment
+    steps:
+      - name: Download the text plan
+        if: needs.plan-dev.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-dev-text
+          path: ${{ runner.temp }}
+
+      # Reads the plan from a file and uses no ${{ }} expressions in the script, so nothing a PR
+      # controls (branch name, title, plan text) can be injected into the JavaScript.
+      - name: Comment the plan on the PR
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PLAN_RESULT: ${{ needs.plan-dev.result }} # success, failure or skipped
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- terraform-plan:dev -->';
+            const result = process.env.PLAN_RESULT;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+
+            let body;
+            if (result === 'success') {
+              let plan = fs.readFileSync(`${process.env.RUNNER_TEMP}/plan.txt`, 'utf8');
+
+              // An outputs-only plan has no "Plan:" line.
+              const summary =
+                (plan.match(/^(Plan: .*|No changes\..*)$/m) || [])[0]
+                || (/^Changes to Outputs:/m.test(plan) ? 'No resource changes; only output values change.' : '(no summary line found)');
+
+              const limit = 60000; // GitHub comments max out at 65,536 characters
+              if (plan.length > limit) {
+                plan = plan.slice(0, limit) + '\n\n... truncated; see the workflow run summary for the full plan.';
+              }
+
+              body = [
+                marker,
+                '### Terraform plan: `environments/dev`',
+                '',
+                `**${summary}**`,
+                '',
+                `Commit \`${sha}\` · [workflow run](${runUrl})`,
+                '',
+                '<details><summary>Full plan</summary>',
+                '',
+                '```',
+                plan,
+                '```',
+                '',
+                '</details>',
+              ].join('\n');
+            } else {
+              const why = result === 'failure'
+                ? 'The plan **failed** (or the policy check rejected it).'
+                : 'No plan ran: this push doesn\'t change dev, or fmt, validate or policy failed first.';
+              body = [
+                marker,
+                '### Terraform plan: `environments/dev`',
+                '',
+                `**No current plan for commit \`${sha}\`.** ${why} See the [workflow run](${runUrl}).`,
+                '',
+                'Any plan shown here earlier was for an older commit and has been removed.',
+              ].join('\n');
+            }
+
+            // Update our earlier comment instead of adding a new one on every push.
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body && c.body.includes(marker));
+
+            if (!existing && result === 'skipped') {
+              core.info('No plan ran and there is no earlier plan comment: nothing to update.');
+            } else if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

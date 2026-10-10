@@ -4,3 +4,15 @@
 crash.log
 *.tfvars
 Acme/infra/terraform/modules/**/.terraform.lock.hcl
+
+# Saved plans and their JSON hold values Terraform redacts elsewhere (README in Acme/infra/policies/terraform)
+tfplan
+*.tfplan
+plan.json
+full.json
+!Acme/infra/policies/terraform/testdata/*/plan.json
+Acme/infra/policies/terraform/testdata/*/.terraform.lock.hcl
+
+# Python (IAM policy simulator tests)
+__pycache__/
+.pytest_cache/

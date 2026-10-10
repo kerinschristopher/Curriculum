@@ -15,10 +15,6 @@ configMapGenerator:
   - name: sample-api-config
     behavior: merge
     literals:
-      # Must match images[].newTag above until Module 6, when CI builds the version into the
-      # binary and APP_VERSION (here, in base and in the Deployment) is deleted.
-      # TODO(kerinschristopher): docs/curriculum.md#module-6-github-actions-and-cicd-week-7
-      - APP_VERSION=0.1.1
       - LOG_LEVEL=debug
 
 patches:

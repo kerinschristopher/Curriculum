@@ -1,0 +1,11 @@
+# Voluntary disruptions (node drains, cluster upgrades) may never take the last pod down.
+# Only in overlays with 2+ replicas: with 1 replica, minAvailable: 1 would block every drain.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sample-api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sample-api
