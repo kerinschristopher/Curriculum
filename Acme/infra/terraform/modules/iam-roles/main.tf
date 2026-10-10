@@ -528,8 +528,6 @@ data "aws_iam_policy_document" "apply_vpc" {
       "ec2:DeleteNatGateway",
       "ec2:DisassociateAddress",
       "ec2:ReleaseAddress",
-      "ec2:CreateTags",
-      "ec2:DeleteTags",
     ]
     resources = ["*"]
 
@@ -537,6 +535,40 @@ data "aws_iam_policy_document" "apply_vpc" {
       test     = "StringEquals"
       variable = "aws:ResourceTag/Environment"
       values   = [var.name]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [local.region]
+    }
+  }
+
+  # Retag owned resources, but never the Environment tag itself: otherwise this role could hand
+  # its VPC to another environment (Environment = prod) or drop the tag. Terraform only sends the
+  # keys that change, so an unchanged Environment tag never appears here. A DeleteTags call with
+  # no keys deletes every tag, and an empty key set passes ForAllValues, hence the Null check.
+  statement {
+    sid       = "Ec2RetagOwned"
+    actions   = ["ec2:CreateTags", "ec2:DeleteTags"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = [var.name]
+    }
+
+    condition {
+      test     = "ForAllValues:StringNotEquals"
+      variable = "aws:TagKeys"
+      values   = ["Environment"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "aws:TagKeys"
+      values   = ["false"]
     }
 
     condition {

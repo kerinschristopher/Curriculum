@@ -279,13 +279,15 @@ Every taggable resource in `modules/vpc` carries `Environment = dev`, so the pol
 |---|---|---|---|
 | `Ec2CreateTagged` | `ec2:CreateVpc`, `CreateSubnet`, `CreateInternetGateway`, `CreateRouteTable`, `CreateNatGateway`, `AllocateAddress` | `*` **with** `aws:RequestTag/Environment = N`, region-locked | Create the VPC module's resources, only if the create request tags them for this environment. An untagged or wrongly tagged create is denied |
 | `Ec2TagOnCreate` | `ec2:CreateTags` | `*` **with** `ec2:CreateAction` = one of those six creates, region-locked | Terraform tags resources inside the create call. This allows tagging only as part of those creates, not retagging something that already exists |
-| `Ec2ChangeOwned` | modify, delete, attach/detach, route and association actions for the same resource types, plus `CreateTags`/`DeleteTags` | `*` **with** `aws:ResourceTag/Environment = N`, region-locked | Change or delete only resources that already carry this environment's tag. Another environment's VPC, or an untagged one, is out of reach |
+| `Ec2ChangeOwned` | modify, delete, attach/detach, route and association actions for the same resource types | `*` **with** `aws:ResourceTag/Environment = N`, region-locked | Change or delete only resources that already carry this environment's tag. Another environment's VPC, or an untagged one, is out of reach |
+| `Ec2RetagOwned` | `ec2:CreateTags`, `ec2:DeleteTags` | `*` **with** `aws:ResourceTag/Environment = N`, `aws:TagKeys` present and never `Environment`, region-locked | Change other tags (e.g. `Name`) on owned resources. The `Environment` tag itself can't be changed or removed, so the role can't hand its VPC to another environment. `DeleteTags` with no keys (which removes every tag) is refused too. Terraform sends only the tags that change, so an unchanged `Environment` never appears |
 | `DenyCiIdentityChanges` | **Deny** `iam:*` | `role/*-github-actions-*` and the GitHub OIDC provider | The apply role has no IAM write today. This keeps that true for CI identity when EKS (which creates IAM roles) is added: the role can never edit itself, the plan role or the provider |
 
 #### What the apply role deliberately can't do
 - Anything before a reviewer approves: no token exists until then.
 - Create, change or delete EKS, KMS, CloudWatch Logs or IAM resources (until the EKS-scope expansion).
 - Touch EC2 resources not tagged `Environment = dev`, or launch instances.
+- Change or remove the `Environment` tag on anything it owns.
 - Write or delete any state other than dev's, or delete dev's state.
 - Change any CI role or the OIDC provider, even after future expansions (explicit Deny).
 
@@ -318,8 +320,8 @@ The bypass actor list can't be seen by people without admin access to the repo, 
 
 | Check | What it proves | Status |
 |---|---|---|
-| [`test_iam_policies.py`](../Acme/infra/scripts/tests/test_iam_policies.py) (pytest + boto3): 34 plan-role and 39 apply-role permission cases through the IAM policy simulator, plus 17 trust cases | Permissions: allowed actions are allowed, out-of-scope ones denied (every lock write for the plan role; untagged creates, other state and CI identity for the apply role). Trust: which `sub`/`aud` values each role accepts. Condition values are supplied by hand. A harness failure reports as a pytest ERROR, not a policy FAIL | Passing, 90/90 against the live roles (2026-10-10). Before the `pull_request` trust was applied, exactly one case failed (that one) |
-| `SIM_PLAN_JSON=<plan JSON>` run of the same tests | The *planned* `ci-iam` policies, before they're applied | Used before every `ci-iam` apply in Module 6 (73/73, then 90/90) |
+| [`test_iam_policies.py`](../Acme/infra/scripts/tests/test_iam_policies.py) (pytest + boto3): 34 plan-role and 45 apply-role permission cases through the IAM policy simulator, plus 17 trust cases | Permissions: allowed actions are allowed, out-of-scope ones denied (every lock write for the plan role; untagged creates, other state and CI identity for the apply role). Trust: which `sub`/`aud` values each role accepts. Condition values are supplied by hand. A harness failure reports as a pytest ERROR, not a policy FAIL | Passing, 96/96 against the live roles (2026-10-10). Before the `pull_request` trust was applied, exactly one case failed (that one); before `Ec2RetagOwned` was applied, exactly the 4 new retag denials failed |
+| `SIM_PLAN_JSON=<plan JSON>` run of the same tests | The *planned* `ci-iam` policies, before they're applied | Used before every `ci-iam` apply in Module 6 (73/73, then 90/90, then 96/96) |
 | Real plan on a PR (PR #9, run `38032703703`) | The real `pull_request` trust match: `assumed-role/dev-github-actions-plan/...`, plan of dev with no AccessDenied | Passed |
 | Real manual plan on `mod6` (run `38032295497`) | The real branch trust match and condition values with `-lock=false` | Passed |
 | Negative trust test, dispatch from throwaway branch `trust-check` (run `37571573254`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted |

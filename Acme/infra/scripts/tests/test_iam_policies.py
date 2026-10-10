@@ -164,6 +164,8 @@ def apply_cases(acct):
         apply(ALLOWED, "ec2:CreateRoute", rtb, R, owned),
         apply(ALLOWED, "ec2:AssociateRouteTable", rtb, R, owned),
         apply(ALLOWED, "ec2:ReleaseAddress", eip, R, owned),
+        apply(ALLOWED, "ec2:CreateTags", vpc, R, owned, entry("aws:TagKeys", ["Name"], "stringList")),
+        apply(ALLOWED, "ec2:DeleteTags", vpc, R, owned, entry("aws:TagKeys", ["Name"], "stringList")),
         apply(ALLOWED, "s3:GetObject", f"arn:aws:s3:::{BUCKET}/{E}/terraform.tfstate"),
         apply(ALLOWED, "s3:PutObject", f"arn:aws:s3:::{BUCKET}/{E}/terraform.tfstate"),
         apply(ALLOWED, "dynamodb:PutItem", table,
@@ -179,6 +181,12 @@ def apply_cases(acct):
         apply(IMPLICIT, "ec2:DeleteVpc", vpc, R, entry("aws:ResourceTag/Environment", "prod")),
         apply(IMPLICIT, "ec2:DeleteVpc", vpc, R),  # untagged resource
         apply(IMPLICIT, "ec2:CreateTags", vpc, R),  # retagging something that isn't ours
+        # handing an owned VPC to another environment, or dropping its tag
+        apply(IMPLICIT, "ec2:CreateTags", vpc, R, owned, entry("aws:TagKeys", ["Environment"], "stringList"),
+              entry("aws:RequestTag/Environment", "prod")),
+        apply(IMPLICIT, "ec2:CreateTags", vpc, R, owned, entry("aws:TagKeys", ["Name", "Environment"], "stringList")),
+        apply(IMPLICIT, "ec2:DeleteTags", vpc, R, owned, entry("aws:TagKeys", ["Environment"], "stringList")),
+        apply(IMPLICIT, "ec2:DeleteTags", vpc, R, owned),  # no keys: deletes every tag
         apply(IMPLICIT, "ec2:RunInstances", "*", R, tag_create),
         apply(IMPLICIT, "ec2:AuthorizeSecurityGroupIngress", "*", R, owned),
         apply(IMPLICIT, "eks:CreateCluster", "*", R),  # VPC-only until the EKS expansion (Q4)
