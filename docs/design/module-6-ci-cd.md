@@ -658,6 +658,21 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
   - M6: README and ARCHITECTURE.md.
   - The L and N items.
 
+**Infrastructure tests (2026-10-10).** The curriculum's "Testing infrastructure code" section asks for integration tests
+(Terratest or `terraform test`), not only policy and plan checks. The user chose both tools, split by what each can do safely:
+- **`terraform test` with a mocked AWS provider** (`modules/vpc/tests/vpc.tftest.hcl`): 6 runs.
+  - **What they cover:** NAT off creates nothing billed; NAT on sits in a public subnet with the private route through it;
+    one subnet of each kind per zone; the internet route; the caller's tags on every taggable resource; one zone rejected.
+  - **In CI:** a new `module-test` job in `terraform-plan.yml`, aggregated by the existing required check `validate-result`,
+    so the ruleset is unchanged.
+  - **Mutation check:** four deliberate breaks in a temp copy each failed exactly the matching run.
+- **Terratest** (`Acme/infra/terraform/test/`, terratest v1.0.1, build tag `integration`): builds `modules/vpc` in real AWS
+  (NAT off), checks tags, subnets per zone, real routing (`IsPublicSubnet`) and no NAT gateway, then destroys.
+  - **Run by hand from WSL as `ckerins`**, with the user's OK: 13 added, all 4 checks passed, 13 destroyed (40 s).
+  - **Mutation run:** the public subnets on the private route table failed only the routing check, and the deferred destroy
+    still left nothing behind.
+  - **Not in CI:** it needs AWS write access, which no PR job has by design. See "Other Designs Considered".
+
 ---
 
 ## Risks / Constraints
@@ -712,6 +727,7 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | **Put CI roles in `account/` instead of a new `ci-iam/`** | One fewer root | Mixes account-wide singletons with per-environment roles; bigger blast radius per apply | Viable, not chosen. Q1 decided: `ci-iam/` |
 | **Multi-arch image now (amd64 + arm64 image index)** | Runs natively on Graviton nodes and Apple Silicon; the reviewer called it the more useful matrix example | Reworks the scan→push hand-off (OCI-layout tarball, a Trivy scan per platform), slows CI, and duplicates Module 7's `buildx` syllabus | Deferred to Module 7 on purpose, to keep this work block small and reviewable. Noted in the Dockerfile |
 | **Exactly the three deliverable workflows** (plan steps duplicated in `terraform-plan.yml` and `terraform-apply.yml`; the re-scan as a `schedule` trigger inside `sample-api-ci.yml`) | Matches the deliverable list literally. Each pipeline reads top to bottom in one file. No reusable-workflow quirks: the skipped caller's check name changes (hence `plan-result`), `with:` can't read `env` (literal role ARNs), and the caller must grant permissions | Two copies of the plan job drift, so the plan a reviewer approves could be produced differently from the one applied (the PR #6 trust concern). Every CI job would need a not-on-schedule condition, a nightly CVE finding would turn a `sample-api-ci` run on `main` red, and the scanner would share a file with the `packages: write` push job. It also loses the module's only examples of the reusable-workflow and `schedule` concepts (FR9) | Rejected, deliberately, in favour of five: the three deliverables plus `terraform-plan-reusable.yml` and `sample-api-rescan.yml`. Reasoning is also in `docs/ci.md` ("Why five workflows") |
+| **Terratest in CI** (on PRs, or nightly on `main`) | Real-AWS integration checks on every change, with no human step | Needs AWS write access in CI: a third role (create and delete only resources tagged `ManagedBy = terratest`), a trigger PR code can't reach (`main` or manual only), and cleanup if a runner dies mid-test. Running it on PRs would hand write credentials to any branch's code, the exact gap the read-only plan role and the `dev-apply` gate close | Deferred. Terratest runs by hand from WSL; the mocked `terraform test` runs in CI on every change. Revisit with a test-role design |
 | **"Setup-only" reusable workflow** (checkout, setup, assume, init) | Smallest shared unit | A reusable workflow replaces jobs, not steps; credentials and `.terraform/` don't carry into the caller's next job | Rejected. Share the whole plan job (§2a) |
 | **Docker layer caching now (`cache-to: type=gha`)** | Faster builds immediately | Removes Module 7's cold/warm baseline | Deferred to Module 7 |
 | **Keyless signing (cosign) / build provenance attestations** | Real OIDC use for images; consumers can verify | Extra moving parts before anyone verifies signatures | Future (Module 8/10) |

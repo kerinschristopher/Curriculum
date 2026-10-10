@@ -57,7 +57,7 @@ only accepts changes to `main` through a pull request whose required checks pass
 | `kustomize` | sample-api-ci | every Kustomize base and overlay renders (or nothing it covers changed) |
 | `build-scan` | sample-api-ci | the image builds and Trivy finds no fixable HIGH/CRITICAL vulnerability (or the app didn't change) |
 | `fmt` | terraform-plan | `terraform fmt -check -recursive` is clean (or no Terraform changed) |
-| `validate-result` | terraform-plan | every root validates (or no Terraform changed) |
+| `validate-result` | terraform-plan | every root validates and every module's `terraform test` passes (or no Terraform changed) |
 | `policy` | terraform-plan | the Conftest policy tests pass and the seeded bad plan is still caught (or no Terraform changed) |
 | `plan-result` | terraform-plan | the dev plan ran and passed the policy (or the change didn't affect dev, or the PR is from a fork, where no plan runs) |
 
@@ -122,7 +122,8 @@ from the default branch, and GitHub disables them after 60 days without reposito
 | `changes` | always | `contents: read` | none | Decides whether any Terraform or policy changed (`terraform`), and whether dev's root, its modules or the policies changed (`dev`). Manual runs and new branches run everything |
 | `fmt` | Terraform changed | `contents: read` | none | `terraform fmt -check -recursive -diff` over `Acme/infra/terraform` |
 | `validate` (matrix over `account`, `ci-iam`, `environments/dev`, `state-backend`) | Terraform changed | `contents: read` | none | `init -backend=false`, `validate` |
-| `validate-result` | always | `contents: read` | none | Aggregates the matrix |
+| `module-test` (matrix over modules with a `tests/` directory: `vpc`) | Terraform changed | `contents: read` | none | `init -backend=false`, `terraform test` with the AWS provider mocked: no credentials, nothing created |
+| `validate-result` | always | `contents: read` | none | Aggregates `validate` and `module-test` |
 | `policy` | Terraform changed | `contents: read` | none | Installs Conftest 0.71.1 (SHA-256 checked), runs `conftest verify`, and requires exactly 3 denies and 1 warning from the seeded bad plan |
 | `plan-dev` | dev changed, on a same-repo PR or a manual run; needs fmt, validate-result, policy | `contents: read`, `id-token: write` | **plan role**, `sub = …:pull_request` or `…:ref:refs/heads/<main or mod*>` | Calls `terraform-plan-reusable.yml` for `environments/dev` |
 | `plan-result` | always | `contents: read` | none | Aggregates `plan-dev` |
@@ -198,6 +199,20 @@ Every AWS-facing job depends on four settings in four places agreeing with each 
 
 Change one and check the other three. A mismatch fails closed (the assume-role step gets `Not authorized to perform sts:AssumeRoleWithWebIdentity`)
 unless you widen the trust beyond what GitHub protects, which fails open. That's why the trust list and the rulesets are changed together.
+
+## Testing the Terraform
+
+`fmt` and `validate` only check syntax. Four kinds of test check behaviour, from cheapest to most real:
+
+| Test | Where | Runs | Proves |
+|---|---|---|---|
+| Policy (Conftest) | `Acme/infra/policies/terraform/` | CI, on every plan | The plan breaks no security rule (today: no SSH from the internet). See below |
+| Module unit tests (`terraform test`) | `modules/<name>/tests/*.tftest.hcl` | CI (`module-test`), on every Terraform change | The module's logic with a **mocked** AWS provider: NAT only when asked for (cost), one subnet of each kind per zone, the internet route, the caller's tags on every resource (the apply role requires `Environment`). Each test was checked to fail against a deliberately broken copy |
+| Integration test (Terratest) | [`Acme/infra/terraform/test/`](../Acme/infra/terraform/test/README.md) | By hand from WSL, as a human | That AWS accepts the module and the routing really works: builds the VPC module in real AWS, checks it through the AWS API, destroys it |
+| Plan as a test | `plan-dev`, and `terraform-apply.yml`'s `has_changes` | CI | A plan with no changes skips the approval; an unexpected diff shows up in the PR comment before merge |
+
+Terratest isn't in CI because it needs AWS **write** access, which no PR job has by design. Its README says what running it in CI
+would need.
 
 ## Policy checks (Conftest)
 
