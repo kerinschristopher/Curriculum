@@ -40,28 +40,11 @@ module "eks" {
 
   # depends_on = [module.vpc]
 }
-module "iam_roles" {
-  source = "../../modules/iam-roles"
 
-  name         = "dev"
-  github_repo  = "kerinschristopher/Curriculum"
-  state_bucket = "ckerins-tfstate-12345"
-  lock_table   = "terraform-locks"
-
-  # "mod*" is only safe because the trusted-branches ruleset (Acme/infra/github/) limits who can
-  # create, push to or delete main, mod* and mod*/**/*. Change this list and the ruleset together.
-  github_branches = ["main", "mod*"]
-
-  tags = {
-    Environment = "dev"
-    ManagedBy   = "terraform"
-  }
-}
-
-# The GitHub OIDC provider now belongs to the account stack (../../account).
-# Forget dev's copy in state without deleting it from AWS.
+# CI roles moved to ../../ci-iam (human-applied), which imports them. Forget dev's copies without
+# deleting them from AWS. (The GitHub OIDC provider already moved to ../../account in Module 5.)
 removed {
-  from = module.iam_roles.aws_iam_openid_connect_provider.github
+  from = module.iam_roles
 
   lifecycle {
     destroy = false

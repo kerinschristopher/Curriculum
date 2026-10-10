@@ -48,6 +48,7 @@ jobs:
         # are validated through the roots that call them. Add new roots here.
         root:
           - account
+          - ci-iam
           - environments/dev
           - state-backend
     defaults:

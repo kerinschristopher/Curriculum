@@ -38,3 +38,9 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "apply_environment" {
+  description = "GitHub Environment whose jobs may assume the apply role; it must have a required reviewer. null creates no apply role (plan only). The apply role's EC2 writes require tags Environment = name, so tags must include that"
+  type        = string
+  default     = null
+}

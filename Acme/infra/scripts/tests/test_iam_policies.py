@@ -121,6 +121,74 @@ def cases(acct):
              entry("dynamodb:LeadingKeys", [f"{BUCKET}/{E}/terraform.tfstate"], "stringList")),
         # --- plan role: explicitly denied ---
         plan(EXPLICIT, "ec2:DescribeInstanceAttribute", "*", *R),
+    ] + apply_cases(acct)
+
+
+def apply_cases(acct):
+    """The apply role (Module 6): this environment's state, plus VPC-module EC2 writes on resources
+    tagged Environment=<env>. No EKS or IAM writes yet (design doc Q4)."""
+    E = ENV
+    table = f"arn:aws:dynamodb:{REGION}:{acct}:table/{TABLE}"
+    R = region()
+    tag_create = entry("aws:RequestTag/Environment", E)
+    owned = entry("aws:ResourceTag/Environment", E)
+    vpc = f"arn:aws:ec2:{REGION}:{acct}:vpc/vpc-0123456789abcdef0"
+    subnet = f"arn:aws:ec2:{REGION}:{acct}:subnet/subnet-0123456789abcdef0"
+    rtb = f"arn:aws:ec2:{REGION}:{acct}:route-table/rtb-0123456789abcdef0"
+    igw = f"arn:aws:ec2:{REGION}:{acct}:internet-gateway/igw-0123456789abcdef0"
+    eip = f"arn:aws:ec2:{REGION}:{acct}:elastic-ip/eipalloc-0123456789abcdef0"
+
+    def apply(expected, action, resource, *context):
+        return Case("apply", expected, action, resource, tuple(context))
+
+    return [
+        # --- apply role: allowed ---
+        apply(ALLOWED, "ec2:DescribeVpcs", "*", R),  # same reads as plan (refresh)
+        apply(ALLOWED, "ec2:CreateVpc", "*", R, tag_create),
+        apply(ALLOWED, "ec2:CreateSubnet", "*", R, tag_create),
+        apply(ALLOWED, "ec2:CreateInternetGateway", "*", R, tag_create),
+        apply(ALLOWED, "ec2:CreateRouteTable", "*", R, tag_create),
+        apply(ALLOWED, "ec2:CreateNatGateway", "*", R, tag_create),
+        apply(ALLOWED, "ec2:AllocateAddress", "*", R, tag_create),
+        apply(ALLOWED, "ec2:CreateTags", "*", R, entry("ec2:CreateAction", "CreateVpc")),
+        apply(ALLOWED, "ec2:ModifyVpcAttribute", vpc, R, owned),
+        apply(ALLOWED, "ec2:DeleteVpc", vpc, R, owned),
+        apply(ALLOWED, "ec2:DeleteSubnet", subnet, R, owned),
+        apply(ALLOWED, "ec2:AttachInternetGateway", igw, R, owned),
+        apply(ALLOWED, "ec2:CreateRoute", rtb, R, owned),
+        apply(ALLOWED, "ec2:AssociateRouteTable", rtb, R, owned),
+        apply(ALLOWED, "ec2:ReleaseAddress", eip, R, owned),
+        apply(ALLOWED, "s3:GetObject", f"arn:aws:s3:::{BUCKET}/{E}/terraform.tfstate"),
+        apply(ALLOWED, "s3:PutObject", f"arn:aws:s3:::{BUCKET}/{E}/terraform.tfstate"),
+        apply(ALLOWED, "dynamodb:PutItem", table,
+              entry("dynamodb:LeadingKeys", [f"{BUCKET}/{E}/terraform.tfstate"], "stringList")),
+        apply(ALLOWED, "dynamodb:DeleteItem", table,
+              entry("dynamodb:LeadingKeys", [f"{BUCKET}/{E}/terraform.tfstate"], "stringList")),
+        apply(ALLOWED, "dynamodb:PutItem", table,
+              entry("dynamodb:LeadingKeys", [f"{BUCKET}/{E}/terraform.tfstate-md5"], "stringList")),
+        # --- apply role: implicitly denied ---
+        apply(IMPLICIT, "ec2:CreateVpc", "*", R),  # untagged
+        apply(IMPLICIT, "ec2:CreateVpc", "*", R, entry("aws:RequestTag/Environment", "prod")),
+        apply(IMPLICIT, "ec2:CreateVpc", "*", region("us-west-2"), tag_create),
+        apply(IMPLICIT, "ec2:DeleteVpc", vpc, R, entry("aws:ResourceTag/Environment", "prod")),
+        apply(IMPLICIT, "ec2:DeleteVpc", vpc, R),  # untagged resource
+        apply(IMPLICIT, "ec2:CreateTags", vpc, R),  # retagging something that isn't ours
+        apply(IMPLICIT, "ec2:RunInstances", "*", R, tag_create),
+        apply(IMPLICIT, "ec2:AuthorizeSecurityGroupIngress", "*", R, owned),
+        apply(IMPLICIT, "eks:CreateCluster", "*", R),  # VPC-only until the EKS expansion (Q4)
+        apply(IMPLICIT, "iam:CreateRole", f"arn:aws:iam::{acct}:role/{E}-cluster-x", R),
+        apply(IMPLICIT, "s3:GetObject", f"arn:aws:s3:::{BUCKET}/account/terraform.tfstate"),
+        apply(IMPLICIT, "dynamodb:PutItem", table,
+              entry("dynamodb:LeadingKeys", [f"{BUCKET}/account/terraform.tfstate"], "stringList")),
+        # --- apply role: explicitly denied ---
+        apply(EXPLICIT, "ec2:DescribeInstanceAttribute", "*", R),
+        apply(EXPLICIT, "s3:PutObject", f"arn:aws:s3:::{BUCKET}/account/terraform.tfstate"),
+        apply(EXPLICIT, "s3:PutObject", f"arn:aws:s3:::{BUCKET}/ci-iam/terraform.tfstate"),
+        apply(EXPLICIT, "s3:DeleteObject", f"arn:aws:s3:::{BUCKET}/{E}/terraform.tfstate"),
+        apply(EXPLICIT, "iam:UpdateAssumeRolePolicy", f"arn:aws:iam::{acct}:role/{E}-github-actions-apply"),
+        apply(EXPLICIT, "iam:AttachRolePolicy", f"arn:aws:iam::{acct}:role/{E}-github-actions-plan"),
+        apply(EXPLICIT, "iam:DeleteOpenIDConnectProvider",
+              f"arn:aws:iam::{acct}:oidc-provider/token.actions.githubusercontent.com"),
     ]
 
 
