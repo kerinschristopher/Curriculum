@@ -367,6 +367,7 @@ flowchart LR
 - **Timeouts:** `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` and `IdleTimeout` on the server, so slow or idle clients can't hold connections open.
 - **`newMux()`:** route wiring moves into a function. Tests drive it with `httptest`: `GET /health` returns 200 with valid JSON and the injected version; an unknown path returns 404. Plus a direct `healthHandler` test (salvaged from `depmod6`).
 - **PodDisruptionBudget:** `minAvailable: 1` in the stage and prod overlays, so voluntary disruptions (node drains, upgrades) can't take the last pod down.
+- **`preStop` sleep (found in phase 1 testing):** graceful shutdown in the app isn't enough on its own. SIGTERM and endpoint removal start together, and kube-proxy takes a moment to stop routing, so new connections still reach a pod whose listener has closed. A `lifecycle.preStop.sleep: 5` in the base Deployment holds SIGTERM until routing catches up. It uses the native sleep action because the scratch image has no `sleep` binary (Kubernetes >= 1.30; kind 1.35, dev EKS 1.36). 5s sleep + 20s drain fits the default 30s grace period.
 
 #### 1a. `sample-api-rescan.yml` (new; the `schedule` example)
 
@@ -520,6 +521,17 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | 6 | `docs/ci.md` (new, including the self-hosted vs GitHub-hosted runner section) and `docs/iam.md` (the simulator-can't-run-on-PRs note, K2; the live bypass state, K4), **written last** so they describe what exists | Every claim maps to a file or a run (no documented caches or steps that don't exist) | Revert the commit |
 
 **Phase 0 result (2026-10-10, `main` at `895d3b6`):** all 9 Kustomize trees render (sample-api base + dev/stage/prod; infrastructure base + dev/stage/prod/kind). `account/`: **No changes**. `environments/dev`: **55 to add, 0 to change, 0 to destroy**. Every add is the deliberately torn-down VPC (14) and EKS (41) (A5); nothing existing is updated or destroyed, and the plan role is untouched. "Clean" for dev therefore means *no changes to anything that exists*. Conftest 0.71.1 was already installed (P1).
+
+**Phase 1 result (2026-10-10, on `mod6`):**
+- **Test-first (K3):** `TestParseLogLevel` was written before `parseLogLevel` existed and failed (`undefined: parseLogLevel`), then passed once the function was extracted.
+- **Local gates:** `gofmt` clean; `go vet` clean; golangci-lint v2.14.0 reports 0 issues; all 4 tests pass on Go 1.26.9 and 1.27.2. `-race` runs only in CI, because WSL has no C compiler for cgo.
+- **Mutation check:** replacing `srv.Shutdown` with `srv.Close` fails `TestServeDrainsInFlightRequests` ("serve returned while a request was still in flight"), so the test does guard the drain.
+- **Image:** 9.6 MB. Trivy v0.75.0 with fixable HIGH/CRITICAL finds **0** vulnerabilities. The `/health` version comes from `-ldflags` (`sha-local`), unknown paths return 404, POST returns 405, and `LOG_LEVEL=verbose` exits 1. `actionlint` is clean.
+- **Rolling restart on kind (2 replicas, continuous in-cluster `curl`):** without `preStop`, **36 of 7,555** requests failed to connect. With the 5s `preStop` sleep, **9,721 of 9,721** succeeded.
+- **Deviations from this design:**
+  - `sample-api-ci.yml` also runs on `push` to `mod*`, keeping the old checks workflow's behaviour, so module branches get feedback before a PR exists. Only `main` publishes.
+  - `go.mod` now says `go 1.26`, the minimum supported release, and the module is renamed from `myservice` to `sample-api` (F9).
+  - Trivy's built-in DB cache is explicitly off until Module 7.
 
 ---
 
