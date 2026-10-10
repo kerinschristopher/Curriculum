@@ -4,6 +4,11 @@ These prove the policy *logic*: condition values (region, kms:ResourceAliases, s
 dynamodb:LeadingKeys, tags) are supplied by hand, so they don't prove what AWS sends at
 runtime. A real `terraform plan`/`apply` under the role is the final check.
 
+Trust policies (which GitHub OIDC `sub`/`aud` values may assume each role) are checked by a
+small StringEquals/StringLike evaluator in this file, because the simulator can't evaluate
+web-identity trust. The trust documents come from the same place as the permission policies:
+the live roles, or the plan.
+
 They can't run in CI: the simulator needs iam:SimulatePrincipalPolicy (live roles) or
 iam:SimulateCustomPolicy (planned policies), which the CI roles deliberately lack. Run them
 from WSL as a principal that has those permissions (docs/iam.md).
@@ -27,6 +32,7 @@ harness looked like a policy mismatch.
 
 import json
 import os
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -263,3 +269,126 @@ def test_policy_decision(case, decisions, acct):
         tuple((k, t, tuple(v.replace("000000000000", acct) for v in vals)) for k, t, vals in case.context),
     )
     assert decisions[real] == case.expected
+
+
+# --- Trust policies: which GitHub OIDC tokens may assume each role ---
+#
+# The simulator can't evaluate a trust policy for a federated (OIDC) caller, so these cases
+# evaluate the trust document's conditions here. Only StringEquals and StringLike are supported;
+# any other operator, or a Deny statement, is a harness ERROR rather than a guess.
+
+REPO = "kerinschristopher/Curriculum"
+OIDC_HOST = "token.actions.githubusercontent.com"
+
+
+@dataclass(frozen=True)
+class TrustCase:
+    role: str
+    allowed: bool
+    sub: str
+    aud: str = "sts.amazonaws.com"
+
+    @property
+    def id(self):
+        return f"{self.role}:{'allowed' if self.allowed else 'denied'}:{self.sub}:{self.aud}"
+
+
+def trust_cases():
+    E = ENV
+    r = f"repo:{REPO}"
+
+    def plan(allowed, sub, **kw):
+        return TrustCase("plan", allowed, sub, **kw)
+
+    def apply(allowed, sub, **kw):
+        return TrustCase("apply", allowed, sub, **kw)
+
+    return [
+        # --- plan role ---
+        plan(True, f"{r}:ref:refs/heads/main"),
+        plan(True, f"{r}:ref:refs/heads/mod6"),
+        plan(True, f"{r}:ref:refs/heads/mod6/topic"),  # StringLike's * crosses "/" (ruleset covers mod*/**/*)
+        plan(True, f"{r}:pull_request"),  # PR plans (Module 6 phase 3)
+        plan(False, f"{r}:pull_request", aud="https://github.com/kerinschristopher"),
+        plan(False, f"{r}:ref:refs/heads/feature"),
+        plan(False, f"{r}:ref:refs/heads/mainline"),  # no wildcard on main: exact match only
+        plan(False, f"{r}:ref:refs/tags/v1.0.0"),
+        plan(False, f"{r}:environment:{E}-apply"),
+        plan(False, "repo:someone-else/Curriculum:pull_request"),
+        plan(False, f"repo:{REPO.lower()}:pull_request"),  # StringLike is case-sensitive
+        # --- apply role: only jobs in the gated environment ---
+        apply(True, f"{r}:environment:{E}-apply"),
+        apply(False, f"{r}:pull_request"),
+        apply(False, f"{r}:ref:refs/heads/main"),
+        apply(False, f"{r}:environment:{E}-apply-x"),
+        apply(False, f"{r}:environment:prod"),
+        apply(False, f"{r}:environment:{E}-apply", aud="https://github.com/kerinschristopher"),
+    ]
+
+
+def string_like(pattern, value):
+    """IAM StringLike: * is any run of characters (including none and "/"), ? is one character."""
+    regex = "".join(".*" if ch == "*" else "." if ch == "?" else re.escape(ch) for ch in pattern)
+    return re.fullmatch(regex, value) is not None
+
+
+def as_list(v):
+    return v if isinstance(v, list) else [v]
+
+
+def trust_allows(doc, sub, aud):
+    """True if some Allow statement in the trust document admits this GitHub OIDC token."""
+    claims = {f"{OIDC_HOST}:sub": sub, f"{OIDC_HOST}:aud": aud}
+    for st in as_list(doc["Statement"]):
+        if st["Effect"] != "Allow":
+            raise RuntimeError(f"trust policy has a {st['Effect']} statement; this harness only evaluates Allow")
+        if "sts:AssumeRoleWithWebIdentity" not in as_list(st.get("Action", [])):
+            continue
+        federated = as_list(st.get("Principal", {}).get("Federated", []))
+        if not any(p.endswith(f":oidc-provider/{OIDC_HOST}") for p in federated):
+            continue
+        ok = True
+        for op, conds in st.get("Condition", {}).items():
+            match = {"StringEquals": str.__eq__, "StringLike": string_like}.get(op)
+            if match is None:
+                raise RuntimeError(f"unsupported trust condition operator {op}")
+            for key, patterns in conds.items():
+                if key not in claims:
+                    raise RuntimeError(f"trust condition on unexpected key {key}")
+                if not any(match(p, claims[key]) for p in as_list(patterns)):
+                    ok = False
+        if ok:
+            return True
+    return False
+
+
+def planned_trust_policy(plan_json_path, role_name):
+    with open(plan_json_path) as f:
+        plan = json.load(f)
+
+    def walk(module):
+        yield from module.get("resources", [])
+        for child in module.get("child_modules", []):
+            yield from walk(child)
+
+    for r in walk(plan["planned_values"]["root_module"]):
+        if r["type"] == "aws_iam_role" and r["values"].get("name") == role_name:
+            return json.loads(r["values"]["assume_role_policy"])
+    raise RuntimeError(f"{plan_json_path} plans no role named {role_name}")
+
+
+@pytest.fixture(scope="session")
+def trust_docs():
+    out = {}
+    for role in ("plan", "apply"):
+        role_name = f"{ENV}-github-actions-{role}"
+        if PLAN_JSON:
+            out[role] = planned_trust_policy(PLAN_JSON, role_name)
+        else:
+            out[role] = boto3.client("iam").get_role(RoleName=role_name)["Role"]["AssumeRolePolicyDocument"]
+    return out
+
+
+@pytest.mark.parametrize("case", trust_cases(), ids=lambda c: c.id)
+def test_trust_decision(case, trust_docs):
+    assert trust_allows(trust_docs[case.role], case.sub, case.aud) == case.allowed

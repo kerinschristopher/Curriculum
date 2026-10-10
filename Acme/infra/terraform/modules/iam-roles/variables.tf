@@ -24,6 +24,12 @@ variable "github_branches" {
   }
 }
 
+variable "trust_pull_requests" {
+  description = "Let pull_request-triggered workflows assume the plan role. Their OIDC sub is \"repo:<repo>:pull_request\" with no branch in it, so this admits a PR from any same-repo branch (fork PRs get no OIDC token). The plan role is read-only and lockless; never set this on a role that can write"
+  type        = bool
+  default     = false
+}
+
 variable "state_bucket" {
   description = "Name of the S3 bucket holding Terraform state"
   type        = string

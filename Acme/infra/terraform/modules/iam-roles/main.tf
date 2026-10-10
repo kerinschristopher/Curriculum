@@ -5,8 +5,8 @@
 # - Trust tightens dev -> stage -> prod: dev ["main", "mod*"], stage ["main"], prod ["main"],
 #   then prod moves to a GitHub Environment with required reviewers in Module 6
 #   (needs a "repo:<repo>:environment:prod" sub value in the trust policy).
-# - pull_request-triggered plans (Module 6 phase 3) send sub "repo:<repo>:pull_request", not a branch ref;
-#   add that value to the trust policy when those workflows exist.
+# - pull_request-triggered plans send sub "repo:<repo>:pull_request", not a branch ref; trust_pull_requests
+#   adds that value. Keep it off for stage/prod plan roles unless their PR plans are wanted too.
 # - Before creating stage/prod, set the node group's iam_role_name = "${var.name}-node" in modules/eks
 #   and drop the "default-eks-node-group-*" pattern below; otherwise every env's role matches it.
 # - The "*" statements (ec2/elb/autoscaling Describe*, eks:DescribeAddonVersions,
@@ -61,10 +61,15 @@ data "aws_iam_policy_document" "plan_trust" {
       values   = ["sts.amazonaws.com"]
     }
 
+    # Branch refs for push and workflow_dispatch runs, plus (optionally) the branchless PR value.
+    # The PR value has no wildcard, so StringLike matches it exactly.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [for b in var.github_branches : "repo:${var.github_repo}:ref:refs/heads/${b}"]
+      values = concat(
+        [for b in var.github_branches : "repo:${var.github_repo}:ref:refs/heads/${b}"],
+        var.trust_pull_requests ? ["repo:${var.github_repo}:pull_request"] : [],
+      )
     }
   }
 }

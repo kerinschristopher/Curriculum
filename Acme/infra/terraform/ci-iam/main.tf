@@ -23,6 +23,10 @@ module "dev" {
   # create, push to or delete main, mod* and mod*/**/*. Change this list and the ruleset together.
   github_branches = ["main", "mod*"]
 
+  # PR plans (.github/workflows/terraform-plan.yml). Widens the read-only plan role to PRs from any
+  # same-repo branch, accepted while the repo is solo (design doc Q7, risk R3).
+  trust_pull_requests = true
+
   tags = {
     Environment = "dev"
     ManagedBy   = "terraform"
