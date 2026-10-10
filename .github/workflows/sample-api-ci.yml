@@ -99,9 +99,20 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: Acme/apps/sample-api/go.mod
-          # Stdlib only, so no go.sum and nothing to cache. Once a dependency is added, enable this with
-          # cache-dependency-path: Acme/apps/sample-api/go.sum
+          # setup-go's cache is keyed on go.sum, and this app is stdlib only (no go.sum, no modules
+          # to download). The time goes into compiling, so the build cache is cached below instead.
           cache: false
+
+      # Go's build cache: compiled packages, reused when their source hasn't changed. The key
+      # changes with any .go file or go.mod (which also pins the Go version for this job); the
+      # restore key falls back to the newest older cache, so only changed packages recompile.
+      # golangci-lint-action keeps its own analysis cache as well.
+      - name: Restore the Go build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-lint-${{ hashFiles('Acme/apps/sample-api/go.mod', 'Acme/apps/sample-api/**/*.go') }}
+          restore-keys: go-build-${{ runner.os }}-lint-
 
       # gofmt -l exits 0 even when it finds problems, so turn "any output" into a failure.
       - name: Check formatting (gofmt)
@@ -150,7 +161,17 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
-          cache: false
+          cache: false # keyed on go.sum, which this stdlib-only app doesn't have; see the next step
+
+      # Go's build cache, one per Go version (-race builds the standard library a second time,
+      # instrumented, which is most of this job's compile time). Only compiled packages are
+      # reused: -count=1 below still runs every test.
+      - name: Restore the Go build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-go${{ matrix.go }}-race-${{ hashFiles('Acme/apps/sample-api/go.mod', 'Acme/apps/sample-api/**/*.go') }}
+          restore-keys: go-build-${{ runner.os }}-go${{ matrix.go }}-race-
 
       # -count=1 bypasses Go's test cache so the tests really run.
       # -race catches unsynchronized access between goroutines (HTTP handlers run concurrently).
