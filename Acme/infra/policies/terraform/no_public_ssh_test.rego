@@ -57,6 +57,29 @@ test_vpc_rule_protocol_number_6_denied if {
 	count(deny) == 1 with input as plan("aws_vpc_security_group_ingress_rule", vpc_rule("0.0.0.0/0", null, "6", 22, 22))
 }
 
+# The plan keeps the protocol as written; case must not matter.
+test_vpc_rule_uppercase_tcp_denied if {
+	count(deny) == 1 with input as plan("aws_vpc_security_group_ingress_rule", vpc_rule("0.0.0.0/0", null, "TCP", 22, 22))
+}
+
+test_sg_rule_uppercase_all_denied if {
+	count(deny) == 1 with input as plan("aws_security_group_rule", sg_rule(["0.0.0.0/0"], "ALL", 0, 0))
+}
+
+test_vpc_rule_uppercase_udp_allowed if {
+	count(deny) == 0 with input as plan("aws_vpc_security_group_ingress_rule", vpc_rule("0.0.0.0/0", null, "UDP", 22, 22))
+}
+
+test_vpc_rule_uppercase_tcp_unknown_port_warns if {
+	p := plan_unknown(
+		"aws_vpc_security_group_ingress_rule",
+		object.remove(vpc_rule("0.0.0.0/0", null, "Tcp", 22, 22), ["from_port"]),
+		{"from_port": true},
+	)
+	count(deny) == 0 with input as p
+	count(warn) == 1 with input as p
+}
+
 test_vpc_rule_private_cidr_allowed if {
 	count(deny) == 0 with input as plan("aws_vpc_security_group_ingress_rule", vpc_rule("10.0.0.0/8", null, "tcp", 22, 22))
 }

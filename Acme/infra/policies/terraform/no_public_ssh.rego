@@ -29,11 +29,15 @@ all_protocols := {"-1", "all"}
 
 tcp := {"tcp", "6"}
 
+# The plan keeps the protocol exactly as written, so "TCP" must match "tcp". sprintf makes a
+# null (unknown) protocol a harmless string instead of an error.
+norm_proto(p) := lower(sprintf("%v", [p]))
+
 # Does a rule with this protocol and port range let SSH through?
-allows_ssh(proto, _, _) if proto in all_protocols
+allows_ssh(proto, _, _) if norm_proto(proto) in all_protocols
 
 allows_ssh(proto, from, to) if {
-	proto in tcp
+	norm_proto(proto) in tcp
 	is_number(from) # an unknown port is null, and Rego sorts null before every number
 	is_number(to)
 	from <= 22
@@ -139,7 +143,7 @@ may_allow_ssh(rule) if rule.proto_unknown
 
 may_allow_ssh(rule) if {
 	rule.ports_unknown
-	rule.proto in tcp
+	norm_proto(rule.proto) in tcp
 }
 
 nulls_to_empty(x) := [] if x == null
