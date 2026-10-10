@@ -40,7 +40,7 @@ The `sub` claim GitHub sends depends on how the job was started:
 | `pull_request` run | `repo:kerinschristopher/Curriculum:pull_request` (no branch in it) |
 | `push` or `workflow_dispatch` run on branch `B` | `repo:kerinschristopher/Curriculum:ref:refs/heads/B` |
 | Any job with `environment: dev-apply` | `repo:kerinschristopher/Curriculum:environment:dev-apply` (replaces the two above) |
-| A job in a reusable workflow | The **caller's** value: `terraform-plan-reusable.yml` gets `pull_request` or `ref:refs/heads/main` |
+| A job in a reusable workflow | The **caller's** value: `terraform-plan-reusable.yml` gets `pull_request`, `ref:refs/heads/main`, or `ref:refs/heads/mod…` for a manual run from a `mod*` branch |
 
 ## The plan role
 
@@ -118,7 +118,7 @@ taken on purpose for a read-only role.)
 - **Manual plans:** `gh workflow run terraform-plan.yml --ref <branch>`, from `main` or `mod*` only. GitHub only offers dispatch for
   workflows whose file exists on the default branch.
 - **After a merge:** the `plan` job of `terraform-apply.yml`, on `main`.
-- **Pushes to `main`/`mod*`** run `terraform-plan.yml`'s fmt and validate jobs only. They have no `id-token` permission and don't plan.
+- **Pushes to `main`/`mod*`** run `terraform-plan.yml`'s fmt, validate and policy jobs only. They have no `id-token` permission and don't plan.
 
 Don't add an input that checks out a different branch while a run sits on a trusted ref. That would run untrusted code under that ref's trust.
 

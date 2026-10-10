@@ -31,7 +31,7 @@ only accepts changes to `main` through a pull request whose required checks pass
 | `fmt` | terraform-plan | `terraform fmt -check -recursive` is clean (or no Terraform changed) |
 | `validate-result` | terraform-plan | every root validates (or no Terraform changed) |
 | `policy` | terraform-plan | the Conftest policy tests pass and the seeded bad plan is still caught (or no Terraform changed) |
-| `plan-result` | terraform-plan | the dev plan ran and passed the policy (or the change didn't affect dev) |
+| `plan-result` | terraform-plan | the dev plan ran and passed the policy (or the change didn't affect dev, or the PR is from a fork, where no plan runs) |
 
 Two rules shape this list:
 - **No workflow-level path filters on required workflows.** A required check that never reports blocks the PR forever ("Expected — waiting
@@ -126,7 +126,7 @@ trust policies are the same as if the steps were inline.
 
 | Job | Needs / runs when | Permissions | AWS | Does |
 |---|---|---|---|---|
-| `plan` | always | `contents: read`, `id-token: write` | **plan role**, `sub = …:ref:refs/heads/main` | Calls the reusable plan with `save-plan`, `gated`, and `destroy` for a destroy dispatch |
+| `plan` | always | `contents: read`, `id-token: write` | **plan role**, `sub = …:ref:refs/heads/main` (`…:ref:refs/heads/mod…` for a dispatch from a `mod*` branch) | Calls the reusable plan with `save-plan`, `gated`, and `destroy` for a destroy dispatch |
 | `apply` | `has_changes`; **`environment: dev-apply`** | `contents: read`, `id-token: write`, `actions: write` | **apply role**, `sub = …:environment:dev-apply` | Waits for approval. Then checks out the same commit, downloads `tfplan` and the lock file, `init -lockfile=readonly`, `terraform apply tfplan` (this one takes the state lock), and deletes the plan artifact |
 
 - **The plan is visible before anyone approves.** The `plan` job has no gate and finishes first. Only then does `apply` ask for approval,
