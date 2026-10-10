@@ -14,6 +14,34 @@ What runs on GitHub Actions, when, with which permissions, and which AWS role (i
 | [`terraform-apply.yml`](../.github/workflows/terraform-apply.yml) | `push` to `main` touching dev Terraform; `workflow_dispatch` (apply or destroy) | plan role, then apply role after approval | Plan dev, wait for a human to approve that plan, apply exactly it |
 | [`terraform-plan-reusable.yml`](../.github/workflows/terraform-plan-reusable.yml) | `workflow_call` only | whichever role the caller passes (always the plan role today) | The one plan job both Terraform workflows share |
 
+### Why five workflows, not the three the curriculum lists
+
+The Module 6 deliverable names three files: `sample-api-ci.yml`, `terraform-plan.yml` and `terraform-apply.yml`. All three
+exist under those names. The other two are a deliberate design choice (design doc FR9 and "Other Designs Considered"), not leftovers:
+
+- **`terraform-plan-reusable.yml` (a reusable workflow, `workflow_call`).**
+  - Both Terraform workflows call it, so the plan you read on the PR and the plan applied after merge come from one job
+    definition: same init, same flags, same summary, same Conftest check. With two copies they would drift apart, and the plan
+    you approve could be produced differently from the one that's applied.
+  - It is also the module's worked example of a reusable workflow, one of the Module 6 concepts.
+- **`sample-api-rescan.yml` (the `schedule` trigger).**
+  - A daily scan of images that are already published. Folded into `sample-api-ci.yml` it would need a "not on schedule"
+    condition on every CI job.
+  - A new vulnerability would show as a red `sample-api-ci` run on `main`, as if a merge had broken the build.
+  - The third-party scanner would share a file with the `push` job, which holds `packages: write`. On its own, the scanner
+    job runs with no token permissions at all.
+
+**What three files would buy:**
+- the deliverable matched literally;
+- each pipeline readable top to bottom in one file;
+- none of the reusable-workflow quirks this setup had to work around:
+  - the caller job's check name changes when it's skipped, hence the `plan-result` aggregator;
+  - `with:` can't read `env`, so the role ARNs are literals;
+  - permissions must be granted by the caller.
+
+**Why we kept five anyway:** one plan definition matters more for a gated apply than one fewer file. The scanner's isolation is
+worth a second file. And the two extras are this repo's only working examples of the reusable-workflow and `schedule` concepts.
+
 Every job starts from `permissions: contents: read` at the workflow level and asks for more only where it needs it. Every third-party
 action is pinned to a full commit SHA, with the version in a comment.
 
