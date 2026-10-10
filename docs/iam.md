@@ -288,7 +288,9 @@ Every taggable resource in `modules/vpc` carries `Environment = dev`, so the pol
 #### What the apply role deliberately can't do
 - Anything before a reviewer approves: no token exists until then.
 - Create, change or delete EKS, KMS, CloudWatch Logs or IAM resources (until the EKS-scope expansion).
-- Touch EC2 resources not tagged `Environment = dev`, or launch instances.
+- Change or delete EC2 resources not tagged `Environment = dev`, or launch instances. One known gap: it can *create* a dev-tagged
+  subnet, route table or NAT gateway inside a VPC it doesn't own, because the create statement checks the new resource's tag,
+  not the parent's. It still can't connect that resource to anything there. Deferred; see risk R12 in the design doc.
 - Change or remove the `Environment` tag on anything it owns.
 - Write or delete any state other than dev's, or delete dev's state.
 - Change any CI role or the OIDC provider, even after future expansions (explicit Deny).

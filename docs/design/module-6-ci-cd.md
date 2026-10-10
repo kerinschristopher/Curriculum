@@ -694,6 +694,19 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
     still left nothing behind.
   - **Not in CI:** it needs AWS write access, which no PR job has by design. See "Other Designs Considered".
 
+**Final code review (2026-10-10).** A last code-reviewer pass over `main...mod6` found nothing that blocks review.
+- **Checkers, all clean:**
+  - the app: gofmt, vet, tests and golangci-lint v2.14.0;
+  - workflows: actionlint, with shellcheck on the `run:` scripts;
+  - all 8 Kustomize trees;
+  - Terraform: fmt, plus validate on 4 roots;
+  - module tests 6/6, Conftest 30/30 and the seeded bad plan at 3 denies / 1 warning;
+  - Terratest: vet and `go mod verify`.
+- **Two Low findings:**
+  - The SSH policy matched the protocol case-sensitively, so `"TCP"` slipped through. Fixed in `2e48d51`: 34 tests, and 3 of
+    the new ones fail against the old policy.
+  - The apply role can create resources inside a VPC it doesn't own. Deferred as risk R12, and noted in `docs/iam.md`.
+
 ---
 
 ## Risks / Constraints
@@ -711,6 +724,7 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | R9 | Mutable-subject risk: if the repo is renamed or deleted and the name re-registered, the new owner matches `repo:kerinschristopher/Curriculum:*` | Low | High | Don't rename or delete the repo; plan an opt-in to immutable subjects (F8) as a coordinated change to every trust policy |
 | R10 | DynamoDB locking is deprecated (F12) | Certain (eventually) | Low | Keep it for Module 6; migrate to `use_lockfile` in a dedicated change, which also lets plans lock again |
 | R11 | Release versions depend on you pushing a `v*` git tag; forget and there's simply no new version (main still gets `sha-` images) | Med | Low | Documented in `docs/ci.md`; automate with release-please later (Future Use Cases) |
+| R12 | The apply role can create a dev-tagged subnet, route table or NAT gateway **inside a VPC (or subnet) it doesn't own**: `Ec2CreateTagged` checks the tag on the new resource (`aws:RequestTag`), not on the parent. Found in the final code review, 2026-10-10 | Low (needs a reviewed and approved plan) | Low today, higher once stage/prod share the account | It can't connect such a resource to anything there: attach, route and associate actions need the dev tag on every resource (`Ec2ChangeOwned`), and no other VPC exists besides the default one. **Deferred** to the EKS-scope apply-role expansion, or before any stage/prod VPC appears in this account, whichever is first: split the create statement by resource ARN (new resources need `aws:RequestTag`, parent `vpc/*` and `subnet/*` need `aws:ResourceTag/Environment`), confirm with the simulator which ARNs each action is checked against, and add cases such as `CreateSubnet` in a `prod`-tagged VPC is denied |
 | C1 | Constraint: GitHub expires waiting environment approvals after 30 days | n/a | n/a | Re-run the workflow |
 | C2 | Constraint: PR comments max 65,536 characters | n/a | n/a | Truncate at about 60k and link the run |
 
