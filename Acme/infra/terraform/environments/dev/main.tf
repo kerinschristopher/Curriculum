@@ -31,9 +31,8 @@ module "eks" {
   vpc_id             = module.vpc.vpc_id
   subnet_ids         = module.vpc.private_subnet_ids
 
-  # Laptop's public IP. If it changes, kubectl times out: update this and apply locally. Terraform is
-  # unaffected because it goes through the AWS EKS API, not the Kubernetes endpoint.
-  endpoint_public_access_cidrs = ["68.237.90.102/32"]
+  # Not committed; see variables.tf
+  endpoint_public_access_cidrs = var.eks_public_access_cidrs
 
   # Human admin; see modules/eks/main.tf for why this isn't "whoever runs Terraform"
   cluster_admin_arn = "arn:aws:iam::401352756330:user/ckerins"
