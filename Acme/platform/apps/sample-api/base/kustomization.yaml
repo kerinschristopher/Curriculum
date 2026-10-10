@@ -10,5 +10,3 @@ configMapGenerator:
   - name: sample-api-config
     literals:
       - LOG_LEVEL=info
-      # Every key the Deployment references must exist here; overlays override it via merge
-      - APP_VERSION=unset
