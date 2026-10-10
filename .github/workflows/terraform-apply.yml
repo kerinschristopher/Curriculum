@@ -9,16 +9,18 @@ name: terraform-apply
 #
 # The plan job finishes before the approval request appears, so the reviewer reads the plan on
 # the run page first. Rejecting (or never approving) applies nothing; approval requests expire
-# after 30 days.
+# after 30 days, but the saved plan only lives 1 day, so approve within 24 h or re-run.
 #
 # Trigger/trust/environment coupling:
 #   plan  assumes dev-github-actions-plan with sub "repo:<repo>:ref:refs/heads/main" (push), or
 #         the dispatched branch (trusted only for main and mod*).
 #   apply assumes dev-github-actions-apply, whose trust accepts only
 #         sub "repo:<repo>:environment:dev-apply". GitHub issues that token only after the
-#         environment's rules pass: required reviewer kerinschristopher, deployment branch main
-#         (Acme/infra/github/dev-apply-environment.json). A dispatch from any other branch can
-#         plan but is refused at the environment, before any credential exists.
+#         environment's rules pass: required reviewer kerinschristopher
+#         (Acme/infra/github/dev-apply-environment.json), deployment branch main
+#         (dev-apply-branch-policy.json). A dispatch from any other branch can plan but is
+#         refused at the environment, before any credential exists. The environment allows admin
+#         bypass (can_admins_bypass); the only admin is the reviewer, see docs/iam.md.
 # Roles live in Acme/infra/terraform/ci-iam (human-applied). Change these together.
 #
 # Design: docs/design/module-6-ci-cd.md, Components §3.
@@ -82,8 +84,8 @@ jobs:
     runs-on: ubuntu-24.04
     # Waiting for approval doesn't count; this bounds the apply itself (EKS takes ~15 min).
     timeout-minutes: 60
-    # The gate: this job doesn't start until the required reviewer approves, and the apply role
-    # trusts only tokens issued for this environment.
+    # The gate: this job doesn't start until the required reviewer approves (or an admin bypasses
+    # the environment), and the apply role trusts only tokens issued for this environment.
     environment: dev-apply
     permissions:
       contents: read

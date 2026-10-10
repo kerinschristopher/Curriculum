@@ -2,9 +2,9 @@
 #
 # - One plan role per environment: call this module again with name = "stage" / "prod".
 #   Every scoped ARN below derives from var.name, so each role scopes itself.
-# - Trust tightens dev -> stage -> prod: dev ["main", "mod*"], stage ["main"], prod ["main"],
-#   then prod moves to a GitHub Environment with required reviewers in Module 6
-#   (needs a "repo:<repo>:environment:prod" sub value in the trust policy).
+# - Trust tightens dev -> stage -> prod: dev ["main", "mod*"], stage ["main"], prod ["main"].
+#   Plan roles never trust an environment sub. Gated applies use a separate <env>-apply role that
+#   trusts only "repo:<repo>:environment:<env>-apply" (as dev-apply does; docs/iam.md).
 # - pull_request-triggered plans send sub "repo:<repo>:pull_request", not a branch ref; trust_pull_requests
 #   adds that value. Keep it off for stage/prod plan roles unless their PR plans are wanted too.
 # - Before creating stage/prod, set the node group's iam_role_name = "${var.name}-node" in modules/eks

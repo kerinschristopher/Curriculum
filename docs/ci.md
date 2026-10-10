@@ -81,7 +81,7 @@ the ruleset after editing its JSON with
 | `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |
 | `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays and the infrastructure overlays |
-| `build-scan` | needs lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). On `push` to `main` only, uploads the tarball (1 day) |
+| `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). On `push` to `main` only, uploads the tarball (1 day) |
 | `push` | `push` to `main`, after build-scan | `contents: read`, `packages: write` | Downloads the scanned tarball, `docker load`, logs in to GHCR with the run's `GITHUB_TOKEN`, pushes `ghcr.io/kerinschristopher/sample-api:sha-<short>`. Never checks out code, so what's pushed is what was scanned |
 | `release-tag` | `push` of a `v<major>.<minor>.<patch>` tag | `packages: write` only | Adds the `<major>.<minor>.<patch>` tag to the existing `sha-<short>` image of the tagged commit (`imagetools create`), then checks both tags have the same digest. Nothing is rebuilt |
 
@@ -129,7 +129,7 @@ from the default branch, and GitHub disables them after 60 days without reposito
 | `plan-result` | always | `contents: read` | none | Aggregates `plan-dev` |
 | `comment` | same-repo `pull_request`, after plan-dev, unless plan-dev was cancelled | `pull-requests: write` only | none | Posts the text plan as one PR comment (marker `<!-- terraform-plan:dev -->`), edited in place on later pushes, truncated at 60,000 characters. If the latest plan failed or was skipped, it replaces the old plan with a "no current plan for `<sha>`" note, so an older commit's plan never looks current (a skipped plan with no earlier comment posts nothing) |
 
-- **Pushes to `main`/`mod*`** run fmt, validate and policy only: no plan, no OIDC token.
+- **Pushes to `main`/`mod*`** run fmt, validate, module-test and policy (and their aggregators) only: no plan, no OIDC token.
 - **Fork PRs skip `plan-dev`**, because GitHub gives them no OIDC token. The post-merge plan in `terraform-apply.yml` still shows the reviewer the plan before anything is applied.
 - **The comment job has no AWS access and the plan job can't write to the PR.** The comment script reads the plan from a file and uses no
   `${{ }}` expressions, so nothing a PR controls (branch name, title, plan text) is interpolated into code.
@@ -163,8 +163,11 @@ trust policies are the same as if the steps were inline.
 - **What's applied is what was approved.** The apply uses the saved plan file, and Terraform refuses it if the state changed since ("Saved plan is stale").
 - **No changes, no approval request.** `has_changes = false` skips `apply`.
 - **Write credentials exist only after approval**, and only for that job.
+- **Admin bypass:** `dev-apply` has `can_admins_bypass: true`, so a repository admin can deploy without the reviewer's approval.
+  Today the only admin is also the only reviewer, so this changes nothing; set it to `false` when someone else joins
+  (recorded in [`docs/iam.md`](iam.md#github-side-controls)).
 - **Concurrency:** `terraform-dev-apply`, never cancelled. A newer run waits for the current one; GitHub keeps only the newest pending run.
-- **The saved plan is unredacted** and the repo is public, so it lives one day at most and is deleted after a successful apply. Today it holds
+- **The saved plan is unredacted** and the repo is public, so it lives one day at most and is deleted after every apply attempt, failed ones included. Today it holds
   only resource IDs and ARNs. Revisit before `enable_eks = true`, or before any secret enters dev's state: keep the plan in the private state
   bucket, or re-plan inside the approved job.
 
@@ -207,7 +210,7 @@ unless you widen the trust beyond what GitHub protects, which fails open. That's
 | Test | Where | Runs | Proves |
 |---|---|---|---|
 | Policy (Conftest) | `Acme/infra/policies/terraform/` | CI, on every plan | The plan breaks no security rule (today: no SSH from the internet). See below |
-| Module unit tests (`terraform test`) | `modules/<name>/tests/*.tftest.hcl` | CI (`module-test`), on every Terraform change | The module's logic with a **mocked** AWS provider: NAT only when asked for (cost), one subnet of each kind per zone, the internet route, the caller's tags on every resource (the apply role requires `Environment`). Each test was checked to fail against a deliberately broken copy |
+| Module unit tests (`terraform test`) | `modules/<name>/tests/*.tftest.hcl` | CI (`module-test`), on every Terraform change | The module's logic with a **mocked** AWS provider: NAT only when asked for (cost), one subnet of each kind per zone, the internet route, the caller's tags on every resource (the apply role requires `Environment`), and a single zone is rejected. Each test was checked to fail against a deliberately broken copy |
 | Integration test (Terratest) | [`Acme/infra/terraform/test/`](../Acme/infra/terraform/test/README.md) | By hand from WSL, as a human | That AWS accepts the module and the routing really works: builds the VPC module in real AWS, checks it through the AWS API, destroys it |
 | Plan as a test | `plan-dev`, and `terraform-apply.yml`'s `has_changes` | CI | A plan with no changes skips the approval; an unexpected diff shows up in the PR comment before merge |
 

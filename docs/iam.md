@@ -79,8 +79,9 @@ other AWS account can assume this role, even with admin rights elsewhere.
 
 #### `Principal.Federated`: the GitHub OIDC provider
 Only tokens signed by GitHub's issuer (`token.actions.githubusercontent.com`) and verified through this account's OIDC provider are
-considered. AWS allows one provider per issuer URL per account, so the provider belongs to the account-level stack. Each environment
-looks it up with a data source instead of creating it, which keeps environments from fighting over a shared resource.
+considered. AWS allows one provider per issuer URL per account, so the provider belongs to the account-level stack (`account/`).
+`modules/iam-roles`, which only `ci-iam` calls, looks it up with a data source instead of creating it, so no other root can end
+up fighting over the shared resource.
 
 #### Condition: `aud` must equal `sts.amazonaws.com`
 GitHub can mint tokens for any audience a workflow asks for. This condition only accepts tokens minted for AWS STS. Without it, a token
@@ -114,11 +115,12 @@ patterns means a manual run on `feature/x` gets a valid GitHub token that AWS re
 taken on purpose for a read-only role.)
 
 #### Which runs use the plan role
-- **Pull requests:** `terraform-plan.yml` plans dev on every same-repo PR and posts the plan as a PR comment.
+- **Pull requests:** `terraform-plan.yml` plans dev on every same-repo PR that touches dev's root, the modules, the
+  policies or the plan workflows, and posts the plan as a PR comment.
 - **Manual plans:** `gh workflow run terraform-plan.yml --ref <branch>`, from `main` or `mod*` only. GitHub only offers dispatch for
   workflows whose file exists on the default branch.
 - **After a merge:** the `plan` job of `terraform-apply.yml`, on `main`.
-- **Pushes to `main`/`mod*`** run `terraform-plan.yml`'s fmt, validate and policy jobs only. They have no `id-token` permission and don't plan.
+- **Pushes to `main`/`mod*`** run `terraform-plan.yml`'s fmt, validate, module-test and policy jobs only. They have no `id-token` permission and don't plan.
 
 Don't add an input that checks out a different branch while a run sits on a trusted ref. That would run untrusted code under that ref's trust.
 
@@ -294,8 +296,9 @@ Every taggable resource in `modules/vpc` carries `Environment = dev`, so the pol
 ### Why a separate `ci-iam` root
 If CI applied the Terraform root that contains its own roles, the apply role would need permission to edit IAM roles, including
 itself, and anyone who could land a reviewed change could grant CI anything. So both roles live in `Acme/infra/terraform/ci-iam/`,
-which a human applies from WSL, and the apply role has an explicit Deny on CI identity. `environments/dev` owns no IAM, and the
-OIDC provider stays in `account/`.
+which a human applies from WSL, and the apply role has an explicit Deny on CI identity. `environments/dev` owns no CI identity
+(with `enable_eks = true` its EKS module creates the cluster and node roles, nothing else), and the OIDC provider stays in
+`account/`.
 
 ### Before EKS is in scope
 Turning `enable_eks` on first needs a follow-up change to this role: EKS, KMS, logs and IAM-role writes for `role/dev-*`, with

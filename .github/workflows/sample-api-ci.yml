@@ -5,7 +5,8 @@ name: sample-api-ci
 # Trivy finds no fixable HIGH/CRITICAL vulnerabilities. Only a change that meets all of that,
 # on main, is pushed to GHCR, and the bytes pushed are the bytes scanned.
 #
-# No secrets and no OIDC (no id-token permission anywhere), so the pull_request trigger is safe
+# No secrets beyond the run's own GITHUB_TOKEN and no OIDC (no id-token permission anywhere), so
+# the pull_request trigger is safe
 # and this workflow is outside the trigger/trust/ruleset coupling described in terraform-plan.yml.
 # GHCR is written with the run's short-lived GITHUB_TOKEN.
 #

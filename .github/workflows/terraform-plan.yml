@@ -23,7 +23,7 @@ on:
   # Manual plan of dev from main or mod*: gh workflow run terraform-plan.yml --ref <branch>
   workflow_dispatch:
 
-# Least privilege by default. Only plan-dev asks for an OIDC token and PR write access.
+# Least privilege by default. Only plan-dev asks for an OIDC token, and only comment for PR write access.
 permissions:
   contents: read
 
