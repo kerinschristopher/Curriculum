@@ -1,0 +1,3 @@
+# IAM policy simulator tests (test_iam_policies.py). Exact pins so results are reproducible.
+boto3==1.43.111
+pytest==9.1.1

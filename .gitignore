@@ -4,3 +4,7 @@
 crash.log
 *.tfvars
 Acme/infra/terraform/modules/**/.terraform.lock.hcl
+
+# Python (IAM policy simulator tests)
+__pycache__/
+.pytest_cache/

@@ -198,7 +198,7 @@ accounts would remove it, and that's out of scope here.
 
 | Check | What it proves | Status |
 |---|---|---|
-| [`simulate-plan-role.sh`](../Acme/infra/scripts/tests/simulate-plan-role.sh) (IAM policy simulator, 34 cases) | The policy logic: allowed actions are allowed, out-of-scope ones denied (including every lock write), user data explicitly denied. Condition values are supplied by hand | Passing |
+| [`test_iam_policies.py`](../Acme/infra/scripts/tests/test_iam_policies.py) (IAM policy simulator via pytest + boto3, 34 plan-role cases; replaced `simulate-plan-role.sh` in Module 6) | The policy logic: allowed actions are allowed, out-of-scope ones denied (including every lock write), user data explicitly denied. Condition values are supplied by hand. A harness failure (credentials, AccessDenied on the simulator itself) reports as a pytest ERROR, not a policy FAIL | Passing (34/34, same cases as the bash version) |
 | `terraform-plan` workflow on `mod5` | The real trust match, plus real condition values for the region lock, the SSM AMI lookup, the state read and the checksum read, with `-lock=false` | Passing, dispatched with `gh workflow run --ref mod5` (run `37571571242`) |
 | Negative trust test: push from throwaway branch `trust-check` (run `37536403620`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted. Historical: ran under the old push trigger |
 | Negative trust test, dispatch: `gh workflow run --ref trust-check` (run `37571573254`) | Same rejection with the manual trigger | Passed, branch deleted |
@@ -207,11 +207,14 @@ accounts would remove it, and that's out of scope here.
 | Ruleset enforcement: push `HEAD:mod/evil` with admin bypass set to "pull requests only" | A push that doesn't bypass is rejected | Passed: `GH013 ... Cannot create ref due to creations being restricted`; bypass restored to Always |
 | Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM statements against real resources. `terraform plan` only calls APIs for resources already in state | Passed: 58 resources refreshed with no AccessDenied, and `No changes` at `eb34972`, after naming the cluster admin explicitly (see `modules/eks/main.tf`) |
 
-Run the simulator from WSL with AWS credentials that can call `iam:SimulatePrincipalPolicy`:
+Run the simulator tests from WSL with AWS credentials that can call `iam:SimulatePrincipalPolicy`
+(and `iam:SimulateCustomPolicy` for planned policies). **They can't run in CI:** the plan role
+deliberately has neither permission, so automating them would need a second, more privileged
+principal. Setup and usage are in the file's docstring:
 
 ```bash
-Acme/infra/scripts/tests/simulate-plan-role.sh        # dev
-Acme/infra/scripts/tests/simulate-plan-role.sh stage  # once a stage role exists
+~/.venvs/iam-tests/bin/pytest Acme/infra/scripts/tests                   # live dev roles
+SIM_ENV=stage ~/.venvs/iam-tests/bin/pytest Acme/infra/scripts/tests     # once stage roles exist
 ```
 
 ## Changing the role
