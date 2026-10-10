@@ -128,7 +128,9 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false -no-color tfplan
 
+      # always(): a failed apply also cleans up, instead of leaving the plan until it expires.
       - name: Delete the plan artifact
+        if: always() && needs.plan.outputs.plan_artifact_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_ID: ${{ needs.plan.outputs.plan_artifact_id }}

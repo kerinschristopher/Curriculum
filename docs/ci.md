@@ -143,6 +143,8 @@ trust policies are the same as if the steps were inline.
    - **Reject:** nothing is applied, and the apply role is never assumed.
    - **Approve:** the apply runs the saved plan. If the state changed meanwhile, it fails as stale; re-run the workflow to re-plan.
    - **Ignore it:** the request expires after 30 days. Nothing is applied.
+   - **Approve within 24 hours.** The saved plan artifact is kept for 1 day only. After that, approving fails at
+     "Download the saved plan" and nothing is applied; re-run the workflow to plan again.
 
 ### Tear dev down, or re-apply
 `gh workflow run terraform-apply.yml --ref main -f action=destroy` (or `-f action=apply`). It goes through the same gate. A dispatch from a `mod*`

@@ -98,7 +98,8 @@ jobs:
       # lock held by someone's apply). Safe because a plan never writes state; the worst case is a
       # plan computed against the state from just before a concurrent apply, which a rerun fixes,
       # and an apply refuses such a stale saved plan. Applies still lock. To lock CI plans again,
-      # move the backend to S3 native locking (use_lockfile = true; design doc Q12).
+      # see S3 native locking in docs/iam.md: the apply role's state Denies must exclude the
+      # .tflock key first (design doc Q12).
       # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes.
       - name: Terraform plan
         id: plan

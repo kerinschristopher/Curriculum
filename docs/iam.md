@@ -186,8 +186,15 @@ Skipping the lock is safe here because this role never writes state. The worst c
 a concurrent apply. S3 writes state as a whole object, so the plan sees the old state or the new one, never a partial one. A rerun fixes it,
 and the apply job refuses such a saved plan as stale. Applies still lock as normal.
 
-To lock CI plans again, don't re-add `DeleteItem` on the table. Instead, move the backend to S3 native locking (`use_lockfile = true`, Terraform 1.10+).
-Releasing the lock then needs `s3:DeleteObject` on a single `N/terraform.tfstate.tflock` object, which is a much narrower grant.
+To lock CI plans again, don't re-add `DeleteItem` on the table. S3 native locking (`use_lockfile = true`, Terraform 1.10+) is the
+likely route, but it is not a drop-in switch. Check both points below first:
+- **The apply role's Denies block it.** With S3 locking, Terraform takes the lock by writing `N/terraform.tfstate.tflock` and releases
+  it by deleting that object. The apply role's `DenyOtherStateWrites` (PutObject on anything but the state key) and `DenyStateDeletes`
+  (DeleteObject on `bucket/*`) are explicit Denies, so they beat any Allow. Both must exclude the `.tflock` key, or every apply fails
+  at the lock step.
+- **It doesn't remove the lock-release trade-off.** The plan role would need `s3:PutObject` and `s3:DeleteObject` on that `.tflock`
+  object. Every dev run uses the same key, so IAM still can't limit the delete to "locks this role created". That is the same
+  choice as DynamoDB `DeleteItem` above, just on a narrower resource.
 
 This policy assumes each environment's backend key is `"<env>/terraform.tfstate"`, set in `environments/<env>/terraform.tf`.
 If a backend key changes, this policy has to change with it.
@@ -346,7 +353,7 @@ re-plan (expect `No changes`) and re-run the tests against the live roles.
   `<env>-apply` environment with required reviewers. Before you do this, give the node group role an environment-scoped name. The full
   checklist is in the future-environments note at the top of [`modules/iam-roles/main.tf`](../Acme/infra/terraform/modules/iam-roles/main.tf).
 - **Stop trusting pull requests.** Set `trust_pull_requests = false` (or remove it). PR plans will then fail at the assume-role step.
-- **Lock CI plans.** Switch the backend to S3 native locking (see [Why CI plans don't lock](#why-ci-plans-dont-lock)). Don't re-add DynamoDB `DeleteItem`.
+- **Lock CI plans.** Switch the backend to S3 native locking, after carving `.tflock` out of the apply role's state Denies (see [Why CI plans don't lock](#why-ci-plans-dont-lock)). Don't re-add DynamoDB `DeleteItem`.
 - **Let the apply role manage EKS.** See [Before EKS is in scope](#before-eks-is-in-scope). Add the new apply-role cases to the tests first.
 - **A plan or apply fails with AccessDenied.** The error names the action and the resource. Add the action to the statement for that
   service, with the narrowest scope the action supports. Check the service's IAM reference before falling back to `*`. Then add a test
