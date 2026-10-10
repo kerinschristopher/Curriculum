@@ -239,8 +239,10 @@ jobs:
             const marker = '<!-- terraform-plan:dev -->';
             let plan = fs.readFileSync(`${process.env.RUNNER_TEMP}/plan.txt`, 'utf8');
 
+            // An outputs-only plan has no "Plan:" line.
             const summary =
-              (plan.match(/^(Plan: .*|No changes\..*)$/m) || ['(no summary line found)'])[0];
+              (plan.match(/^(Plan: .*|No changes\..*)$/m) || [])[0]
+              || (/^Changes to Outputs:/m.test(plan) ? 'No resource changes; only output values change.' : '(no summary line found)');
 
             const limit = 60000; // GitHub comments max out at 65,536 characters
             if (plan.length > limit) {
