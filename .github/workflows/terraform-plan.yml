@@ -148,21 +148,59 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
+  # Module unit tests (`terraform test`, modules/<name>/tests/*.tftest.hcl). The AWS provider is
+  # mocked, so they need no credentials and create nothing. The real-AWS counterpart is Terratest
+  # (Acme/infra/terraform/test/), run by hand; see docs/ci.md, "Testing the Terraform".
+  module-test:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Modules that have a tests/ directory. Add a module here when it gets tests.
+        module:
+          - vpc
+    defaults:
+      run:
+        working-directory: ${{ env.TF_ROOT }}/modules/${{ matrix.module }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform test (mocked AWS provider)
+        run: terraform test
+
   # The required check (main-merge-gate), not the matrix legs: their names include the root, so
   # adding a root (stage, prod) would leave the ruleset waiting for checks that no longer exist.
+  # It also covers module-test, so module tests are required without another ruleset entry.
   validate-result:
-    needs: [changes, validate]
+    needs: [changes, validate, module-test]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - name: Every validate leg passed (or the change didn't touch Terraform)
+      - name: Every validate leg and module test passed (or the change didn't touch Terraform)
         env:
           CHANGES: ${{ needs.changes.result }}
           VALIDATE: ${{ needs.validate.result }}
+          MODULE_TEST: ${{ needs.module-test.result }}
         run: |
-          echo "changes=$CHANGES validate=$VALIDATE"
-          [ "$CHANGES" = success ] && { [ "$VALIDATE" = success ] || [ "$VALIDATE" = skipped ]; }
+          echo "changes=$CHANGES validate=$VALIDATE module-test=$MODULE_TEST"
+          ok() { [ "$1" = success ] || [ "$1" = skipped ]; }
+          [ "$CHANGES" = success ] && ok "$VALIDATE" && ok "$MODULE_TEST"
 
   # The policy's own tests, plus proof that it still catches a real (seeded) bad plan. The plan
   # jobs then run the same policy against each real plan (terraform-plan-reusable.yml).
