@@ -1,7 +1,8 @@
+# null while enable_eks = false
 output "cluster_name" {
-  value = module.eks.cluster_name
+  value = one(module.eks[*].cluster_name)
 }
 
 output "cluster_endpoint" {
-  value = module.eks.cluster_endpoint
+  value = one(module.eks[*].cluster_endpoint)
 }

@@ -10,7 +10,10 @@ module "vpc" {
   azs                  = ["us-east-1a", "us-east-1b"]
   public_subnet_cidrs  = ["10.0.101.0/24", "10.0.102.0/24"]
   private_subnet_cidrs = ["10.0.32.0/19", "10.0.64.0/19"]
-  enable_nat_gateway   = true
+
+  # Only the EKS nodes in the private subnets need outbound internet, so the NAT gateway and its
+  # Elastic IP (both billed by the hour) exist only with EKS. With EKS off, dev costs nothing.
+  enable_nat_gateway = var.enable_eks
 
   tags = {
     Environment = "dev"
@@ -18,8 +21,10 @@ module "vpc" {
   }
 }
 
+# See variables.tf for why this is off by default and what turning it on requires.
 module "eks" {
   source = "../../modules/eks"
+  count  = var.enable_eks ? 1 : 0
 
   name               = "dev"
   kubernetes_version = "1.36"
