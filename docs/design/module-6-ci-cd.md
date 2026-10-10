@@ -203,7 +203,7 @@ The old Module 6 attempt (PR #6, now `depmod6`) was rejected with a review (2026
 | T4 | No graceful shutdown (SIGTERM drops in-flight requests) | Review; inline `main.go:51` | **Module 6 phase 1** | FR8; F21 |
 | T5 | No readiness/liveness probes | Review; inline `deployment.yaml:18` | **Resolved in Module 5** | `base/deployment.yaml:48,54` |
 | T6 | `terraform-apply.yml` approves destroy blind (gate before any plan exists) | Review; inline `terraform-apply.yml:44` | **Module 6 phase 3: built (`385270c`); the after-merge check is pending** | Ungated `plan` job, then the env-gated `apply` job consumes the saved plan (Components §3; Q3) |
-| T7 | `docs/ci.md` documents Trivy caches that don't exist | Review; inline `docs/ci.md:140` | **Module 6 phase 6** | `docs/ci.md` is written last and describes only what exists (FR7). Trivy/layer caching is Module 7 |
+| T7 | `docs/ci.md` documents Trivy caches that don't exist | Review; inline `docs/ci.md:140` | **Done in Module 6 phase 6**: `docs/ci.md` lists `cache: false` and defers caching to Module 7 | `docs/ci.md` is written last and describes only what exists (FR7). Trivy/layer caching is Module 7 |
 | T8 | No `securityContext` | Review; inline `deployment.yaml:18` | **Resolved in Module 5** | `base/deployment.yaml:17-21,61-63` |
 | T9 | No `namespace` per overlay | Review; inline `overlays/dev/kustomization.yaml:4` | **Resolved in Module 5** | `namespace: sample-api-{dev,stage,prod}` |
 | T10 | Image tag hardcoded in base | Review; inline `deployment.yaml:19` | **Resolved in Module 5** | `images[].newTag` per overlay. CI now produces `sha-*` and semver tags to promote (Q9) |
@@ -220,9 +220,9 @@ The old Module 6 attempt (PR #6, now `depmod6`) was rejected with a review (2026
 | T21 | Matrix builds | Review and follow-up | **Module 6 phase 1** | Go version matrix + `test-result` gate (Components §1). `terraform-plan.yml`'s `validate` matrix (with `validate-result`) and `sample-api-rescan.yml`'s per-image matrix are further examples. Multi-arch deferred to Module 7 |
 | T22 | Reusable workflows (`workflow_call`) | Review and follow-up | **Done in Module 6 phase 4 (`71c2141`)** | `terraform-plan-reusable.yml` (Components §2a) |
 | T23 | `schedule` trigger | Review and follow-up | **Done in Module 6 phase 4 (`59dbf86`); the first scheduled run is after merge** | Nightly `sample-api-rescan.yml` (Components §1a) |
-| T24 | Self-hosted vs GitHub-hosted runners written out | Review and follow-up | **Module 6 phase 6** | `docs/ci.md` section (FR9) |
+| T24 | Self-hosted vs GitHub-hosted runners written out | Review and follow-up | **Done in Module 6 phase 6** | `docs/ci.md` section (FR9) |
 | T25 | Conftest policy in `infra/policies/` (no SSH from `0.0.0.0/0`) | Follow-up | **Done in Module 6 phase 4 (`0a95743`)** | Components §4 |
-| T26 | `docs/ci.md` describes the role each workflow assumes, every claim true | Follow-up | **Module 6 phase 6** | FR7 |
+| T26 | `docs/ci.md` describes the role each workflow assumes, every claim true | Follow-up | **Done in Module 6 phase 6** (per-workflow tables with permissions, `sub` and role) | FR7 |
 | T27 | Salvage files from the old branch instead of retyping | Follow-up | **Plan** | Internal Documentation, salvage list |
 | T28 | Suggested order: Go CI first, IAM handover as its own commit, then apply split, concepts, docs last | Follow-up | **Adopted** | Rollout table (Components §9) |
 
@@ -233,9 +233,9 @@ The PR #5 approval (bgblackmore, 2026-10-07) deferred these items to Module 6.
 | # | Item | Status | Where handled |
 |---|---|---|---|
 | K1 | **Rewrite `simulate-plan-role.sh` in Python as pytest tests.** One `simulate-principal-policy` call per resource with all its actions batched (not 34 serial calls); context entries as dicts, not hand-built `ContextKeyName=...` strings; a harness error (for example `AccessDenied` on the simulator call itself, a boto3 `ClientError`) **errors the test** instead of being compared as a policy decision, which the bash `2>&1` capture conflates | **Module 6 phase 2** (its own commit before the handover) | `Acme/infra/scripts/tests/test_iam_policies.py` with a `requirements.txt` (`boto3`, `pytest`). Parity first: the same 34 plan-role cases pass. Then apply-role cases, run **before** applying the re-scoped apply role. The `.sh` is deleted once parity is shown |
-| K2 | Document that the simulator **can't run on PRs**: it needs `iam:SimulatePrincipalPolicy`, which the plan role deliberately lacks, so it would need a second, more privileged principal | **Module 6 phase 6** | `docs/iam.md`, next to the verification table, so the tests don't look automatable when they aren't |
+| K2 | Document that the simulator **can't run on PRs**: it needs `iam:SimulatePrincipalPolicy`, which the plan role deliberately lacks, so it would need a second, more privileged principal | **Done in Module 6 phase 6** (`docs/iam.md`, "How it's verified") | `docs/iam.md`, next to the verification table, so the tests don't look automatable when they aren't |
 | K3 | `go test` in CI, with the **first test written test-first for `LOG_LEVEL` parsing** (a "do-over, not a backfill") | **Module 6 phase 1** | Extract `parseLogLevel(raw string) (slog.Level, error)`; write its failing table test (case-insensitive, whitespace, unknown value rejected) before moving the code; then `healthHandler` and `newMux` tests (FR8) |
-| K4 | Paste the **live ruleset bypass state** into `docs/iam.md` so the doc matches reality (the reviewer can't see bypass actors with write access) | **Module 6 phase 6** | Captured 2026-10-10: `trusted-branches` (`24627971`) `bypass_actors: [{actor_type: RepositoryRole, actor_id: 5 (admin), bypass_mode: always}]`, `current_user_can_bypass: always`. Proven in practice: the PR #8 merge needed admin bypass (`mergeStateStatus: BLOCKED` without it) |
+| K4 | Paste the **live ruleset bypass state** into `docs/iam.md` so the doc matches reality (the reviewer can't see bypass actors with write access) | **Done in Module 6 phase 6** (`docs/iam.md`, "GitHub-side controls", both rulesets and the environment) | Captured 2026-10-10: `trusted-branches` (`24627971`) `bypass_actors: [{actor_type: RepositoryRole, actor_id: 5 (admin), bypass_mode: always}]`, `current_user_can_bypass: always`. Proven in practice: the PR #8 merge needed admin bypass (`mergeStateStatus: BLOCKED` without it) |
 | K5 | `endpoint_public_access_cidrs` held a home IP committed in a public repo: a disclosure, and it breaks when the ISP rotates the address | **Resolved in Module 6 phase 3 (`2928b8e`, Q14)** | `eks_public_access_cidrs` in `environments/dev/variables.tf`: sensitive, no committed value, gitignored `dev.auto.tfvars` locally. The old IP stays in git history |
 
 ---
@@ -593,7 +593,7 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
   - **Re-scan permissions:** no token at all, rather than `packages: read`, because the package is public.
   - **`.gitignore`:** now covers saved plans and plan JSON, except the committed fixture.
 - **Pending after merge:** the first scheduled or dispatched re-scan (the workflow must be on `main` to be dispatched).
-- **Follow-up after merge:** tag a release from `main` (for example `v0.2.0`), then move the three overlays off `0.1.1`.
+- **Follow-up after merge:** tag a release from `main` (for example `v0.2.0`). **Decided 2026-10-10:** the overlays move off `0.1.1` on the normal schedule, in a later PR, not in the module PR.
 
 **Phase 5 result (2026-10-10):**
 - **`plan-result` first (`2bf9441`).** PR #9 showed that a job calling a reusable workflow reports as `plan-dev / plan` when it runs but as `plan-dev` when it's skipped, so neither name could be required. `plan-result` aggregates it, like `test-result`.
@@ -606,6 +606,25 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 - **Live bypass state (K4), 2026-10-10:**
   - `trusted-branches` (`24627971`): `{actor_id: 5, RepositoryRole (admin), bypass_mode: always}`.
   - `main-merge-gate` (`24832716`): `{actor_id: 5, RepositoryRole (admin), bypass_mode: pull_request}`.
+
+**Phase 6 result (2026-10-10):**
+- **`docs/ci.md` (new).** Covers:
+  - each workflow's jobs, triggers, permissions, OIDC `sub` and role
+  - the required checks, and why they're aggregates
+  - releasing an image, and the one-time GHCR access setting
+  - approving or rejecting an apply, and tearing dev down
+  - the four-way coupling rule, Conftest, rollback, and setting up the GitHub side from scratch
+  - GitHub-hosted vs self-hosted runners (T24)
+- **Every claim comes from the files, not this design.** Job facts were extracted from the five workflow files. Checks: every action is SHA-pinned, every workflow starts from `contents: read`, and all relative links resolve. Caching and multi-arch are named only as "not here yet" (T7).
+- **`docs/iam.md` (rewritten for both roles).**
+  - **Stale facts fixed:** the trust list now lives in `ci-iam/main.tf` (was `environments/dev`). Plans now run on PRs, not dispatch only. The verification table now counts 90 cases, not 34.
+  - **Trust:** `pull_request` moved from "doesn't accept (yet)" into the trust section, with the R3 reasoning.
+  - **Apply role:** a new section with its trust, the `dev-apply` environment as the other half of that trust, and a "why it's there" row for every statement.
+  - **Also added:** why `ci-iam` is a separate root, and what EKS needs first.
+  - **K4:** "GitHub-side controls" records the live bypass state of both rulesets and the environment's `can_admins_bypass`.
+  - **K2:** "can't run in CI, and that is deliberate".
+  - **Not yet run:** the first CI apply, listed as such.
+- **Deviation:** none from §7. `docs/ci.md` also covers the GitHub-side setup commands, which the design had put in `docs/ci.md` only for the environment.
 
 ---
 
