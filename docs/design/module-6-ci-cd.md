@@ -160,6 +160,7 @@ merge to main ─────► sample-api-ci  ──► push image to GHCR    
 | A7 | The existing GHCR package `sample-api` (public, tag `0.1.1`) can be linked to the repo with Actions write access | Anonymous `tags/list` works, but package settings couldn't be read (no `read:packages` scope) |
 | A8 | GitHub-hosted runners (`ubuntu-24.04`) are acceptable. Actions minutes are free for public repos | Public repo |
 | P1 | Conftest is installed in WSL for local policy development | **Met** (2026-10-10): Conftest 0.71.1 (OPA 1.21.1) at `~/.local/bin/conftest` in WSL |
+| P2 | Python venv in WSL with `boto3` and `pytest` for the IAM policy tests (K1). Python 3.12.3 is present; `boto3` and `pytest` aren't installed yet | `python3 -c "import boto3"` fails in WSL (2026-10-10) |
 
 ---
 
@@ -188,7 +189,7 @@ merge to main ─────► sample-api-ci  ──► push image to GHCR    
 | F19 | WSL holds the toolchain (terraform, aws, gh). The human's AWS identity is the IAM user `ckerins` | User memory; `environments/dev/main.tf:34` | Human-applied roots run from WSL. The human likely uses long-lived access keys locally. That's out of scope here, but noted under Future Use Cases |
 | F20 | The PR #6 reviewer's handover plan assumes "nothing else in AWS is CI identity" and "the apply role is new, so it needs no import". That's not true: `dev-github-actions-apply` and a stale `ci-iam` state exist (F3, F4) | PR #6 follow-up comment, 2026-10-05; F3, F4 | Import **both** roles into `ci-iam` (matches Q2). A plain create of the apply role fails with `EntityAlreadyExists`. Tell the reviewer before phase 2 (Q13) |
 | F21 | `sample-api` on `main` still has no graceful shutdown, no server timeouts, no mux and no tests: `http.HandleFunc` on the default mux, then `http.ListenAndServe(":8080", nil)` | `origin/main:Acme/apps/sample-api/main.go:44-56` | Open review items carried into phase 1 (FR8) |
-| F22 | Two items the reviewer still lists as open are already fixed on `main`: `LOG_LEVEL` is parsed with slog's `UnmarshalText` (case-insensitive; exits on unknown values), and the EKS module rejects `0.0.0.0/0` for the public endpoint | `origin/main:Acme/apps/sample-api/main.go:28-35`; `modules/eks/variables.tf:21-27` | Point the reviewer at the evidence; no work needed |
+| F22 | Two items the PR #6 follow-up still lists as open were fixed in Module 5 (and acknowledged in the PR #5 approval): `LOG_LEVEL` is parsed with slog's `UnmarshalText` (case-insensitive; exits on unknown values), and the EKS module rejects `0.0.0.0/0` for the public endpoint | `origin/main:Acme/apps/sample-api/main.go:28-35`; `modules/eks/variables.tf:21-27` | Point the reviewer at the evidence; no work needed |
 
 ### PR #6 review traceability
 
@@ -211,10 +212,10 @@ The old Module 6 attempt (PR #6, now `depmod6`) was rejected with a review (2026
 | T13 | Pin the Docker base image by digest | Review (lower priority) | **Module 6 phase 1** | Components §1 (Go/Docker bump); F9 |
 | T14 | `:latest` can regress if two merges run at once | Review (lower priority) | **Moot** | No `latest` tag is published (Q9) |
 | T15 | Delete `learn-terraform-get-started-aws` | Review (lower priority) | **Resolved in Module 5** | Not in the tree on `main` |
-| T16 | Restrict the EKS public endpoint from `0.0.0.0/0` | Review and follow-up (lower priority) | **Resolved (reviewer unaware)** | F22 |
+| T16 | Restrict the EKS public endpoint from `0.0.0.0/0` | Review and follow-up (lower priority) | **Resolved in Module 5** (acknowledged in the PR #5 approval) | F22 |
 | T17 | Tests bypass the `ServeMux`; add `newMux()` + `httptest` (200 / 404) | Review; inline `main.go:42` | **Module 6 phase 1** | FR8 |
 | T18 | Add a `kustomize build` step to CI over every overlay | Review and follow-up | **Already on `main`** (`sample-api-checks.yml`), carried into `sample-api-ci.yml` | Components §1 `kustomize` job |
-| T19 | `LOG_LEVEL` compared to the literal `"debug"` | Follow-up | **Resolved (reviewer unaware)** | F22 |
+| T19 | `LOG_LEVEL` compared to the literal `"debug"` | Follow-up | **Resolved in Module 5** (acknowledged in the PR #5 approval) | F22 |
 | T20 | `ReadOnlyAccess` on the plan role (and apply role) | Follow-up | **Plan role resolved in Module 5; apply role in Module 6 phase 2** | F2, F5; the apply role is adopted and its managed policies detached (Q2) |
 | T21 | Matrix builds | Review and follow-up | **Module 6 phase 1** | Go version matrix + `test-result` gate (Components §1). `terraform-checks.yml`'s `validate` matrix (on `main` via PR #8) is a second example. Multi-arch deferred to Module 7 |
 | T22 | Reusable workflows (`workflow_call`) | Review and follow-up | **Module 6 phase 4** | `terraform-plan-reusable.yml` (Components §2a) |
@@ -224,6 +225,18 @@ The old Module 6 attempt (PR #6, now `depmod6`) was rejected with a review (2026
 | T26 | `docs/ci.md` describes the role each workflow assumes, every claim true | Follow-up | **Module 6 phase 6** | FR7 |
 | T27 | Salvage files from the old branch instead of retyping | Follow-up | **Plan** | Internal Documentation, salvage list |
 | T28 | Suggested order: Go CI first, IAM handover as its own commit, then apply split, concepts, docs last | Follow-up | **Adopted** | Rollout table (Components §9) |
+
+### PR #5 carry-overs
+
+The PR #5 approval (bgblackmore, 2026-10-07) deferred these items to Module 6.
+
+| # | Item | Status | Where handled |
+|---|---|---|---|
+| K1 | **Rewrite `simulate-plan-role.sh` in Python as pytest tests.** One `simulate-principal-policy` call per resource with all its actions batched (not 34 serial calls); context entries as dicts, not hand-built `ContextKeyName=...` strings; a harness error (for example `AccessDenied` on the simulator call itself, a boto3 `ClientError`) **errors the test** instead of being compared as a policy decision, which the bash `2>&1` capture conflates | **Module 6 phase 2** (its own commit before the handover) | `Acme/infra/scripts/tests/test_iam_policies.py` with a `requirements.txt` (`boto3`, `pytest`). Parity first: the same 34 plan-role cases pass. Then apply-role cases, run **before** applying the re-scoped apply role. The `.sh` is deleted once parity is shown |
+| K2 | Document that the simulator **can't run on PRs**: it needs `iam:SimulatePrincipalPolicy`, which the plan role deliberately lacks, so it would need a second, more privileged principal | **Module 6 phase 6** | `docs/iam.md`, next to the verification table, so the tests don't look automatable when they aren't |
+| K3 | `go test` in CI, with the **first test written test-first for `LOG_LEVEL` parsing** (a "do-over, not a backfill") | **Module 6 phase 1** | Extract `parseLogLevel(raw string) (slog.Level, error)`; write its failing table test (case-insensitive, whitespace, unknown value rejected) before moving the code; then `healthHandler` and `newMux` tests (FR8) |
+| K4 | Paste the **live ruleset bypass state** into `docs/iam.md` so the doc matches reality (the reviewer can't see bypass actors with write access) | **Module 6 phase 6** | Captured 2026-10-10: `trusted-branches` (`24627971`) `bypass_actors: [{actor_type: RepositoryRole, actor_id: 5 (admin), bypass_mode: always}]`, `current_user_can_bypass: always`. Proven in practice: the PR #8 merge needed admin bypass (`mergeStateStatus: BLOCKED` without it) |
+| K5 | `endpoint_public_access_cidrs = ["68.237.90.102/32"]` (a home IP) is committed in a public repo: a disclosure, and it breaks when the ISP rotates the address | **Open (Q14)** | `environments/dev/main.tf:31` |
 
 ---
 
@@ -482,7 +495,7 @@ Why a separate `ci-iam` root: if CI applied the root containing its own roles, t
 | Failure | What happens | Detection / recovery |
 |---|---|---|
 | OIDC trust mismatch (`sub` changed, typo, immutable-subject opt-in) | "Assume role" step fails with AccessDenied, nothing runs against AWS | Fails closed. Compare the `sub` from the job's debug output with the trust policy |
-| Plan role missing a read permission | Plan fails with AccessDenied naming the action | Follow `docs/iam.md:228-229`, then rerun `simulate-plan-role.sh` |
+| Plan role missing a read permission | Plan fails with AccessDenied naming the action | Follow `docs/iam.md:228-229`, then rerun the IAM policy tests (`pytest Acme/infra/scripts/tests`, K1) |
 | Conftest violation | PR check red; apply workflow stops before approval | Fix the Terraform. Never "skip policy" |
 | Stale saved plan (state changed after plan) | `apply` errors "Saved plan is stale", nothing applied | Re-run the workflow, which re-plans and asks for re-approval |
 | Apply fails midway | Partial changes; lock released by Terraform; state reflects what was done | Fix forward via PR, or revert the PR. Previous state version is in S3 |
@@ -499,12 +512,12 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | Phase | Change | Check | Rollback |
 |---|---|---|---|
 | 0 | Baseline. PR #5 merged; `c0356bc` (`terraform-checks.yml`, missed by the PR #5 merge) landed through PR #8. Confirm `kubectl kustomize` renders every overlay and `terraform plan` is clean in `environments/dev` and `account/` **before changing anything**. Install Conftest in WSL | All overlays render; both plans show **No changes**; `conftest --version` | n/a (nothing changed) |
-| 1 | `sample-api-ci.yml` (lint, **Go matrix + `test-result`**, kustomize, build-scan, push, release-tag) replacing `sample-api-checks.yml`; app changes (graceful shutdown, timeouts, `newMux()`, tests); PDB for stage/prod; version injection (remove `APP_VERSION`); Go bump and digest-pinned builder; Dockerfile comment on the multi-arch deferral. Salvage files from `depmod6` | Both matrix legs and `test-result` green; scan green; on kind, `kubectl rollout restart` during a `curl` loop drops no requests; after merge `tags/list` includes `sha-<short>`, and after a `v*` tag the semver tag's digest equals the `sha-<short>` digest | Revert the commit. The old image tag `0.1.1` stays in use |
-| 2 | **IAM handover, alone in its own commit.** New `ci-iam/` root on current code; `terraform state rm` the stale `ci-iam` entries (or use a new state key); `import` **both** the plan role and the existing apply role (F20); replace the apply role's managed policies with the narrow VPC-only inline policy; `removed { destroy = false }` in `dev` | Plan **both** stacks and read them before applying either: `dev` shows a state-only removal with nothing destroyed; `ci-iam` shows 2 imports, 0 creates, **0 destroys/replaces** (in-place policy updates on the apply role only). **Stop on any destroy or replace.** After apply, `aws iam list-attached-role-policies` is empty for both roles | Revert the commit; re-import the plan role into `dev` |
+| 1 | `sample-api-ci.yml` (lint, **Go matrix + `test-result`**, kustomize, build-scan, push, release-tag) replacing `sample-api-checks.yml`; app changes (graceful shutdown, timeouts, `newMux()`, tests), with the `LOG_LEVEL` test written first (K3); PDB for stage/prod; version injection (remove `APP_VERSION`); Go bump and digest-pinned builder; Dockerfile comment on the multi-arch deferral. Salvage files from `depmod6` | Both matrix legs and `test-result` green; scan green; on kind, `kubectl rollout restart` during a `curl` loop drops no requests; after merge `tags/list` includes `sha-<short>`, and after a `v*` tag the semver tag's digest equals the `sha-<short>` digest | Revert the commit. The old image tag `0.1.1` stays in use |
+| 2 | **IAM handover, alone in its own commit.** Preceded by its own commit: the Python/pytest IAM policy tests (K1), with plan-role parity shown and apply-role cases passing before anything is applied. Then: New `ci-iam/` root on current code; `terraform state rm` the stale `ci-iam` entries (or use a new state key); `import` **both** the plan role and the existing apply role (F20); replace the apply role's managed policies with the narrow VPC-only inline policy; `removed { destroy = false }` in `dev` | Plan **both** stacks and read them before applying either: `dev` shows a state-only removal with nothing destroyed; `ci-iam` shows 2 imports, 0 creates, **0 destroys/replaces** (in-place policy updates on the apply role only). **Stop on any destroy or replace.** After apply, `aws iam list-attached-role-policies` is empty for both roles | Revert the commit; re-import the plan role into `dev` |
 | 3 | Plan/apply split and the gate: the plan role trusts `pull_request`; `terraform-plan.yml` on PRs (absorbs and deletes `terraform-checks.yml`); `terraform-apply.yml` (ungated plan job, then the env-gated apply job that applies the saved plan); `dev-apply-environment.json` | PR gets a plan comment; `Show AWS identity` prints `assumed-role/dev-github-actions-plan`. After merge: "Waiting for review" shows the plan **before** approval; rejecting creates nothing; approving applies; a dispatch from a non-`main` branch is rejected by the environment | Remove the trust value; restore the dispatch-only plan file; delete the apply workflow (the apply role is unused without it) |
 | 4 | Remaining concepts: extract `terraform-plan-reusable.yml` (`workflow_call`, no behaviour change), `sample-api-rescan.yml` (`schedule`), and the Conftest policy + tests wired into the reusable plan | The PR plan comment is identical before and after the refactor; `conftest verify -p Acme/infra/policies/terraform` passes and a seeded-bad fixture fails; a manual dispatch of the re-scan is green | Revert the commit |
 | 5 | `main-merge-gate` ruleset (required checks: `test-result`, `build-scan`, `kustomize`, `lint`, `fmt`, `validate`, `plan-dev`) | A PR with a failing check can't be merged | Disable the ruleset |
-| 6 | `docs/ci.md` (new, including the self-hosted vs GitHub-hosted runner section) and `docs/iam.md`, **written last** so they describe what exists | Every claim maps to a file or a run (no documented caches or steps that don't exist) | Revert the commit |
+| 6 | `docs/ci.md` (new, including the self-hosted vs GitHub-hosted runner section) and `docs/iam.md` (the simulator-can't-run-on-PRs note, K2; the live bypass state, K4), **written last** so they describe what exists | Every claim maps to a file or a run (no documented caches or steps that don't exist) | Revert the commit |
 
 **Phase 0 result (2026-10-10, `main` at `895d3b6`):** all 9 Kustomize trees render (sample-api base + dev/stage/prod; infrastructure base + dev/stage/prod/kind). `account/`: **No changes**. `environments/dev`: **55 to add, 0 to change, 0 to destroy**. Every add is the deliberately torn-down VPC (14) and EKS (41) (A5); nothing existing is updated or destroyed, and the plan role is untouched. "Clean" for dev therefore means *no changes to anything that exists*. Conftest 0.71.1 was already installed (P1).
 
@@ -540,7 +553,7 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | IAM, STS, OIDC provider | $0 | |
 | S3 state + DynamoDB locks | Cents per month | Existing |
 | **Dev while `enable_eks = true`** | About **$0.20/hour (about $145/month if left on)**: EKS control plane $0.10/h ([EKS pricing](https://cloudburn.io/blog/amazon-eks-pricing)), NAT gateway about $0.045/h plus data processed, public IPv4/EIP $0.005/h, 2x `t3.small` about $0.042/h, EBS | This cost comes from *what gets applied*, not from CI. Verify current rates on the AWS pricing pages before turning EKS on |
-| Maintenance effort | About 1 h/month | Bump pinned action SHAs (Dependabot), Terraform/Conftest/Trivy/golangci-lint versions; review `simulate-plan-role.sh` when policies change |
+| Maintenance effort | About 1 h/month | Bump pinned action SHAs (Dependabot), Terraform/Conftest/Trivy/golangci-lint versions; review the IAM policy tests (K1) when policies change |
 | Licenses | No fees | Terraform (BSL 1.1, internal use fine); Conftest/OPA, Trivy (Apache-2.0); golangci-lint (GPL-3.0, used as a tool, not distributed) |
 
 ---
@@ -578,7 +591,7 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | GHCR package Actions access | GitHub | Manual grant (F11) |
 | Actions (pinned by SHA): `actions/checkout`, `actions/setup-go`, `hashicorp/setup-terraform`, `aws-actions/configure-aws-credentials`, `actions/github-script`, `actions/upload-artifact`/`download-artifact`, `docker/setup-buildx-action`, `docker/build-push-action`, `docker/login-action`, `golangci/golangci-lint-action`, `aquasecurity/trivy-action` | Supply chain | Verify each SHA against its release tag. Trivy: a post-incident release only (F17) |
 | Tools: Terraform 1.16.3, Conftest (current at implementation; v0.67.x as of March 2026, [pkg.go.dev](https://pkg.go.dev/github.com/open-policy-agent/conftest@v0.67.1)), Trivy CLI, golangci-lint v2 | Tooling | Conftest is installed in CI by downloading the release binary and verifying its SHA-256 (no first-party action) |
-| `simulate-plan-role.sh` | Test | Extend it with an apply-role variant |
+| IAM policy tests (K1) | Test | Python + boto3 + pytest rewrite of `simulate-plan-role.sh`, with apply-role cases; run from WSL by a principal with `iam:SimulatePrincipalPolicy` (not CI) |
 
 ---
 
@@ -606,7 +619,8 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 - `Acme/infra/terraform/modules/iam-roles/main.tf:1-19`: future-environments and apply-role notes
 - `Acme/infra/github/trusted-branches-ruleset.json`: who can push trusted branches
 - `.github/workflows/terraform-plan.yml`, `terraform-checks.yml`, `sample-api-checks.yml`: current CI
-- `Acme/infra/scripts/tests/simulate-plan-role.sh`: IAM policy simulator tests
+- `Acme/infra/scripts/tests/simulate-plan-role.sh`: IAM policy simulator tests (bash; replaced by pytest in phase 2, K1)
+- PR #5 review (bgblackmore, approved 2026-10-07): https://github.com/kerinschristopher/Curriculum/pull/5. Module 6 carry-overs are tracked in Findings, "PR #5 carry-overs"
 - Prior art: `git show origin/depmod6:docs/ci.md` and `git log origin/depmod6`
 - PR #6 review and follow-up (bgblackmore, 2026-09-30 and 2026-10-05): https://github.com/kerinschristopher/Curriculum/pull/6. Every item is tracked in Findings, "PR #6 review traceability"
 - **Salvage list (copy as files from `depmod6`, don't retype):** `modules/iam-roles/main.tf` `plan_trust` and `apply_trust`; `.github/workflows/terraform-apply.yml` (environment gate, apply/destroy dispatch input; then split per §3); `.github/workflows/sample-api-ci.yml` (SHA pins, secret-less Trivy, scanned-tarball push); `main_test.go` and the `healthHandler` extraction. Re-apply the `apply_environment` and `state_key` variables to `iam-roles` **by hand**, reading both versions first, because Module 5 rewrote that file. Don't let a conflict resolution decide the design. `.gitattributes` LF enforcement is already on `main`
@@ -637,4 +651,5 @@ External references:
 | Q10 | Trivy threshold for Module 6: fail on **fixable HIGH + CRITICAL** (suggested), or CRITICAL only until Module 10? | kerinschristopher | Decided (2026-10-09): fail on fixable HIGH + CRITICAL |
 | Q11 | AWS account and region: stay on the single account `401352756330` / `us-east-1`? | kerinschristopher | Decided (2026-10-09): single account `401352756330`, `us-east-1` |
 | Q12 | Migrate state locking to S3 `use_lockfile` during Module 6 or afterwards? | kerinschristopher | Decided (2026-10-09): afterwards, as its own change |
-| Q13 | Tell the PR #6 reviewer that `dev-github-actions-apply` and a stale `ci-iam` state already exist (F20), so the handover imports **both** roles, and that `LOG_LEVEL` and the EKS endpoint are already fixed (F22). Do it before phase 2 | kerinschristopher | Open |
+| Q13 | Tell the PR #6 reviewer that `dev-github-actions-apply` and a stale `ci-iam` state already exist (F20), so the handover imports **both** roles, and that `LOG_LEVEL` and the EKS endpoint are already fixed (F22). Do it before phase 2 | kerinschristopher | Resolved (2026-10-10): the reviewer is aware of all relevant imports |
+| Q14 | How to stop committing the home IP (K5)? Suggested: a root variable with **no committed value** and `sensitive = true` (so plan output and PR comments show `(sensitive value)`), supplied locally from a gitignored `dev.auto.tfvars` (`*.tfvars` is already ignored) and in CI from a repository variable as `TF_VAR_…`. Only needed while `enable_eks = true`, so it can default to `[]` with validation conditional on the toggle | kerinschristopher | Open |
