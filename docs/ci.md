@@ -59,7 +59,10 @@ the ruleset after editing its JSON with
 
 - **No `latest` tag.** A moving label lets nodes with cached images run different builds under one name.
 - **No AWS access at all**, so the `pull_request` trigger is safe here.
-- **Concurrency:** `sample-api-ci-<ref>`; a new push to the same PR cancels the old run. Runs on `main` are never cancelled.
+- **Concurrency:** on a PR, `sample-api-ci-<ref>`, and a new push to the same PR cancels the old run. Every push run (to `main`, `mod*`
+  or a tag) gets a group of its own (`sample-api-ci-<run id>`), so it is never cancelled, not even while pending. One shared group
+  wouldn't be enough: GitHub keeps only the newest pending run in a group, and a dropped run on `main` means a merge commit with no
+  `sha-*` image to release.
 - **Not here yet, on purpose:** Docker layer caching and the Trivy DB cache (`cache: false`) come in Module 7, which measures cold vs warm
   builds. Images are amd64 only; multi-arch is also Module 7.
 

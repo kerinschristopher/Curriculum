@@ -27,9 +27,11 @@ permissions:
   contents: read
 
 # A new push to the same PR makes the old run pointless, so cancel it. Never cancel runs on
-# main: each one may be publishing an image.
+# main: each one may be publishing an image. Pushes get a group of their own (the run ID),
+# because GitHub cancels a *pending* run when a newer one queues in the same group, even
+# with cancel-in-progress off; that would drop a merge commit's sha-* image.
 concurrency:
-  group: sample-api-ci-${{ github.ref }}
+  group: sample-api-ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
