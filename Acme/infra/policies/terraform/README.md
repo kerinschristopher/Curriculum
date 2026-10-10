@@ -6,7 +6,7 @@ including plans with no changes: the PR plan and the post-merge plan both go thr
 
 | File | What it is |
 |---|---|
-| `no_public_ssh.rego` | `deny`: no security group rule may allow SSH (TCP 22, or all protocols) from `0.0.0.0/0` or `::/0`. `warn`: such a rule's CIDR is only known after apply, so it can't be checked |
+| `no_public_ssh.rego` | `deny`: no security group rule may allow SSH (TCP 22, or all protocols) from `0.0.0.0/0` or `::/0`. `warn`: something that decides it is only known after apply, so it can't be checked: the CIDR, the protocol or port range, or a whole inline `ingress` list (e.g. a `dynamic` block over another resource's output) |
 | `no_public_ssh_test.rego` | Unit tests (`conftest verify`) on small hand-written plans |
 | `testdata/seeded-bad/` | A real plan of `main.tf`, which opens SSH in each of the three resource shapes and has one CIDR unknown until apply. CI requires exactly 3 denies and 1 warning from it |
 
