@@ -31,6 +31,7 @@ on:
       - Acme/infra/terraform/environments/dev/**
       - Acme/infra/terraform/modules/**
       - .github/workflows/terraform-apply.yml
+      - .github/workflows/terraform-plan-reusable.yml
   # Re-apply, or tear dev down at the end of the day. Goes through the same gate.
   workflow_dispatch:
     inputs:
@@ -51,128 +52,29 @@ concurrency:
 
 env:
   TF_DIR: Acme/infra/terraform/environments/dev
+  # Keep equal to TF_VERSION in terraform-plan-reusable.yml and terraform-plan.yml.
   TF_VERSION: "1.16.3"
   AWS_REGION: us-east-1
   PLAN_ARTIFACT: tfplan-dev
 
 jobs:
+  # The plan (OIDC as the read-only plan role, init, plan -lock=false -detailed-exitcode, run
+  # summary, artifacts) is shared with terraform-plan.yml. With save-plan, the binary tfplan and
+  # lock file are uploaded for the apply job below; see the reusable workflow for why that
+  # artifact is short-lived and deleted. `env` isn't available in a `with:` for a called
+  # workflow, hence the literals (they must match PLAN_ARTIFACT and TF_DIR).
   plan:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
-    outputs:
-      has_changes: ${{ steps.plan.outputs.has_changes }}
-      artifact_id: ${{ steps.upload.outputs.artifact-id }}
-    steps:
-      - name: Check out code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-          terraform_wrapper: false
-
-      - name: Assume the read-only plan role via OIDC
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: arn:aws:iam::401352756330:role/dev-github-actions-plan
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: gha-terraform-apply-plan-${{ github.run_id }}
-
-      # Should print assumed-role/dev-github-actions-plan/...
-      - name: Show AWS identity
-        run: aws sts get-caller-identity --query Arn --output text
-
-      - name: Terraform init
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform init -input=false
-
-      # -lock=false: the plan role can't take the lock (see terraform-plan.yml). The apply below
-      # does lock, and Terraform refuses a saved plan whose state has changed since ("stale plan").
-      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes.
-      - name: Terraform plan
-        id: plan
-        working-directory: ${{ env.TF_DIR }}
-        env:
-          TF_ACTION: ${{ inputs.action || 'apply' }}
-        run: |
-          mode=()
-          if [ "$TF_ACTION" = destroy ]; then mode=(-destroy); fi
-          set +e
-          terraform plan -input=false -lock=false -no-color -detailed-exitcode "${mode[@]}" -out=tfplan
-          code=$?
-          set -e
-          case "$code" in
-            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
-            2) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
-            *) exit "$code" ;;
-          esac
-          terraform show -no-color tfplan > "$RUNNER_TEMP/plan.txt"
-
-      # What the reviewer reads before approving: the counts, anything destroyed or replaced
-      # called out on its own, then the full plan.
-      - name: Plan summary
-        env:
-          TF_ACTION: ${{ inputs.action || 'apply' }}
-          HAS_CHANGES: ${{ steps.plan.outputs.has_changes }}
-        run: |
-          plan="$RUNNER_TEMP/plan.txt"
-          # An outputs-only plan has no "Plan:" line, but still needs an apply to update state.
-          summary="$(grep -m1 -E '^(Plan: |No changes\.)' "$plan" || true)"
-          if [ -z "$summary" ] && grep -q '^Changes to Outputs:' "$plan"; then
-            summary="No resource changes; only output values change."
-          fi
-          {
-            echo "### Terraform ${TF_ACTION}: \`environments/dev\`"
-            echo
-            echo "**${summary:-(no summary line found)}**"
-            echo
-            if [ "$HAS_CHANGES" = true ]; then
-              echo "Approve or reject in the **dev-apply** review box on this run. Approving applies exactly this plan."
-              echo
-            fi
-            risky="$(grep -E '^  # .* (will be destroyed|must be replaced)' "$plan" || true)"
-            if [ -n "$risky" ]; then
-              echo "**:warning: This plan destroys or replaces resources:**"
-              echo
-              echo '```'
-              echo "$risky"
-              echo '```'
-              echo
-            fi
-            echo '<details><summary>Full plan</summary>'
-            echo
-            echo '```'
-            cat "$plan"
-            echo '```'
-            echo
-            echo '</details>'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # tfplan holds unredacted values (even sensitive ones) and this repo is public, so the
-      # artifact lives one day at most and the apply job deletes it. Today it holds only resource
-      # IDs and ARNs. Revisit before enable_eks = true (the plan would carry eks_public_access_cidrs)
-      # or any secret enters dev's state: keep the plan in the private state bucket instead, or
-      # re-plan inside the approved job (design doc Q3, risk R4).
-      # The lock file pins the provider builds the plan was made with; apply must use the same.
-      - name: Upload the saved plan
-        id: upload
-        if: steps.plan.outputs.has_changes == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ env.PLAN_ARTIFACT }}
-          path: |
-            ${{ env.TF_DIR }}/tfplan
-            ${{ env.TF_DIR }}/.terraform.lock.hcl
-          include-hidden-files: true # .terraform.lock.hcl
-          retention-days: 1
-          if-no-files-found: error
-          overwrite: true # a re-run of this job replaces its earlier plan
+    uses: ./.github/workflows/terraform-plan-reusable.yml
+    with:
+      working-directory: Acme/infra/terraform/environments/dev
+      role-arn: arn:aws:iam::401352756330:role/dev-github-actions-plan
+      artifact-name: tfplan-dev
+      save-plan: true
+      destroy: ${{ inputs.action == 'destroy' }}
+      gated: true
 
   apply:
     needs: plan
@@ -229,5 +131,5 @@ jobs:
       - name: Delete the plan artifact
         env:
           GH_TOKEN: ${{ github.token }}
-          ARTIFACT_ID: ${{ needs.plan.outputs.artifact_id }}
+          ARTIFACT_ID: ${{ needs.plan.outputs.plan_artifact_id }}
         run: gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"
