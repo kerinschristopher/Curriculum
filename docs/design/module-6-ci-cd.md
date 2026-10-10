@@ -217,11 +217,11 @@ The old Module 6 attempt (PR #6, now `depmod6`) was rejected with a review (2026
 | T18 | Add a `kustomize build` step to CI over every overlay | Review and follow-up | **Already on `main`** (`sample-api-checks.yml`), carried into `sample-api-ci.yml` | Components §1 `kustomize` job |
 | T19 | `LOG_LEVEL` compared to the literal `"debug"` | Follow-up | **Resolved in Module 5** (acknowledged in the PR #5 approval) | F22 |
 | T20 | `ReadOnlyAccess` on the plan role (and apply role) | Follow-up | **Plan role resolved in Module 5; apply role in Module 6 phase 2** | F2, F5; the apply role is adopted and its managed policies detached (Q2) |
-| T21 | Matrix builds | Review and follow-up | **Module 6 phase 1** | Go version matrix + `test-result` gate (Components §1). `terraform-checks.yml`'s `validate` matrix (on `main` via PR #8) is a second example. Multi-arch deferred to Module 7 |
-| T22 | Reusable workflows (`workflow_call`) | Review and follow-up | **Module 6 phase 4** | `terraform-plan-reusable.yml` (Components §2a) |
-| T23 | `schedule` trigger | Review and follow-up | **Module 6 phase 4** | Nightly `sample-api-rescan.yml` (Components §1a) |
+| T21 | Matrix builds | Review and follow-up | **Module 6 phase 1** | Go version matrix + `test-result` gate (Components §1). `terraform-plan.yml`'s `validate` matrix (with `validate-result`) and `sample-api-rescan.yml`'s per-image matrix are further examples. Multi-arch deferred to Module 7 |
+| T22 | Reusable workflows (`workflow_call`) | Review and follow-up | **Done in Module 6 phase 4 (`71c2141`)** | `terraform-plan-reusable.yml` (Components §2a) |
+| T23 | `schedule` trigger | Review and follow-up | **Done in Module 6 phase 4 (`59dbf86`); the first scheduled run is after merge** | Nightly `sample-api-rescan.yml` (Components §1a) |
 | T24 | Self-hosted vs GitHub-hosted runners written out | Review and follow-up | **Module 6 phase 6** | `docs/ci.md` section (FR9) |
-| T25 | Conftest policy in `infra/policies/` (no SSH from `0.0.0.0/0`) | Follow-up | **Module 6 phase 4** | Components §4 |
+| T25 | Conftest policy in `infra/policies/` (no SSH from `0.0.0.0/0`) | Follow-up | **Done in Module 6 phase 4 (`0a95743`)** | Components §4 |
 | T26 | `docs/ci.md` describes the role each workflow assumes, every claim true | Follow-up | **Module 6 phase 6** | FR7 |
 | T27 | Salvage files from the old branch instead of retyping | Follow-up | **Plan** | Internal Documentation, salvage list |
 | T28 | Suggested order: Go CI first, IAM handover as its own commit, then apply split, concepts, docs last | Follow-up | **Adopted** | Rollout table (Components §9) |
@@ -483,7 +483,7 @@ Why a separate `ci-iam` root: if CI applied the root containing its own roles, t
 |---|---|---|
 | Environment `dev-apply` (exists) | Required reviewer `kerinschristopher`; deployment branches: `main` only; no secrets | New `dev-apply-environment.json` plus the `gh api -X PUT` command in `docs/ci.md` |
 | Ruleset `trusted-branches` (exists) | Unchanged | `trusted-branches-ruleset.json` |
-| Ruleset `main-merge-gate` (new) | Target `main`: require a PR; required checks `test-result` (never the per-version matrix legs), `lint`, `kustomize`, `build-scan`, `terraform-plan / plan-dev`, `fmt`, `validate-result` (never the per-root `validate` legs); admin bypass "pull requests only" | New `main-merge-gate-ruleset.json` |
+| Ruleset `main-merge-gate` (new) | Target `main`: require a PR; required checks `test-result` (never the per-version matrix legs), `lint`, `kustomize`, `build-scan`, `plan-dev / plan` (the reusable workflow's job, as GitHub names it), `policy`, `fmt`, `validate-result` (never the per-root `validate` legs); admin bypass "pull requests only" | New `main-merge-gate-ruleset.json` |
 | GHCR package `sample-api` | Manage Actions access: `Curriculum` gets **Write** | Manual. Documented in `docs/ci.md` |
 
 #### 7. Documentation
@@ -517,7 +517,7 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | 2 | **IAM handover, alone in its own commit.** Preceded by its own commit: the Python/pytest IAM policy tests (K1), with plan-role parity shown and apply-role cases passing before anything is applied. Then: New `ci-iam/` root on current code; `terraform state rm` the stale `ci-iam` entries (or use a new state key); `import` **both** the plan role and the existing apply role (F20); replace the apply role's managed policies with the narrow VPC-only inline policy; `removed { destroy = false }` in `dev` | Plan **both** stacks and read them before applying either: `dev` shows a state-only removal with nothing destroyed; `ci-iam` shows 2 imports, 0 creates, **0 destroys/replaces** (in-place policy updates on the apply role only). **Stop on any destroy or replace.** After apply, `aws iam list-attached-role-policies` is empty for both roles | Revert the commit; re-import the plan role into `dev` |
 | 3 | Plan/apply split and the gate: the plan role trusts `pull_request`; `terraform-plan.yml` on PRs (absorbs and deletes `terraform-checks.yml`); `terraform-apply.yml` (ungated plan job, then the env-gated apply job that applies the saved plan); `dev-apply-environment.json` | PR gets a plan comment; `Show AWS identity` prints `assumed-role/dev-github-actions-plan`. After merge: "Waiting for review" shows the plan **before** approval; rejecting creates nothing; approving applies; a dispatch from a non-`main` branch is rejected by the environment | Remove the trust value; restore the dispatch-only plan file; delete the apply workflow (the apply role is unused without it) |
 | 4 | Remaining concepts: extract `terraform-plan-reusable.yml` (`workflow_call`, no behaviour change), `sample-api-rescan.yml` (`schedule`), and the Conftest policy + tests wired into the reusable plan | The PR plan comment is identical before and after the refactor; `conftest verify -p Acme/infra/policies/terraform` passes and a seeded-bad fixture fails; a manual dispatch of the re-scan is green | Revert the commit |
-| 5 | `main-merge-gate` ruleset (required checks: `test-result`, `build-scan`, `kustomize`, `lint`, `fmt`, `validate-result`, `plan-dev`) | A PR with a failing check can't be merged | Disable the ruleset |
+| 5 | `main-merge-gate` ruleset (required checks: `test-result`, `build-scan`, `kustomize`, `lint`, `fmt`, `validate-result`, `policy`, `plan-dev / plan`) | A PR with a failing check can't be merged | Disable the ruleset |
 | 6 | `docs/ci.md` (new, including the self-hosted vs GitHub-hosted runner section) and `docs/iam.md` (the simulator-can't-run-on-PRs note, K2; the live bypass state, K4), **written last** so they describe what exists | Every claim maps to a file or a run (no documented caches or steps that don't exist) | Revert the commit |
 
 **Phase 0 result (2026-10-10, `main` at `895d3b6`):** all 9 Kustomize trees render (sample-api base + dev/stage/prod; infrastructure base + dev/stage/prod/kind). `account/`: **No changes**. `environments/dev`: **55 to add, 0 to change, 0 to destroy**. Every add is the deliberately torn-down VPC (14) and EKS (41) (A5); nothing existing is updated or destroyed, and the plan role is untouched. "Clean" for dev therefore means *no changes to anything that exists*. Conftest 0.71.1 was already installed (P1).
@@ -571,7 +571,29 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
   - **Output-only plans:** dev's state still holds the pre-phase-2 `ci_role_arn` output, so a destroy dispatch on the torn-down dev is an outputs-only change. The summaries say so instead of "(no summary line found)".
   - **The environment is captured as two files**, because the allowed branch is a separate API call. `can_admins_bypass: true` is captured as it is live: the only admin is the only reviewer.
   - **New revisit trigger (R4):** with `enable_eks = true`, the public `tfplan` artifact would contain `eks_public_access_cidrs`.
-- **Pending:** when the module PR is opened, it should get the plan comment. After it merges, the run shows "Waiting for review" with the plan visible; rejecting applies nothing; approving applies 13 VPC resources; a dispatch of `terraform-apply` from `mod6` is refused by the environment (the workflow must exist on `main` before it can be dispatched). The apply role's multi-resource authorization (for example, `AssociateRouteTable` on the subnet and the route table) is first exercised by that real apply.
+- **Pending after the module PR merges** (the PR plan comment and its in-place update were confirmed on draft PR #9 in phase 4): the run shows "Waiting for review" with the plan visible; rejecting applies nothing; approving applies 13 VPC resources; a dispatch of `terraform-apply` from `mod6` is refused by the environment (the workflow must exist on `main` before it can be dispatched). The apply role's multi-resource authorization (for example, `AssociateRouteTable` on the subnet and the route table) is first exercised by that real apply.
+
+**Phase 4 result (2026-10-10, on `mod6`, commits `71c2141`, `0a95743`, `59dbf86`):**
+- **Draft PR #9** was opened only to test PR behaviour. Its description and a comment say it isn't ready for review. Its first run (`38032703703`) assumed the plan role with `sub = pull_request` and posted the plan comment (13 to add).
+- **`terraform-plan-reusable.yml` (`71c2141`):** both plan jobs now call it.
+  - **No behaviour change:** the PR comment after the refactor differs from the one before **only** in the commit/run line.
+  - **Edited in place:** there's still exactly one plan comment, its `updated_at` later than its `created_at`. This closes the phase 3 pending check.
+- **Conftest (`0a95743`):**
+  - **Unit tests:** `conftest verify` passes 22/22. Four mutations (drop `::/0`, exact port only, no null handling, UDP counted as SSH) each fail at least one test.
+  - **Real-shaped fixture:** the hand-written test plans were checked against a real plan of a seeded config, with all three rule shapes plus one CIDR unknown until apply. It gives exactly 3 denies and 1 warning. My first fixture used a CIDR Terraform already knew at plan time; the real plan showed it, and I fixed the fixture, not the policy.
+  - **Real dev plans pass:** EKS off (13 adds) and on (55 adds; the EKS module's `aws_security_group`/`aws_security_group_rule` are evaluated).
+  - **In CI (run `38033435841`):** the Conftest download's SHA-256 is verified; the `policy` job passes 22/22 and gets 3/1 from the seeded plan; the dev plan passes the policy.
+- **`sample-api-rescan.yml` (`59dbf86`):** the `resolve` script was dry-run in a container. Against the live registry it picks `["0.1.1"]` (no `sha-*` image exists yet). With fake tags it picks the newest commit's `sha-*` and `0.10.0` over `0.9.0`.
+- **Finding:** Trivy v0.75.0 on the released `0.1.1` image (pinned by the dev, stage and prod overlays) reports **1 CRITICAL and 24 HIGH** fixable vulnerabilities, all in the Go 1.23.12 standard library. The re-scan will be red until a release is tagged from `main` and the overlays are bumped. That's the job doing its job; the follow-up is listed below.
+- **Deviations from this design:**
+  - **`save-plan` input:** the reusable workflow uploads the binary `tfplan` only for the apply caller. PR plans upload only the redacted text plan, so no unredacted PR plan exists anywhere.
+  - **Separate `comment` job:** the PR comment is posted by its own job with `pull-requests: write` and no AWS access, instead of a step in the plan job.
+  - **Required-check name:** the plan check is now named `plan-dev / plan`, and the new `policy` job (unit tests plus the seeded plan) is also a required check. Both are updated in Components §6 and the rollout table.
+  - **Policy scope:** it checks every resource the plan leaves in place (creates, updates and unchanged no-ops), so an existing violation also fails. It treats SSH as TCP only, so UDP 22 passes.
+  - **Re-scan permissions:** no token at all, rather than `packages: read`, because the package is public.
+  - **`.gitignore`:** now covers saved plans and plan JSON, except the committed fixture.
+- **Pending after merge:** the first scheduled or dispatched re-scan (the workflow must be on `main` to be dispatched).
+- **Follow-up after merge:** tag a release from `main` (for example `v0.2.0`), then move the three overlays off `0.1.1`.
 
 ---
 
