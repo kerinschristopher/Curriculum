@@ -4,10 +4,15 @@ name: terraform-plan
 # cleanly as the read-only plan role. On a PR the dev plan is posted as one comment (updated on
 # every push), so the reviewer sees what a merge would change before it's merged.
 #
+# Nightly drift check (schedule): plans dev from main and fails if the plan isn't empty, i.e. AWS
+# no longer matches main (a manual change in the console, or an approved apply that never ran).
+# It stays red until the first approved terraform-apply has created dev.
+#
 # Trigger/trust/ruleset coupling: plan-dev assumes dev-github-actions-plan, whose trust policy
 # (Acme/infra/terraform/ci-iam/main.tf) accepts the OIDC sub of:
 #   - pull_request runs ("repo:<repo>:pull_request", from any same-repo branch; forks get no token)
-#   - workflow_dispatch runs on main or mod* ("repo:<repo>:ref:refs/heads/<branch>")
+#   - workflow_dispatch runs on main or mod*, and the schedule (which always runs on main)
+#     ("repo:<repo>:ref:refs/heads/<branch>")
 # Who can create or push main and mod* is set by the trusted-branches ruleset (Acme/infra/github/).
 # The triggers, the trust list and the ruleset move together: change one, check the other two.
 #
@@ -22,6 +27,10 @@ on:
     branches: [main, "mod*"]
   # Manual plan of dev from main or mod*: gh workflow run terraform-plan.yml --ref <branch>
   workflow_dispatch:
+  # Nightly drift check. Scheduled runs only run on the default branch, and GitHub disables them
+  # after 60 days without repository activity.
+  schedule:
+    - cron: "41 5 * * *" # daily, off the hour
 
 # Least privilege by default. Only plan-dev asks for an OIDC token, and only comment for PR write access.
 permissions:
@@ -60,8 +69,8 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PUSH_BEFORE: ${{ github.event.before }}
         run: |
-          if [ "$EVENT" = workflow_dispatch ]; then
-            echo "Manual run; running all jobs"
+          if [ "$EVENT" = workflow_dispatch ] || [ "$EVENT" = schedule ]; then
+            echo "$EVENT run; running all jobs"
             { echo "terraform=true"; echo "dev=true"; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -284,6 +293,25 @@ jobs:
         run: |
           echo "changes=$CHANGES plan-dev=$PLAN"
           [ "$CHANGES" = success ] && { [ "$PLAN" = success ] || [ "$PLAN" = skipped ]; }
+
+  # The curriculum's "minimum viable test": the plan must be empty when nothing is expected to
+  # change. On the nightly run, any change means dev has drifted from main. The plan itself is in
+  # the plan job's run summary. Not a required check (it never runs on PRs).
+  drift:
+    needs: plan-dev
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Dev matches main (the nightly plan is empty)
+        env:
+          HAS_CHANGES: ${{ needs.plan-dev.outputs.has_changes }}
+        run: |
+          echo "has_changes=$HAS_CHANGES"
+          if [ "$HAS_CHANGES" != false ]; then
+            echo "::error::Drift: planning main against dev's real state would change something. Read the plan in the plan-dev job's summary, then fix AWS or the code (merge to main and approve the apply)."
+            exit 1
+          fi
 
   # Separate from the plan so that only this job can write to the PR, and it never has AWS access.
   # It also runs when the plan failed or was skipped, so an earlier push's plan is never left
