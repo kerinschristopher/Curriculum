@@ -10,7 +10,7 @@ What runs on GitHub Actions, when, with which permissions, and which AWS role (i
 |---|---|---|---|
 | [`sample-api-ci.yml`](../.github/workflows/sample-api-ci.yml) | `pull_request`; `push` to `main`/`mod*`; `push` of `v*` tags | none | Lint, test, render manifests, build and scan the image; publish it from `main`; add release tags |
 | [`sample-api-rescan.yml`](../.github/workflows/sample-api-rescan.yml) | `schedule` (daily 06:17 UTC); `workflow_dispatch` | none | Re-scan the published images against today's vulnerability database |
-| [`terraform-plan.yml`](../.github/workflows/terraform-plan.yml) | `pull_request`; `push` to `main`/`mod*`; `workflow_dispatch` | plan role (PRs and manual runs only) | fmt, validate, policy tests; plan dev and comment the plan on the PR |
+| [`terraform-plan.yml`](../.github/workflows/terraform-plan.yml) | `pull_request`; `push` to `main`/`mod*`; `workflow_dispatch`; `schedule` (daily 05:41 UTC) | plan role (PRs, manual runs and the nightly run only) | fmt, validate, module and policy tests; plan dev and comment the plan on the PR; nightly drift check |
 | [`terraform-apply.yml`](../.github/workflows/terraform-apply.yml) | `push` to `main` touching dev Terraform; `workflow_dispatch` (apply or destroy) | plan role, then apply role after approval | Plan dev, wait for a human to approve that plan, apply exactly it |
 | [`terraform-plan-reusable.yml`](../.github/workflows/terraform-plan-reusable.yml) | `workflow_call` only | whichever role the caller passes (always the plan role today) | The one plan job both Terraform workflows share |
 
@@ -77,8 +77,8 @@ the ruleset after editing its JSON with
 | Job | Needs / runs when | Permissions | Does |
 |---|---|---|---|
 | `changes` | not on tags | `contents: read` | Decides whether `Acme/apps/sample-api/`, `Acme/platform/` or this workflow changed. A new branch or force-push (no usable base) runs everything |
-| `lint` | app changed | `contents: read` | gofmt, `go vet ./...`, golangci-lint v2.14.0, on the Go version in `go.mod` |
-| `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases |
+| `lint` | app changed | `contents: read` | gofmt, `go vet ./...`, golangci-lint v2.14.0, on the Go version in `go.mod`. Restores the Go build cache first (see "Caching") |
+| `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases, with a Go build cache per version |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |
 | `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays and the infrastructure overlays |
 | `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). On `push` to `main` only, uploads the tarball (1 day) |
@@ -91,8 +91,18 @@ the ruleset after editing its JSON with
   or a tag) gets a group of its own (`sample-api-ci-<run id>`), so it is never cancelled, not even while pending. One shared group
   wouldn't be enough: GitHub keeps only the newest pending run in a group, and a dropped run on `main` means a merge commit with no
   `sha-*` image to release.
-- **Not here yet, on purpose:** Docker layer caching and the Trivy DB cache (`cache: false`) come in Module 7, which measures cold vs warm
-  builds. Images are amd64 only; multi-arch is also Module 7.
+- **Caching:**
+  - **Go build cache (`actions/cache`), in `lint` and each `test` leg.** `~/.cache/go-build` holds compiled packages; the slowest
+    part is the race-instrumented standard library. The key is the OS, the Go version (or `go.mod` for `lint`) and a hash of
+    `go.mod` and every `.go` file. On a code change the restore key falls back to the newest older cache, so only changed packages
+    recompile. `-count=1` still runs every test: only compiled code is reused, never test results.
+  - **Not `setup-go`'s cache:** that one is keyed on `go.sum`, and this app has none (standard library only, nothing to
+    download).
+  - **golangci-lint** keeps its own analysis cache (the action's default).
+  - **Scope:** caches from a PR are only visible to that PR, and GitHub evicts caches unused for 7 days. The first run on `main`
+    after a merge is cold again.
+- **Not here yet, on purpose:** Docker layer caching (BuildKit) and the Trivy DB cache (`cache: false`) come in Module 7, which
+  measures cold vs warm image builds. Images are amd64 only; multi-arch is also Module 7.
 
 ### Releasing an image
 1. Merge to `main` and wait for a green `sample-api-ci` run. GHCR then has `sha-<short>` for the merge commit.
@@ -119,14 +129,15 @@ from the default branch, and GitHub disables them after 60 days without reposito
 
 | Job | Needs / runs when | Permissions | AWS | Does |
 |---|---|---|---|---|
-| `changes` | always | `contents: read` | none | Decides whether any Terraform or policy changed (`terraform`), and whether dev's root, its modules or the policies changed (`dev`). Manual runs and new branches run everything |
+| `changes` | always | `contents: read` | none | Decides whether any Terraform or policy changed (`terraform`), and whether dev's root, its modules or the policies changed (`dev`). Manual runs, the nightly run and new branches run everything |
 | `fmt` | Terraform changed | `contents: read` | none | `terraform fmt -check -recursive -diff` over `Acme/infra/terraform` |
 | `validate` (matrix over `account`, `ci-iam`, `environments/dev`, `state-backend`) | Terraform changed | `contents: read` | none | `init -backend=false`, `validate` |
 | `module-test` (matrix over modules with a `tests/` directory: `vpc`) | Terraform changed | `contents: read` | none | `init -backend=false`, `terraform test` with the AWS provider mocked: no credentials, nothing created |
 | `validate-result` | always | `contents: read` | none | Aggregates `validate` and `module-test` |
 | `policy` | Terraform changed | `contents: read` | none | Installs Conftest 0.71.1 (SHA-256 checked), runs `conftest verify`, and requires exactly 3 denies and 1 warning from the seeded bad plan |
-| `plan-dev` | dev changed, on a same-repo PR or a manual run; needs fmt, validate-result, policy | `contents: read`, `id-token: write` | **plan role**, `sub = …:pull_request` or `…:ref:refs/heads/<main or mod*>` | Calls `terraform-plan-reusable.yml` for `environments/dev` |
+| `plan-dev` | dev changed, on a same-repo PR, a manual run or the nightly run; needs fmt, validate-result, policy | `contents: read`, `id-token: write` | **plan role**, `sub = …:pull_request` or `…:ref:refs/heads/<main or mod*>` (the nightly run is always `main`) | Calls `terraform-plan-reusable.yml` for `environments/dev` |
 | `plan-result` | always | `contents: read` | none | Aggregates `plan-dev` |
+| `drift` | nightly run only, after plan-dev | `contents: read` | none | Fails unless the plan is empty (`has_changes` is `false`): dev has drifted from `main`. The plan is in `plan-dev`'s run summary. Not a required check |
 | `comment` | same-repo `pull_request`, after plan-dev, unless plan-dev was cancelled | `pull-requests: write` only | none | Posts the text plan as one PR comment (marker `<!-- terraform-plan:dev -->`), edited in place on later pushes, truncated at 60,000 characters. If the latest plan failed or was skipped, it replaces the old plan with a "no current plan for `<sha>`" note, so an older commit's plan never looks current (a skipped plan with no earlier comment posts nothing) |
 
 - **Pushes to `main`/`mod*`** run fmt, validate, module-test and policy (and their aggregators) only: no plan, no OIDC token.
@@ -134,6 +145,12 @@ from the default branch, and GitHub disables them after 60 days without reposito
 - **The comment job has no AWS access and the plan job can't write to the PR.** The comment script reads the plan from a file and uses no
   `${{ }}` expressions, so nothing a PR controls (branch name, title, plan text) is interpolated into code.
 - **Concurrency:** per PR number (or ref), cancelling older PR runs. Safe because plans never take the state lock.
+- **The nightly drift check** (`schedule`, 05:41 UTC) plans dev from `main` and fails if anything would change: someone changed dev
+  outside Terraform, or a merge's apply was never approved.
+  - **Red until the first approval:** it stays red until the first approved `terraform-apply` creates dev.
+  - **`main` only:** scheduled workflows run only from the default branch, so it starts once this file is on `main`.
+  - **Inactivity:** GitHub disables scheduled workflows after 60 days without repository activity.
+  - **Fixing drift:** fix AWS, or the code (merge, then approve the apply). Re-run the workflow to confirm.
 
 ## `terraform-plan-reusable.yml`
 
@@ -212,7 +229,7 @@ unless you widen the trust beyond what GitHub protects, which fails open. That's
 | Policy (Conftest) | `Acme/infra/policies/terraform/` | CI, on every plan | The plan breaks no security rule (today: no SSH from the internet). See below |
 | Module unit tests (`terraform test`) | `modules/<name>/tests/*.tftest.hcl` | CI (`module-test`), on every Terraform change | The module's logic with a **mocked** AWS provider: NAT only when asked for (cost), one subnet of each kind per zone, the internet route, the caller's tags on every resource (the apply role requires `Environment`), and a single zone is rejected. Each test was checked to fail against a deliberately broken copy |
 | Integration test (Terratest) | [`Acme/infra/terraform/test/`](../Acme/infra/terraform/test/README.md) | By hand from WSL, as a human | That AWS accepts the module and the routing really works: builds the VPC module in real AWS, checks it through the AWS API, destroys it |
-| Plan as a test | `plan-dev`, and `terraform-apply.yml`'s `has_changes` | CI | A plan with no changes skips the approval; an unexpected diff shows up in the PR comment before merge |
+| Plan as a test (the curriculum's "minimum viable test") | `plan-dev`, `drift`, and `terraform-apply.yml`'s `has_changes` | CI; `drift` nightly on `main` | The plan is empty when nothing should change: the nightly `drift` job fails on any diff between `main` and dev's real state. A plan with no changes also skips the approval, and an unexpected diff shows up in the PR comment before merge |
 
 Terratest isn't in CI because it needs AWS **write** access, which no PR job has by design. Its README says what running it in CI
 would need.
@@ -234,6 +251,29 @@ Fix the Terraform; don't skip the policy.
 | An apply failed halfway | Terraform releases the lock and state records what was done. Fix forward in a PR, or revert |
 | A runner died mid-apply and the lock is still held | From WSL: `terraform force-unlock <lock id>` in `Acme/infra/terraform/environments/dev` (the ID is in the error message). Only once you're sure no apply is running |
 | A workflow change broke CI | Revert the PR. The required checks run on the revert too |
+
+## Run times
+
+Measured on draft PR #9 (2026-10-10), wall clock from the first job's start to the last job's end. The target is PR feedback in under
+5 minutes for either pipeline (design doc NFR1).
+
+**Before any Go caching** (13 pushes): `sample-api-ci` 89-117 s, `terraform-plan` 71-90 s (plan of dev with EKS off).
+
+**Go build cache, cold vs warm.** Run `38082108439`: attempt 1 had an empty cache, attempt 2 re-ran the same commit:
+
+| Job / step | Cold | Warm |
+|---|---|---|
+| `test (1.26)`: job / `go test` step | 35 s / 26 s | 11 s / 5 s |
+| `test (1.27)`: job / `go test` step | 42 s / 23 s | 17 s / 2 s |
+| `lint`: job / `go vet` step | 34 s / 19 s | 15 s / 4 s |
+| `build-scan` (not cached; Module 7) | 44 s | 48 s |
+| Whole `sample-api-ci` run | 100 s | 82 s |
+
+- **The compile was most of each Go job**, and the cache removes it (the race-instrumented standard library above all). The whole
+  run gains less, because `build-scan` waits for `lint`, `test` and `kustomize` and then takes about 45 s itself: it is now the
+  longest step in the chain. Shortening it is Module 7's BuildKit cache.
+- **When the warm path applies:** re-runs, and later pushes to the same PR (through the restore key). The first run on `main` after
+  a merge is cold.
 
 ## Runners: GitHub-hosted vs self-hosted
 

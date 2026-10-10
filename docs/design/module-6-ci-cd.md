@@ -212,7 +212,7 @@ The old Module 6 attempt (PR #6, now `depmod6`) was rejected with a review (2026
 | T4 | No graceful shutdown (SIGTERM drops in-flight requests) | Review; inline `main.go:51` | **Done in Module 6 phase 1 (`2882f16`; `preStop` in `c8b2910`)** | FR8; F21 |
 | T5 | No readiness/liveness probes | Review; inline `deployment.yaml:18` | **Resolved in Module 5** | `base/deployment.yaml:48,54` |
 | T6 | `terraform-apply.yml` approves destroy blind (gate before any plan exists) | Review; inline `terraform-apply.yml:44` | **Module 6 phase 3: built (`385270c`); the after-merge check is pending** | Ungated `plan` job, then the env-gated `apply` job consumes the saved plan (Components §3; Q3) |
-| T7 | `docs/ci.md` documents Trivy caches that don't exist | Review; inline `docs/ci.md:140` | **Done in Module 6 phase 6**: `docs/ci.md` lists `cache: false` and defers caching to Module 7 | `docs/ci.md` is written last and describes only what exists (FR7). Trivy/layer caching is Module 7 |
+| T7 | `docs/ci.md` documents Trivy caches that don't exist | Review; inline `docs/ci.md:140` | **Done in Module 6 phase 6**: `docs/ci.md` describes only the caches that exist. The Trivy DB stays `cache: false` (Module 7); a Go build cache was added later, with measured cold/warm numbers | `docs/ci.md` is written last and describes only what exists (FR7). Trivy/layer caching is Module 7 |
 | T8 | No `securityContext` | Review; inline `deployment.yaml:18` | **Resolved in Module 5** | `base/deployment.yaml:17-21,61-63` |
 | T9 | No `namespace` per overlay | Review; inline `overlays/dev/kustomization.yaml:4` | **Resolved in Module 5** | `namespace: sample-api-{dev,stage,prod}` |
 | T10 | Image tag hardcoded in base | Review; inline `deployment.yaml:19` | **Resolved in Module 5** | `images[].newTag` per overlay. CI now produces `sha-*` and semver tags to promote (Q9) |
@@ -258,7 +258,7 @@ The PR #5 approval (bgblackmore, 2026-10-07) deferred these items to Module 6.
 | Security: policy enforcement | Engineer | Adds an SG rule allowing `0.0.0.0/0` on port 22 | `terraform-plan.yml` Conftest step | PR | PR check fails with a message naming the resource address, and the plan comment shows the violation | 100% of seeded violations in `conftest verify` fixtures are denied; 0 false positives on the current dev plan |
 | Reliability: apply integrity | Concurrent human apply or a second merge | State changes between plan and apply | Saved `tfplan`, DynamoDB lock | Push to `main` | Apply refuses a stale plan. `concurrency` queues runs and never cancels an apply | 0 applies of a plan other than the approved one; 0 orphaned locks after a cancelled PR plan (PR plans don't lock) |
 | Reliability: supply chain | Compromised third-party action | Malicious code runs in a CI job | Trivy and other third-party steps | Any run | Blast radius limited to a job with `contents: read` and no OIDC or secrets. Actions pinned by SHA | Every `uses:` pinned to a 40-char SHA (grep check); the scanner job's `permissions` is `contents: read` only |
-| Performance / feedback time | Engineer pushing a PR | Wants a pass/fail signal | All PR workflows | GitHub-hosted runners, no caches yet (Module 7) | Jobs run in parallel. Path filters skip unrelated work | p50 PR feedback: sample-api under 4 min, Terraform plan under 3 min with EKS off (under 6 min with EKS on) |
+| Performance / feedback time | Engineer pushing a PR | Wants a pass/fail signal | All PR workflows | GitHub-hosted runners, Go build cache (Docker layer cache in Module 7) | Jobs run in parallel. Path filters skip unrelated work | p50 PR feedback: sample-api under 4 min, Terraform plan under 3 min with EKS off (under 6 min with EKS on). **Measured on PR #9:** sample-api 89-117 s before caching (82 s warm with it), Terraform plan 71-90 s |
 | Auditability | Reviewer or future auditor | Asks who changed AWS, when, and to what | Workflow run, environment approval, job summary, CloudTrail | After the fact | One run links commit SHA, plan summary, approver and STS session name. CloudTrail shows `AssumeRoleWithWebIdentity` with the role session name | 100% of CI applies traceable to a run ID and approver; `role-session-name` includes `github.run_id` |
 | Maintainability | Maintainer | Adds a new Terraform root or a new policy | `validate` matrix, `Acme/infra/policies/`, `docs/ci.md` | Module 7+ | One matrix entry or one `.rego` file plus a test. Trust/trigger/environment coupling documented in one place | Adding a root is under 5 changed lines; every policy has at least 1 passing and 1 failing fixture |
 | Cost | Merge to `main` | Plan would create EKS/NAT while dev is meant to be off | `terraform-apply.yml` approval gate, `enable_eks` toggle | Normal operation | Reviewer sees "N to add" in the job summary and can reject. With the toggle off, a merge creates only free VPC resources | $0 AWS spend from a merge while `enable_eks = false`; Actions spend $0 (public repo) |
@@ -367,7 +367,17 @@ flowchart LR
 - **Triggers:** `pull_request`, `push` to `main`/`mod*` and `push` of tags `v*`, with **no path filter on the workflow**. Path-filtered required checks never report on unrelated PRs and block merges forever ("Expected - waiting for status"). Instead, a first `changes` job compares the diff and the other jobs skip themselves cheaply. A skipped job counts as success for required checks.
 - **Concurrency:** on PRs, `group: sample-api-ci-<ref>` with cancel-in-progress. Every push run gets its own group (`sample-api-ci-<run id>`, `3986ee9`): GitHub drops a *pending* run when a newer one queues in the same group, which would leave a merge commit without its `sha-*` image.
 - **Version:** Dockerfile `ARG VERSION`, then `go build -ldflags "-X main.version=${VERSION}"`. `main.go` keeps a `version = "dev"` default. Remove `APP_VERSION` from `base/kustomization.yaml`, the three overlays and `base/deployment.yaml`. Overlays still pin `images[].newTag` by hand until Flux image automation (Module 8).
-- **Caching: none, on purpose.** `actions/setup-go` runs with `cache: false`, and Trivy with `cache: false`. Caching (Go modules, Docker layers, the Trivy DB) is **deliberately deferred to Module 7**, whose deliverable is measuring cold-cache vs warm-cache times. Adding it now would leave no "before" number.
+- **Caching (the Module 6 "artifacts and caching" concept):**
+  - **Go build cache (`actions/cache`), in `lint` and each `test` leg.**
+    - Key: OS + Go version (or `go.mod`) + a hash of `go.mod` and the `.go` files. The restore key falls back to the newest
+      older cache.
+    - `setup-go`'s own cache stays off, because it is keyed on `go.sum` and the app has none.
+    - `-count=1` keeps every test running; only compiled packages are reused.
+  - **golangci-lint-action** keeps its own analysis cache (default).
+  - **Docker layers (BuildKit) and the Trivy DB stay uncached on purpose:** Module 7's deliverable is BuildKit caching with
+    cold/warm image-build numbers.
+  - **Measured** (cold to warm, run `38082108439`): `go test` 26/23 s to 5/2 s, `go vet` 19 s to 4 s, the whole run 100 s to 82 s
+    (`build-scan` is now the longest step). Numbers in `docs/ci.md`, "Run times".
 - **Go/Docker bump:** move to a supported Go version and pin the builder image by digest before turning on the Trivy gate (F9)
 - **Matrix (decided):** Go supports only its two newest releases. Testing on both catches breakage before a Go upgrade. The app *ships* one version (the `go.mod`/Dockerfile one), so for an app this is an early warning; for a library it would be essential. Verify the two current releases at implementation time.
 - **Single architecture (amd64) on purpose.** Multi-arch images (amd64 + arm64 under one tag through an image index, built with `buildx` using `$BUILDPLATFORM`/`$TARGETARCH`) are **deferred to Module 7**, where `buildx` and multi-arch are the syllabus topic. It would also force a rework of the scan→push hand-off: a multi-platform image can't go through `docker load`, so it needs an OCI-layout tarball and a Trivy scan per platform. Deferring keeps this work block small enough to review and understand. The Dockerfile gets a comment saying this.
@@ -393,17 +403,18 @@ flowchart LR
 
 | Job | Credentials | Does |
 |---|---|---|
-| `changes` | none | Sets `terraform` (any Terraform or policy changed) and `dev` (dev's root, the modules, the policies or the plan workflows changed). Manual runs and new branches run everything |
+| `changes` | none | Sets `terraform` (any Terraform or policy changed) and `dev` (dev's root, the modules, the policies or the plan workflows changed). Manual runs, the nightly run and new branches run everything |
 | `fmt` | none | `terraform fmt -check -recursive -diff` over `Acme/infra/terraform` |
 | `validate` (matrix: `account`, `ci-iam`, `environments/dev`, `state-backend`) | none | `init -backend=false` then `validate` |
 | `module-test` (matrix: modules with `tests/`, today `vpc`) | none | `terraform test` with a mocked AWS provider (added in `7ea9671`) |
 | `validate-result` | none | Required check: aggregates `validate` and `module-test` |
 | `policy` | none | Conftest's own tests (`conftest verify`) and the seeded bad plan (exactly 3 denies, 1 warning) |
-| `plan-dev` (needs fmt, validate-result, policy; dev changed; same-repo PR or manual run) | plan role through OIDC (`sub = ...:pull_request` or the dispatched branch) | Calls `terraform-plan-reusable.yml` (§2a): plan, Conftest on the plan, run summary, text plan artifact |
+| `plan-dev` (needs fmt, validate-result, policy; dev changed; same-repo PR, manual run or the nightly run) | plan role through OIDC (`sub = ...:pull_request`, the dispatched branch, or `main` for the nightly run) | Calls `terraform-plan-reusable.yml` (§2a): plan, Conftest on the plan, run summary, text plan artifact |
 | `plan-result` | none | Required check: aggregates `plan-dev` (its name changes when skipped) |
+| `drift` (nightly run only) | none | Fails unless the nightly plan of `main` against dev's real state is empty: the curriculum's "minimum viable test" for drift. Not a required check |
 | `comment` (same-repo PRs; also when `plan-dev` failed or was skipped, not when cancelled) | `pull-requests: write` only | Posts or updates one PR comment (marker `<!-- terraform-plan:dev -->`, truncated at about 60k chars). When the latest plan failed or was skipped it replaces the old plan with a "no current plan" note (`bd9b12b`) |
 
-- **Triggers:** `pull_request` (always, gated by the `changes` job, same reason as above), `push` to `main`/`mod*` (checks only: no plan, no OIDC token) and `workflow_dispatch` (manual plans from `main`/`mod*`).
+- **Triggers:** `pull_request` (always, gated by the `changes` job, same reason as above), `push` to `main`/`mod*` (checks only: no plan, no OIDC token), `workflow_dispatch` (manual plans from `main`/`mod*`) and `schedule` (05:41 UTC nightly drift check; runs only on `main`, so it starts after merge and stays red until the first approved apply creates dev).
 - **Job-level permissions:** `plan-dev` gets `contents: read` and `id-token: write`; only `comment` gets `pull-requests: write`, and it has no AWS access.
 - **Concurrency:** per PR number (or ref on pushes), cancelling only on PRs. That's safe because these plans never take the lock.
 - **Conftest runs on every plan, including no-op plans**, so the step is always exercised.
@@ -439,7 +450,7 @@ The PR plan and the post-merge plan share checkout, setup-terraform, the OIDC as
 
 - **Triggers:** `push` to `main` with paths `Acme/infra/terraform/environments/dev/**`, `Acme/infra/terraform/modules/**`, this workflow file and `terraform-plan-reusable.yml`. Optional `workflow_dispatch` with an `apply`/`destroy` choice for the end-of-day teardown, which goes through the same gate.
 - **Concurrency:** `group: terraform-dev-apply`, `cancel-in-progress: false`. Never kill an apply mid-flight.
-- **No change, no approval request:** `-detailed-exitcode` (0 means no changes, 2 means changes) skips the apply job, which also gives you the curriculum's "minimum viable test" (empty plan when nothing is expected).
+- **No change, no approval request:** `-detailed-exitcode` (0 means no changes, 2 means changes) skips the apply job. The curriculum's "minimum viable test" (fail when the plan isn't empty and nothing is expected) is the nightly `drift` job in `terraform-plan.yml` (§2).
 - **Why plan with the plan role and apply with the apply role:** the write-capable credential exists only after approval, and only for the minutes the apply takes.
 - **Why apply the saved plan (Q3):** the reviewer approves exactly what gets applied, and Terraform refuses a stale plan. The cost is that `tfplan` holds unredacted values (even ones marked `sensitive`) and sits in a public-repo artifact. Today that's only resource IDs and ARNs: labels, not credentials, and the account ID is already in the repo. Guardrails: 1-day retention, deleted after every apply attempt, and a **revisit trigger**. If any secret ever enters this root's state (a DB password, `random_password`, and so on), move the plan file to the private S3 state bucket or switch to re-planning inside the approved job (see R4).
 
@@ -706,6 +717,23 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
   - The SSH policy matched the protocol case-sensitively, so `"TCP"` slipped through. Fixed in `2e48d51`: 34 tests, and 3 of
     the new ones fail against the old policy.
   - The apply role can create resources inside a VPC it doesn't own. Deferred as risk R12, and noted in `docs/iam.md`.
+
+**Curriculum and PR #6 re-check (2026-10-10).** Every ask was re-read from the originals, then checked in code:
+- the PR #6 review body and its 10 inline comments;
+- the 2026-10-05 follow-up plan;
+- the PR #5 approval;
+- `docs/curriculum.md` Module 6.
+
+All were satisfied, or covered by a documented deviation: multi-arch (Module 7), no `:latest` to rescan (Q9), and both roles
+imported (F20, Q13). Three gaps were closed:
+- **Caching** (the "artifacts and caching" concept; the reviewer: "cache deliberately rather than at the end"): a Go build cache
+  through `actions/cache` (§1). Cold to warm on run `38082108439`: `go test` 26/23 s to 5/2 s, `go vet` 19 s to 4 s, the whole
+  run 100 s to 82 s.
+- **Run times** (the reviewer: "watch your own run times"; NFR1): measured on PR #9 and recorded in `docs/ci.md`, "Run times".
+- **The "minimum viable test"** (the plan must be empty when nothing is expected): a nightly `drift` job on a `schedule` in
+  `terraform-plan.yml` (§2), still five workflows.
+  - **Tested so far:** only its script, locally: exit 0 for `false`, exit 1 for `true` and for a missing value.
+  - **Not yet:** its first real run, which happens after merge and stays red until the first approved apply.
 
 ---
 
