@@ -626,6 +626,25 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
   - **Not yet run:** the first CI apply, listed as such.
 - **Deviation:** none from §7. `docs/ci.md` also covers the GitHub-side setup commands, which the design had put in `docs/ci.md` only for the environment.
 
+**Review follow-ups (2026-10-10):** an architecture review and a code review of `mod6` ran after phase 6.
+- **Architecture review, "now" items (`29c94dd`):** H2, the `docs/iam.md` S3-native-locking caveat (the apply role's state Denies must exclude `.tflock`). M2, approve within 24 h, and the plan artifact is deleted after a failed apply too.
+- **Code review, every finding fixed:**
+  - **`3986ee9`:** each push run of `sample-api-ci` gets its own concurrency group. GitHub cancels a *pending* run when a newer one queues in the same group, which could leave a merge commit without a `sha-*` image.
+  - **`15756a1`:** Conftest now warns on an unknown inline `ingress` list, or one of its rules, and on an unknown protocol or port range. A plan leaves unknown attributes out of `after`, which had silently dropped those rules. `allows_ssh` needs numeric ports, because Rego sorts `null` before every number. 8 new tests: 6 fail against the old policy. Seeded-bad still gives 3 denies and 1 warning.
+  - **`ed21913`:** `environments/dev` requires Terraform 1.9, for the cross-variable validation.
+  - **`38cb51c`:** the new `Ec2RetagOwned` statement stops the apply role changing or removing the `Environment` tag. Before the apply, the live roles failed exactly the 4 new denials, and the planned policies passed 96/96. The user approved the human `ci-iam` apply: 0 add, 1 change. Re-plan: No changes. Live roles: 96/96.
+  - **`7292655`:** `sample-api-rescan` runs with `set -euo pipefail`, and the scanner job gets `permissions: {}`.
+  - **`bd9b12b`:** the PR plan comment is replaced with a "no current plan" note when the latest plan failed or was skipped.
+  - **`7ac8b84`:** four doc mismatches.
+- **Deferred to after the merge (architecture review):**
+  - H1: ingress-nginx is retired; decide in the Module 8 design.
+  - H3: Identity Center for the human admin, before `enable_eks`.
+  - M1: Dependabot.
+  - M3/M4/M7/L5: one Terraform-hygiene PR (`~> 6.0`, harden `state-backend`, `default_tags`).
+  - M5: kubeconform.
+  - M6: README and ARCHITECTURE.md.
+  - The L and N items.
+
 ---
 
 ## Risks / Constraints
