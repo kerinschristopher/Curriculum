@@ -6,7 +6,7 @@
 | **Author** | CK |
 | **Date** | October 2026 |
 | **Status** | Draft - Pending Approval |
-| **Affected Repo** | `kerinschristopher/Curriculum` (public). New: `.github/workflows/sample-api-ci.yml`, `.github/workflows/terraform-apply.yml`, `Acme/infra/policies/`, `Acme/infra/terraform/ci-iam/` (re-homed), `Acme/infra/github/dev-apply-environment.json`, `docs/ci.md`. Changed: `.github/workflows/terraform-plan.yml`, `Acme/infra/terraform/modules/iam-roles/`, `Acme/infra/terraform/environments/dev/`, `Acme/apps/sample-api/`, `Acme/platform/apps/sample-api/` (APP_VERSION removal), `docs/iam.md`. Retired: `.github/workflows/sample-api-checks.yml`, `.github/workflows/terraform-checks.yml` (absorbed) |
+| **Affected Repo** | `kerinschristopher/Curriculum` (public). New: `.github/workflows/sample-api-ci.yml`, `sample-api-rescan.yml`, `terraform-apply.yml`, `terraform-plan-reusable.yml`; `Acme/infra/policies/`; `Acme/infra/terraform/ci-iam/` (re-homed); `Acme/infra/terraform/modules/vpc/tests/`; `Acme/infra/terraform/test/` (Terratest); `Acme/infra/github/dev-apply-environment.json`, `dev-apply-branch-policy.json`, `main-merge-gate-ruleset.json`; `Acme/infra/scripts/tests/test_iam_policies.py`; `docs/ci.md`. Changed: `.github/workflows/terraform-plan.yml`, `Acme/infra/terraform/modules/iam-roles/`, `Acme/infra/terraform/environments/dev/`, `Acme/apps/sample-api/`, `Acme/platform/apps/sample-api/` (APP_VERSION removal, preStop, PDBs), `docs/iam.md`. Retired: `.github/workflows/sample-api-checks.yml`, `.github/workflows/terraform-checks.yml` (absorbed), `Acme/infra/scripts/tests/simulate-plan-role.sh` (replaced by pytest) |
 | **Scope** | The single maintainer (`kerinschristopher`), who is both author and required reviewer; the AWS account `401352756330` in `us-east-1` (dev environment only, since stage/prod exist only as Kustomize overlays); consumers of `ghcr.io/kerinschristopher/sample-api` (the kind cluster today, Flux from Module 8) |
 
 ---
@@ -22,7 +22,7 @@ This document designs the Module 6 deliverable from `docs/curriculum.md:284-331`
 - At least one Conftest policy ("no SSH open to the internet") evaluated against `terraform plan` JSON.
 - `docs/ci.md` documents the IAM role each workflow assumes.
 
-The design builds on what Module 3 and Module 5 already shipped: the hardened plan role, the trusted-branches ruleset, and the "trigger / trust / ruleset move together" rule in `docs/iam.md:107`. It also cleans up a partly applied earlier attempt at Module 6 that is still live in AWS (see Findings F3-F5).
+The design builds on what Module 3 and Module 5 already shipped: the hardened plan role, the trusted-branches ruleset, and the "trigger / trust / ruleset move together" rule in `docs/iam.md` ("Which runs use the plan role"). It also cleans up a partly applied earlier attempt at Module 6 that is still live in AWS (see Findings F3-F5).
 
 ---
 
@@ -77,7 +77,7 @@ The `sub` claim is the lever. Its value depends on how the job runs:
 | `pull_request` | `repo:kerinschristopher/Curriculum:pull_request` |
 | Any job with `environment: dev-apply` | `repo:kerinschristopher/Curriculum:environment:dev-apply` |
 
-So "which role can a job get?" is decided by *how* the job was triggered and *whether it's bound to an environment*. That's why `docs/iam.md:107` says the trigger, the trust list and the ruleset have to move together.
+So "which role can a job get?" is decided by *how* the job was triggered and *whether it's bound to an environment*. That's why `docs/iam.md` ("Which runs use the plan role") says the trigger, the trust list and the ruleset have to move together.
 
 **GitHub Environments and required reviewers.** An *environment* is a named deploy target in repo settings. It can require a reviewer's approval before any job that references it starts, and it can restrict which branches may deploy to it. A job with `environment: dev-apply` sits in "Waiting" until approved, and only then does it get an OIDC token whose `sub` names that environment. Combined with an IAM role that trusts *only* that `sub`, the approval click becomes a hard precondition for AWS write credentials, not just a UI nicety.
 
@@ -93,7 +93,7 @@ So "which role can a job get?" is decided by *how* the job was triggered and *wh
 
 ### What Is It?
 
-Three deliverable workflows (plus a reusable Terraform setup workflow and a nightly image re-scan), one policy set, two IAM roles and one GitHub Environment, wired so that:
+Three deliverable workflows (plus a reusable plan workflow and a nightly image re-scan; why five and not three is in "Other Designs Considered"), one policy set, two IAM roles and one GitHub Environment, wired so that:
 
 ```
 PR opened/updated ──► sample-api-ci (lint, test, build, scan)        [no cloud creds]
@@ -123,12 +123,19 @@ merge to main ─────► sample-api-ci  ──► push image to GHCR    
 | ID | Requirement |
 |---|---|
 | NFR1 | PR feedback in under 5 minutes for either pipeline (see Quality Attributes) |
-| NFR2 | Third-party actions are pinned by commit SHA with a `# vX` comment (existing convention, e.g. `.github/workflows/terraform-checks.yml:28`) |
+| NFR2 | Third-party actions are pinned by commit SHA with a `# vX` comment (existing convention, kept in every Module 6 workflow, e.g. `actions/checkout@<sha> # v7.0.1`) |
 | NFR3 | Least privilege: `permissions: contents: read` at the top of each workflow, with jobs widening only what they need |
 | NFR4 | The CI apply role can't modify CI identity (itself, the plan role, the OIDC provider) or the state of any root other than dev |
 | NFR5 | Reversible: each phase can be reverted by reverting its PR, without losing state |
 
 ### If It Is an Existing Design, How Does It Work Before New Design?
+
+> **Baseline, not current state.** This section, Assumptions / Prerequisites and Findings describe the repo and the AWS account
+> as found before Module 6 (`main` at `895d3b6`, 2026-10-07). Their file and line references point at that state: read them with
+> `git show 895d3b6:<path>`. Some cited files were since replaced (`sample-api-checks.yml` by `sample-api-ci.yml` in `8282423`,
+> `terraform-checks.yml` by `terraform-plan.yml` in `7eeba25`, `simulate-plan-role.sh` by `test_iam_policies.py` in `c45a9f5`),
+> and `docs/iam.md` was rewritten in phase 6, so its old line numbers no longer match. For the current state, read Components
+> and the phase results below.
 
 - **`sample-api-checks.yml`**: runs on `pull_request` and on `push` to `main`/`mod*` with path filters. It runs gofmt, go vet and go build, plus `kubectl kustomize` over every base and overlay. It uses no secrets and no OIDC (`.github/workflows/sample-api-checks.yml:6-7`).
 - **`terraform-checks.yml`**: `fmt -check -recursive` plus `validate` as a matrix over `account`, `environments/dev` and `state-backend`, with `init -backend=false` and no credentials (`.github/workflows/terraform-checks.yml:44-52`).
@@ -166,6 +173,8 @@ merge to main ─────► sample-api-ci  ──► push image to GHCR    
 
 ## Findings
 
+As found before Module 6 (see the baseline note under "If It Is an Existing Design"). Statuses after Module 6 are in the traceability tables below and the phase results.
+
 | # | Finding | Evidence / location | Implication |
 |---|---|---|---|
 | F1 | Three workflows already exist. Two are credential-free checks, one is a manual-only plan | `.github/workflows/sample-api-checks.yml`, `terraform-checks.yml`, `terraform-plan.yml` | Grow these instead of starting over. The checks get absorbed into the deliverable files |
@@ -197,33 +206,33 @@ The old Module 6 attempt (PR #6, now `depmod6`) was rejected with a review (2026
 
 | # | Review item | Source | Status | Evidence / where handled |
 |---|---|---|---|---|
-| T1 | No `import` blocks: `ci-iam` would recreate roles → `EntityAlreadyExists`, roles orphaned | Review blocker 1; inline `ci-iam/main.tf:11`, `dev/main.tf:41` | **Module 6 phase 2** | `import` both roles into `ci-iam`, `removed` in dev, plan both stacks first (Components §5; F20) |
+| T1 | No `import` blocks: `ci-iam` would recreate roles → `EntityAlreadyExists`, roles orphaned | Review blocker 1; inline `ci-iam/main.tf:11`, `dev/main.tf:41` | **Done in Module 6 phase 2 (`6761a81`)** | `import` both roles into `ci-iam`, `removed` in dev, plan both stacks first (Components §5; F20) |
 | T2 | `create_oidc_provider` defaults to `true` → duplicate provider | Review blocker 2 | **Resolved in Module 5** | Variable removed; the module looks the provider up with a data source |
 | T3 | Layout: provider in `account/`, both CI roles in `ci-iam/`, no IAM in `dev` | Follow-up "IAM handover" | **Matches Q1** | Components §5 |
-| T4 | No graceful shutdown (SIGTERM drops in-flight requests) | Review; inline `main.go:51` | **Module 6 phase 1** | FR8; F21 |
+| T4 | No graceful shutdown (SIGTERM drops in-flight requests) | Review; inline `main.go:51` | **Done in Module 6 phase 1 (`2882f16`; `preStop` in `c8b2910`)** | FR8; F21 |
 | T5 | No readiness/liveness probes | Review; inline `deployment.yaml:18` | **Resolved in Module 5** | `base/deployment.yaml:48,54` |
 | T6 | `terraform-apply.yml` approves destroy blind (gate before any plan exists) | Review; inline `terraform-apply.yml:44` | **Module 6 phase 3: built (`385270c`); the after-merge check is pending** | Ungated `plan` job, then the env-gated `apply` job consumes the saved plan (Components §3; Q3) |
 | T7 | `docs/ci.md` documents Trivy caches that don't exist | Review; inline `docs/ci.md:140` | **Done in Module 6 phase 6**: `docs/ci.md` lists `cache: false` and defers caching to Module 7 | `docs/ci.md` is written last and describes only what exists (FR7). Trivy/layer caching is Module 7 |
 | T8 | No `securityContext` | Review; inline `deployment.yaml:18` | **Resolved in Module 5** | `base/deployment.yaml:17-21,61-63` |
 | T9 | No `namespace` per overlay | Review; inline `overlays/dev/kustomization.yaml:4` | **Resolved in Module 5** | `namespace: sample-api-{dev,stage,prod}` |
 | T10 | Image tag hardcoded in base | Review; inline `deployment.yaml:19` | **Resolved in Module 5** | `images[].newTag` per overlay. CI now produces `sha-*` and semver tags to promote (Q9) |
-| T11 | Server timeouts (`ReadTimeout`, `WriteTimeout`, `IdleTimeout`) | Review (lower priority); inline `main.go:47` | **Module 6 phase 1** | FR8 |
-| T12 | `minAvailable: 1` PDB for stage and prod | Review (lower priority) | **Module 6 phase 1** | FR8 |
-| T13 | Pin the Docker base image by digest | Review (lower priority) | **Module 6 phase 1** | Components §1 (Go/Docker bump); F9 |
+| T11 | Server timeouts (`ReadTimeout`, `WriteTimeout`, `IdleTimeout`) | Review (lower priority); inline `main.go:47` | **Done in Module 6 phase 1 (`2882f16`)** | FR8 |
+| T12 | `minAvailable: 1` PDB for stage and prod | Review (lower priority) | **Done in Module 6 phase 1 (`c8b2910`)** | FR8 |
+| T13 | Pin the Docker base image by digest | Review (lower priority) | **Done in Module 6 phase 1 (`2882f16`)** | Components §1 (Go/Docker bump); F9 |
 | T14 | `:latest` can regress if two merges run at once | Review (lower priority) | **Moot** | No `latest` tag is published (Q9) |
 | T15 | Delete `learn-terraform-get-started-aws` | Review (lower priority) | **Resolved in Module 5** | Not in the tree on `main` |
 | T16 | Restrict the EKS public endpoint from `0.0.0.0/0` | Review and follow-up (lower priority) | **Resolved in Module 5** (acknowledged in the PR #5 approval) | F22 |
-| T17 | Tests bypass the `ServeMux`; add `newMux()` + `httptest` (200 / 404) | Review; inline `main.go:42` | **Module 6 phase 1** | FR8 |
-| T18 | Add a `kustomize build` step to CI over every overlay | Review and follow-up | **Already on `main`** (`sample-api-checks.yml`), carried into `sample-api-ci.yml` | Components §1 `kustomize` job |
+| T17 | Tests bypass the `ServeMux`; add `newMux()` + `httptest` (200 / 404) | Review; inline `main.go:42` | **Done in Module 6 phase 1 (`2882f16`)** | FR8 |
+| T18 | Add a `kustomize build` step to CI over every overlay | Review and follow-up | **Done**: was on `main` (`sample-api-checks.yml`), carried into `sample-api-ci.yml` (`8282423`) | Components §1 `kustomize` job |
 | T19 | `LOG_LEVEL` compared to the literal `"debug"` | Follow-up | **Resolved in Module 5** (acknowledged in the PR #5 approval) | F22 |
-| T20 | `ReadOnlyAccess` on the plan role (and apply role) | Follow-up | **Plan role resolved in Module 5; apply role in Module 6 phase 2** | F2, F5; the apply role is adopted and its managed policies detached (Q2) |
-| T21 | Matrix builds | Review and follow-up | **Module 6 phase 1** | Go version matrix + `test-result` gate (Components §1). `terraform-plan.yml`'s `validate` matrix (with `validate-result`) and `sample-api-rescan.yml`'s per-image matrix are further examples. Multi-arch deferred to Module 7 |
+| T20 | `ReadOnlyAccess` on the plan role (and apply role) | Follow-up | **Plan role resolved in Module 5; apply role done in Module 6 phase 2 (`6761a81`)** | F2, F5; the apply role is adopted and its managed policies detached (Q2) |
+| T21 | Matrix builds | Review and follow-up | **Done in Module 6 phase 1 (`8282423`)** | Go version matrix + `test-result` gate (Components §1). `terraform-plan.yml`'s `validate` matrix (with `validate-result`) and `sample-api-rescan.yml`'s per-image matrix are further examples. Multi-arch deferred to Module 7 |
 | T22 | Reusable workflows (`workflow_call`) | Review and follow-up | **Done in Module 6 phase 4 (`71c2141`)** | `terraform-plan-reusable.yml` (Components §2a) |
 | T23 | `schedule` trigger | Review and follow-up | **Done in Module 6 phase 4 (`59dbf86`); the first scheduled run is after merge** | Nightly `sample-api-rescan.yml` (Components §1a) |
 | T24 | Self-hosted vs GitHub-hosted runners written out | Review and follow-up | **Done in Module 6 phase 6** | `docs/ci.md` section (FR9) |
 | T25 | Conftest policy in `infra/policies/` (no SSH from `0.0.0.0/0`) | Follow-up | **Done in Module 6 phase 4 (`0a95743`)** | Components §4 |
 | T26 | `docs/ci.md` describes the role each workflow assumes, every claim true | Follow-up | **Done in Module 6 phase 6** (per-workflow tables with permissions, `sub` and role) | FR7 |
-| T27 | Salvage files from the old branch instead of retyping | Follow-up | **Plan** | Internal Documentation, salvage list |
+| T27 | Salvage files from the old branch instead of retyping | Follow-up | **Done** (salvaged in `2882f16`, `7eeba25`, `4a7c950`, `385270c`) | Internal Documentation, salvage list |
 | T28 | Suggested order: Go CI first, IAM handover as its own commit, then apply split, concepts, docs last | Follow-up | **Adopted** | Rollout table (Components §9) |
 
 ### PR #5 carry-overs
@@ -232,9 +241,9 @@ The PR #5 approval (bgblackmore, 2026-10-07) deferred these items to Module 6.
 
 | # | Item | Status | Where handled |
 |---|---|---|---|
-| K1 | **Rewrite `simulate-plan-role.sh` in Python as pytest tests.** One `simulate-principal-policy` call per resource with all its actions batched (not 34 serial calls); context entries as dicts, not hand-built `ContextKeyName=...` strings; a harness error (for example `AccessDenied` on the simulator call itself, a boto3 `ClientError`) **errors the test** instead of being compared as a policy decision, which the bash `2>&1` capture conflates | **Module 6 phase 2** (its own commit before the handover) | `Acme/infra/scripts/tests/test_iam_policies.py` with a `requirements.txt` (`boto3`, `pytest`). Parity first: the same 34 plan-role cases pass. Then apply-role cases, run **before** applying the re-scoped apply role. The `.sh` is deleted once parity is shown |
+| K1 | **Rewrite `simulate-plan-role.sh` in Python as pytest tests.** One `simulate-principal-policy` call per resource with all its actions batched (not 34 serial calls); context entries as dicts, not hand-built `ContextKeyName=...` strings; a harness error (for example `AccessDenied` on the simulator call itself, a boto3 `ClientError`) **errors the test** instead of being compared as a policy decision, which the bash `2>&1` capture conflates | **Done in Module 6 phase 2 (`c45a9f5`)**, its own commit before the handover | `Acme/infra/scripts/tests/test_iam_policies.py` with a `requirements.txt` (`boto3`, `pytest`). Parity first: the same 34 plan-role cases pass. Then apply-role cases, run **before** applying the re-scoped apply role. The `.sh` is deleted once parity is shown |
 | K2 | Document that the simulator **can't run on PRs**: it needs `iam:SimulatePrincipalPolicy`, which the plan role deliberately lacks, so it would need a second, more privileged principal | **Done in Module 6 phase 6** (`docs/iam.md`, "How it's verified") | `docs/iam.md`, next to the verification table, so the tests don't look automatable when they aren't |
-| K3 | `go test` in CI, with the **first test written test-first for `LOG_LEVEL` parsing** (a "do-over, not a backfill") | **Module 6 phase 1** | Extract `parseLogLevel(raw string) (slog.Level, error)`; write its failing table test (case-insensitive, whitespace, unknown value rejected) before moving the code; then `healthHandler` and `newMux` tests (FR8) |
+| K3 | `go test` in CI, with the **first test written test-first for `LOG_LEVEL` parsing** (a "do-over, not a backfill") | **Done in Module 6 phase 1 (`2882f16`)** | Extract `parseLogLevel(raw string) (slog.Level, error)`; write its failing table test (case-insensitive, whitespace, unknown value rejected) before moving the code; then `healthHandler` and `newMux` tests (FR8) |
 | K4 | Paste the **live ruleset bypass state** into `docs/iam.md` so the doc matches reality (the reviewer can't see bypass actors with write access) | **Done in Module 6 phase 6** (`docs/iam.md`, "GitHub-side controls", both rulesets and the environment) | Captured 2026-10-10: `trusted-branches` (`24627971`) `bypass_actors: [{actor_type: RepositoryRole, actor_id: 5 (admin), bypass_mode: always}]`, `current_user_can_bypass: always`. Proven in practice: the PR #8 merge needed admin bypass (`mergeStateStatus: BLOCKED` without it) |
 | K5 | `endpoint_public_access_cidrs` held a home IP committed in a public repo: a disclosure, and it breaks when the ISP rotates the address | **Resolved in Module 6 phase 3 (`2928b8e`, Q14)** | `eks_public_access_cidrs` in `environments/dev/variables.tf`: sensitive, no committed value, gitignored `dev.auto.tfvars` locally. The old IP stays in git history |
 
@@ -249,7 +258,7 @@ The PR #5 approval (bgblackmore, 2026-10-07) deferred these items to Module 6.
 | Security: policy enforcement | Engineer | Adds an SG rule allowing `0.0.0.0/0` on port 22 | `terraform-plan.yml` Conftest step | PR | PR check fails with a message naming the resource address, and the plan comment shows the violation | 100% of seeded violations in `conftest verify` fixtures are denied; 0 false positives on the current dev plan |
 | Reliability: apply integrity | Concurrent human apply or a second merge | State changes between plan and apply | Saved `tfplan`, DynamoDB lock | Push to `main` | Apply refuses a stale plan. `concurrency` queues runs and never cancels an apply | 0 applies of a plan other than the approved one; 0 orphaned locks after a cancelled PR plan (PR plans don't lock) |
 | Reliability: supply chain | Compromised third-party action | Malicious code runs in a CI job | Trivy and other third-party steps | Any run | Blast radius limited to a job with `contents: read` and no OIDC or secrets. Actions pinned by SHA | Every `uses:` pinned to a 40-char SHA (grep check); the scanner job's `permissions` is `contents: read` only |
-| Performance / feedback time | Engineer pushing a PR | Wants a pass/fail signal | All PR workflows | GitHub-hosted runners, warm Go cache | Jobs run in parallel. Path filters skip unrelated work | p50 PR feedback: sample-api under 4 min, Terraform plan under 3 min with EKS off (under 6 min with EKS on) |
+| Performance / feedback time | Engineer pushing a PR | Wants a pass/fail signal | All PR workflows | GitHub-hosted runners, no caches yet (Module 7) | Jobs run in parallel. Path filters skip unrelated work | p50 PR feedback: sample-api under 4 min, Terraform plan under 3 min with EKS off (under 6 min with EKS on) |
 | Auditability | Reviewer or future auditor | Asks who changed AWS, when, and to what | Workflow run, environment approval, job summary, CloudTrail | After the fact | One run links commit SHA, plan summary, approver and STS session name. CloudTrail shows `AssumeRoleWithWebIdentity` with the role session name | 100% of CI applies traceable to a run ID and approver; `role-session-name` includes `github.run_id` |
 | Maintainability | Maintainer | Adds a new Terraform root or a new policy | `validate` matrix, `Acme/infra/policies/`, `docs/ci.md` | Module 7+ | One matrix entry or one `.rego` file plus a test. Trust/trigger/environment coupling documented in one place | Adding a root is under 5 changed lines; every policy has at least 1 passing and 1 failing fixture |
 | Cost | Merge to `main` | Plan would create EKS/NAT while dev is meant to be off | `terraform-apply.yml` approval gate, `enable_eks` toggle | Normal operation | Reviewer sees "N to add" in the job summary and can reject. With the toggle off, a merge creates only free VPC resources | $0 AWS spend from a merge while `enable_eks = false`; Actions spend $0 (public repo) |
@@ -271,7 +280,7 @@ The design separates **who can propose**, **who can see** and **who can change**
 | Change CI identity | Only a human from WSL | Human IAM credentials (out of CI) |
 
 **Systems view.** The pipeline is a balancing feedback loop: change -> signal -> correction. Its delays decide whether people listen to it.
-- *Delays:* PR plan latency (about 1-3 min) and the approval wait (human-bounded, up to 30 days before GitHub expires the run). Keep the first short so it gets read. The second is intentional friction.
+- *Delays:* PR plan latency (about 1-3 min) and the approval wait (human-bounded: GitHub expires the run after 30 days, but the saved plan lives 1 day, so in practice approve within 24 h or re-run). Keep the first short so it gets read. The second is intentional friction.
 - *Stocks:* open PRs, unapplied merges (approvals waiting), dev's hourly cost while EKS is on, and image tags in GHCR (grows by one per `main` merge).
 - *Bottleneck / leverage:* the single human reviewer. That's fine at this stage, but the approval stops working as a control if it's rubber-stamped. The job summary has to make "what changes" obvious (counts first, destroys highlighted).
 - *Coupling to watch:* trigger, trust `sub`, ruleset and environment branch policy now form a four-way contract. Change one, re-check all four.
@@ -345,19 +354,20 @@ flowchart LR
 
 | Job | Needs | Permissions | Does |
 |---|---|---|---|
-| `lint` | none | `contents: read` | gofmt, `go vet`, golangci-lint (pinned version) |
-| `test` (**matrix**: `go: [<previous>, <current>]`, the two supported Go releases) | none | `contents: read` | `actions/setup-go` with `go-version: ${{ matrix.go }}`, then `go test -race -count=1 ./...`. Expands into `test (<previous>)` and `test (<current>)`, run in parallel. Requires `main_test.go` (see "Application changes" below) |
-| `test-result` | test, `if: always()` | none | Fails unless every `test` leg succeeded (or was skipped by `changes`). **This is the required check**, not the matrix legs: their names include the Go version, so bumping the matrix would otherwise leave `main-merge-gate` waiting forever for a check that no longer exists |
-| `kustomize` | none | `contents: read` | Carried over from `sample-api-checks.yml:59-78` |
-| `build-scan` | lint, test-result, kustomize | `contents: read` only, **no OIDC, no secrets** | `docker buildx build` with `--build-arg VERSION=sha-<short>` into a tarball, then Trivy on the tarball: `severity: HIGH,CRITICAL`, `ignore-unfixed: true`, `exit-code: 1`. Upload the tarball as an artifact only on `push` to `main` (retention 1 day) |
+| `changes` | none (skipped on tag runs) | `contents: read` | Diffs the push or PR and sets `app` when `Acme/apps/sample-api/`, `Acme/platform/` or this workflow changed. A new branch or force-push runs everything |
+| `lint` | changes, `if: app` | `contents: read` | gofmt, `go vet`, golangci-lint (pinned version) |
+| `test` (**matrix**: `go: [<previous>, <current>]`, the two supported Go releases) | changes, `if: app` | `contents: read` | `actions/setup-go` with `go-version: ${{ matrix.go }}`, then `go test -race -count=1 ./...`. Expands into `test (<previous>)` and `test (<current>)`, run in parallel. Requires `main_test.go` (see "Application changes" below) |
+| `test-result` | changes, test, `if: always()` (not on tags) | `contents: read` | Fails unless every `test` leg succeeded (or was skipped by `changes`). **This is the required check**, not the matrix legs: their names include the Go version, so bumping the matrix would otherwise leave `main-merge-gate` waiting forever for a check that no longer exists |
+| `kustomize` | changes, `if: app` | `contents: read` | `kubectl kustomize` over every base and overlay (carried over from the retired `sample-api-checks.yml`) |
+| `build-scan` | changes, lint, test-result, kustomize, `if: app` | `contents: read` only, **no OIDC, no secrets** | `docker buildx build` with `--build-arg VERSION=sha-<short>` into a tarball, then Trivy on the tarball: `severity: HIGH,CRITICAL`, `ignore-unfixed: true`, `exit-code: 1`. Upload the tarball as an artifact only on `push` to `main` (retention 1 day) |
 | `push` | build-scan, `if: push && main` | `contents: read`, `packages: write` | Download, `docker load`, log in to GHCR with `GITHUB_TOKEN`, push `:sha-<short>`. It never checks out code, so what's pushed is byte-for-byte what was scanned |
 | `release-tag` | none, `if: push && tag v*` | `packages: write` only, **no checkout, no build, no OIDC** | Log in to GHCR with `GITHUB_TOKEN`, then `docker buildx imagetools create -t …:<semver> …:sha-<short>` (`<semver>` = tag minus the `v`). This adds a second label to the image that main already built, scanned and tested; the digest doesn't change |
 
 - **Image tags (Q9): build once, retag to release.** Every merge to `main` pushes `:sha-<short>`. Pushing a git tag such as `v0.2.0` (on a commit that's on `main`) makes `:0.2.0` point at the **same digest** as that commit's `:sha-<short>`. No rebuild means the bytes you release are exactly the bytes you tested. The trade-off is that the binary reports `sha-<short>` as its version, not `0.2.0`; the release version is visible from the image tag (for example `kubectl get pods -o wide`). If the tagged commit has no `:sha-<short>` image (tagged on a branch, or the main run failed), `release-tag` fails with "tag a commit that's on main with a green CI run". On tag runs, every other job skips. **No `latest` tag:** it's a moving label, so nodes with cached images can run different builds under the same name, and "roll back to the previous version" has no clear meaning.
-- **Triggers:** `pull_request`, `push` to `main` and `push` of tags `v*`, with **no path filter on the workflow**. Path-filtered required checks never report on unrelated PRs and block merges forever ("Expected - waiting for status"). Instead, a first `changes` job compares the diff and the other jobs skip themselves cheaply. A skipped job counts as success for required checks.
-- **Concurrency:** `group: sample-api-ci-${{ github.ref }}`, cancel in progress on PRs only.
+- **Triggers:** `pull_request`, `push` to `main`/`mod*` and `push` of tags `v*`, with **no path filter on the workflow**. Path-filtered required checks never report on unrelated PRs and block merges forever ("Expected - waiting for status"). Instead, a first `changes` job compares the diff and the other jobs skip themselves cheaply. A skipped job counts as success for required checks.
+- **Concurrency:** on PRs, `group: sample-api-ci-<ref>` with cancel-in-progress. Every push run gets its own group (`sample-api-ci-<run id>`, `3986ee9`): GitHub drops a *pending* run when a newer one queues in the same group, which would leave a merge commit without its `sha-*` image.
 - **Version:** Dockerfile `ARG VERSION`, then `go build -ldflags "-X main.version=${VERSION}"`. `main.go` keeps a `version = "dev"` default. Remove `APP_VERSION` from `base/kustomization.yaml`, the three overlays and `base/deployment.yaml`. Overlays still pin `images[].newTag` by hand until Flux image automation (Module 8).
-- **Caching:** `actions/setup-go` module/build cache only. Docker layer caching is **deliberately deferred to Module 7**, whose deliverable is measuring cold-cache vs warm-cache times. Adding it now would leave no "before" number.
+- **Caching: none, on purpose.** `actions/setup-go` runs with `cache: false`, and Trivy with `cache: false`. Caching (Go modules, Docker layers, the Trivy DB) is **deliberately deferred to Module 7**, whose deliverable is measuring cold-cache vs warm-cache times. Adding it now would leave no "before" number.
 - **Go/Docker bump:** move to a supported Go version and pin the builder image by digest before turning on the Trivy gate (F9)
 - **Matrix (decided):** Go supports only its two newest releases. Testing on both catches breakage before a Go upgrade. The app *ships* one version (the `go.mod`/Dockerfile one), so for an app this is an early warning; for a library it would be essential. Verify the two current releases at implementation time.
 - **Single architecture (amd64) on purpose.** Multi-arch images (amd64 + arm64 under one tag through an image index, built with `buildx` using `$BUILDPLATFORM`/`$TARGETARCH`) are **deferred to Module 7**, where `buildx` and multi-arch are the syllabus topic. It would also force a rework of the scan→push hand-off: a multi-platform image can't go through `docker load`, so it needs an OCI-layout tarball and a Trivy scan per platform. Deferring keeps this work block small enough to review and understand. The Dockerfile gets a comment saying this.
@@ -373,7 +383,8 @@ flowchart LR
 
 | Job | Permissions | Does |
 |---|---|---|
-| `rescan` | `contents: read`, `packages: read`, **no OIDC, no write** | Resolve the newest `sha-*` tag and the newest semver tag in GHCR, then run Trivy against each with the same thresholds as `build-scan`. A failure turns the run red (visible on the Actions tab; issue creation can come later) |
+| `resolve` | `contents: read` (for the checkout of `main`'s history) | Lists the package's tags anonymously (the package is public) and picks the newest `sha-*` image on `main` and the highest semver tag. Runs with `set -euo pipefail`, so a registry error fails the step with the HTTP error (`7292655`) |
+| `rescan` (matrix: one leg per picked image) | `permissions: {}`: **no token permissions at all** | Trivy against each image with the same thresholds as `build-scan`. A failure turns the run red (visible on the Actions tab; issue creation can come later) |
 
 - **Trigger:** `schedule: cron: '17 6 * * *'` (daily, off the hour to dodge the top-of-hour runner rush) plus `workflow_dispatch`.
 - **Why:** the image didn't change but the vulnerability database did. A scan that passed last week is no evidence about today. Scheduled workflows only run from the default branch, and GitHub disables them after 60 days without repo activity.
@@ -382,16 +393,22 @@ flowchart LR
 
 | Job | Credentials | Does |
 |---|---|---|
+| `changes` | none | Sets `terraform` (any Terraform or policy changed) and `dev` (dev's root, the modules, the policies or the plan workflows changed). Manual runs and new branches run everything |
 | `fmt` | none | `terraform fmt -check -recursive -diff` over `Acme/infra/terraform` |
-| `validate` (matrix: `account`, `environments/dev`, `state-backend`, `ci-iam`) | none | `init -backend=false` then `validate`, as today |
-| `plan-dev` (needs fmt, validate) | plan role through OIDC (`sub = ...:pull_request`) | `init`, `plan -lock=false -out=tfplan`, `show -json` to `plan.json`, `conftest test`, `show -no-color` to text, then post or update one PR comment (marker `<!-- terraform-plan:dev -->`, truncated at about 60k chars) |
+| `validate` (matrix: `account`, `ci-iam`, `environments/dev`, `state-backend`) | none | `init -backend=false` then `validate` |
+| `module-test` (matrix: modules with `tests/`, today `vpc`) | none | `terraform test` with a mocked AWS provider (added in `7ea9671`) |
+| `validate-result` | none | Required check: aggregates `validate` and `module-test` |
+| `policy` | none | Conftest's own tests (`conftest verify`) and the seeded bad plan (exactly 3 denies, 1 warning) |
+| `plan-dev` (needs fmt, validate-result, policy; dev changed; same-repo PR or manual run) | plan role through OIDC (`sub = ...:pull_request` or the dispatched branch) | Calls `terraform-plan-reusable.yml` (§2a): plan, Conftest on the plan, run summary, text plan artifact |
+| `plan-result` | none | Required check: aggregates `plan-dev` (its name changes when skipped) |
+| `comment` (same-repo PRs; also when `plan-dev` failed or was skipped, not when cancelled) | `pull-requests: write` only | Posts or updates one PR comment (marker `<!-- terraform-plan:dev -->`, truncated at about 60k chars). When the latest plan failed or was skipped it replaces the old plan with a "no current plan" note (`bd9b12b`) |
 
-- **Triggers:** `pull_request` (always, gated by a `changes` job, same reason as above) and `workflow_dispatch` (kept for manual plans from `main`/`mod*`).
-- **Job-level permissions** on `plan-dev`: `contents: read`, `id-token: write`, `pull-requests: write`.
-- **Concurrency:** per PR number, `cancel-in-progress: true`. That's safe because PR plans never take the lock.
+- **Triggers:** `pull_request` (always, gated by the `changes` job, same reason as above), `push` to `main`/`mod*` (checks only: no plan, no OIDC token) and `workflow_dispatch` (manual plans from `main`/`mod*`).
+- **Job-level permissions:** `plan-dev` gets `contents: read` and `id-token: write`; only `comment` gets `pull-requests: write`, and it has no AWS access.
+- **Concurrency:** per PR number (or ref on pushes), cancelling only on PRs. That's safe because these plans never take the lock.
 - **Conftest runs on every plan, including no-op plans**, so the step is always exercised.
 - **Injection safety:** the comment script reads the plan from a file and uses no `${{ }}` interpolation of PR-controlled text inside `run:` or `script:` (pattern from `origin/depmod6`).
-- **Plan role trust change:** add `repo:kerinschristopher/Curriculum:pull_request` as an extra `sub` value. This is a deliberate widening (`docs/iam.md:227`). Fork PRs never receive OIDC tokens. Same-repo PRs from *any* branch can now use the read-only role (see Risks R3).
+- **Plan role trust change:** add `repo:kerinschristopher/Curriculum:pull_request` as an extra `sub` value. This is a deliberate widening (`docs/iam.md`, "Condition: `sub` must match this repo"). Fork PRs never receive OIDC tokens. Same-repo PRs from *any* branch can now use the read-only role (see Risks R3).
 
 #### 2a. `terraform-plan-reusable.yml` (new; the reusable-workflow example)
 
@@ -401,8 +418,12 @@ The PR plan and the post-merge plan share checkout, setup-terraform, the OIDC as
 |---|---|
 | `inputs.working-directory` | The root to plan (`Acme/infra/terraform/environments/dev`) |
 | `inputs.role-arn` | The role to assume (the plan role in both callers) |
-| `inputs.artifact-name` | Where `tfplan`, `.terraform.lock.hcl` and the redacted text plan are uploaded (retention 1 day) |
+| `inputs.artifact-name` | Base name: `<name>-text` holds the redacted text plan; `<name>` holds `tfplan` and `.terraform.lock.hcl` when `save-plan` is set (retention 1 day) |
+| `inputs.save-plan` | Upload the binary `tfplan` for a later apply. It holds unredacted values, so only the apply caller sets it |
+| `inputs.destroy` | Plan a destroy (the apply workflow's teardown dispatch) |
+| `inputs.gated` | Tell the reader in the run summary that an approval follows |
 | `outputs.has_changes` | From `-detailed-exitcode`, so the caller can skip the apply |
+| `outputs.plan_artifact_id` | The saved plan's artifact ID, so the apply job can delete it |
 
 - **Callers:** `terraform-plan.yml` (`plan-dev` becomes `uses: ./.github/workflows/terraform-plan-reusable.yml`, then a small `comment` job posts the text plan to the PR) and `terraform-apply.yml` (its `plan` job).
 - **Permissions:** a called workflow can't grant itself more than its caller. Each caller job grants `contents: read` and `id-token: write`, and only the PR caller's `comment` job gets `pull-requests: write`.
@@ -414,13 +435,13 @@ The PR plan and the post-merge plan share checkout, setup-terraform, the OIDC as
 | Job | Credentials | Does |
 |---|---|---|
 | `plan` | plan role (`sub = ...:ref:refs/heads/main`) | Calls `terraform-plan-reusable.yml` (§2a): `init`, `plan -lock=false -out=tfplan`, `conftest test`, write the summary to `$GITHUB_STEP_SUMMARY` (counts, then any `destroy`/`replace` lines highlighted, then the full plan), upload `tfplan` + `.terraform.lock.hcl` as an artifact (retention 1 day). Sets output `has_changes` from `-detailed-exitcode` |
-| `apply` (needs plan, `if: has_changes`) | `environment: dev-apply`, then the apply role (`sub = ...:environment:dev-apply`) | Wait for approval. Then checkout the **same SHA**, `init`, download the artifact, `terraform apply -input=false tfplan` (this one **does** lock), then **delete the plan artifact** after a successful apply (needs `actions: write` on this job only) |
+| `apply` (needs plan, `if: has_changes`) | `environment: dev-apply`, then the apply role (`sub = ...:environment:dev-apply`) | Wait for approval. Then checkout the **same SHA**, `init`, download the artifact, `terraform apply -input=false tfplan` (this one **does** lock), then **delete the plan artifact** after every apply attempt, failed ones included (`if: always()`, `29c94dd`; needs `actions: write` on this job only) |
 
-- **Triggers:** `push` to `main` with paths `Acme/infra/terraform/environments/dev/**`, `Acme/infra/terraform/modules/**` and the workflow file. Optional `workflow_dispatch` with an `apply`/`destroy` choice for the end-of-day teardown, which goes through the same gate.
+- **Triggers:** `push` to `main` with paths `Acme/infra/terraform/environments/dev/**`, `Acme/infra/terraform/modules/**`, this workflow file and `terraform-plan-reusable.yml`. Optional `workflow_dispatch` with an `apply`/`destroy` choice for the end-of-day teardown, which goes through the same gate.
 - **Concurrency:** `group: terraform-dev-apply`, `cancel-in-progress: false`. Never kill an apply mid-flight.
 - **No change, no approval request:** `-detailed-exitcode` (0 means no changes, 2 means changes) skips the apply job, which also gives you the curriculum's "minimum viable test" (empty plan when nothing is expected).
 - **Why plan with the plan role and apply with the apply role:** the write-capable credential exists only after approval, and only for the minutes the apply takes.
-- **Why apply the saved plan (Q3):** the reviewer approves exactly what gets applied, and Terraform refuses a stale plan. The cost is that `tfplan` holds unredacted values (even ones marked `sensitive`) and sits in a public-repo artifact. Today that's only resource IDs and ARNs: labels, not credentials, and the account ID is already in the repo. Guardrails: 1-day retention, deleted after apply, and a **revisit trigger**. If any secret ever enters this root's state (a DB password, `random_password`, and so on), move the plan file to the private S3 state bucket or switch to re-planning inside the approved job (see R4).
+- **Why apply the saved plan (Q3):** the reviewer approves exactly what gets applied, and Terraform refuses a stale plan. The cost is that `tfplan` holds unredacted values (even ones marked `sensitive`) and sits in a public-repo artifact. Today that's only resource IDs and ARNs: labels, not credentials, and the account ID is already in the repo. Guardrails: 1-day retention, deleted after every apply attempt, and a **revisit trigger**. If any secret ever enters this root's state (a DB password, `random_password`, and so on), move the plan file to the private S3 state bucket or switch to re-planning inside the approved job (see R4).
 
 #### 4. Conftest policy set: `Acme/infra/policies/terraform/`
 
@@ -463,17 +484,17 @@ deny contains msg if {
 }
 ```
 
-Values only known at apply time (`after_unknown`) can't be checked. The design **warns** (Conftest `warn`) when a CIDR on a port-22-capable rule is unknown, instead of failing.
+Values only known at apply time (`after_unknown`) can't be checked. The design **warns** (Conftest `warn`) instead of failing when, on a rule that may allow SSH, the CIDR is unknown; when a world-open rule's protocol or port range is unknown; or when a whole inline `ingress` list (or one of its rules) is unknown (the last two added in `15756a1`). The sketch above is simplified: the real policy reads every `after` attribute with a null default, because a plan leaves unknown attributes out.
 
 #### 5. IAM roles (re-homed to `Acme/infra/terraform/ci-iam/`, human-applied)
 
 | Role | Assumed by | Trust (`sub`, `StringEquals` unless noted) | Permissions (summary) |
 |---|---|---|---|
-| `dev-github-actions-plan` (exists) | `terraform-plan` (PR and dispatch), `terraform-apply/plan` | `StringLike`: `...:ref:refs/heads/main`, `...:ref:refs/heads/mod*`, **plus** `...:pull_request` | Unchanged: `terraform-plan-read`, `terraform-state-access` (`docs/iam.md:133-164`) |
-| `dev-github-actions-apply` (exists, re-scoped) | `terraform-apply/apply` only | `...:environment:dev-apply` | Now (`enable_eks = false`): EC2/VPC write limited to the region and to `Environment=dev`-tagged resources where AWS supports tag conditions. State: `s3:GetObject`/`PutObject` on `dev/terraform.tfstate` only. DynamoDB `GetItem`/`PutItem`/`DeleteItem` with `LeadingKeys` = dev's lock and `-md5` keys. **Explicit Deny** on `iam:*` for `role/*-github-actions-*`, the GitHub OIDC provider, and any state key other than `dev/*`. **Detach `ReadOnlyAccess` and `AmazonVPCFullAccess`.** Later, when EKS is in scope (a follow-up change): add EKS/KMS/logs/IAM-role writes for `role/dev-*` with `iam:CreateRole`/`PutRolePermissionsBoundary` conditioned on `iam:PermissionsBoundary = policy/dev-workload-boundary` (supported by the EKS module, F15) |
+| `dev-github-actions-plan` (exists) | `terraform-plan` (PR and dispatch), `terraform-apply/plan` | `StringLike`: `...:ref:refs/heads/main`, `...:ref:refs/heads/mod*`, **plus** `...:pull_request` | Unchanged: `terraform-plan-read`, `terraform-state-access` (`docs/iam.md`, "Permissions: what the plan role can do") |
+| `dev-github-actions-apply` (exists, re-scoped) | `terraform-apply/apply` only | `...:environment:dev-apply` | Now (`enable_eks = false`): EC2/VPC write limited to the region and to `Environment=dev`-tagged resources where AWS supports tag conditions. State: `s3:GetObject`/`PutObject` on `dev/terraform.tfstate` only. DynamoDB `GetItem`/`PutItem`/`DeleteItem` with `LeadingKeys` = dev's lock and `-md5` keys. **Explicit Deny** on `iam:*` for `role/*-github-actions-*`, the GitHub OIDC provider, and any state key other than `dev/*`. Retagging owned resources is allowed, but never the `Environment` tag itself (`Ec2RetagOwned`, `38cb51c`). **Detach `ReadOnlyAccess` and `AmazonVPCFullAccess`.** Later, when EKS is in scope (a follow-up change): add EKS/KMS/logs/IAM-role writes for `role/dev-*` with `iam:CreateRole`/`PutRolePermissionsBoundary` conditioned on `iam:PermissionsBoundary = policy/dev-workload-boundary` (supported by the EKS module, F15) |
 | (none) | `sample-api-ci` | n/a | `GITHUB_TOKEN` with `packages: write` in the `push` job only |
 
-Why a separate `ci-iam` root: if CI applied the root containing its own roles, the apply role would need `iam:*` on itself, and anyone who can land a reviewed change could grant CI anything. Keeping identity in a human-applied root, with an explicit Deny in the apply role, breaks that loop. The plan role leaves the `dev` root with `removed { lifecycle { destroy = false } }`. **Both** roles are adopted into `ci-iam` with `import` blocks (the apply role already exists live, F20, so creating it would fail) (the same pattern as `environments/dev/main.tf:61-69` and `account/main.tf:16-20`). The OIDC provider stays in `account/`.
+Why a separate `ci-iam` root: if CI applied the root containing its own roles, the apply role would need `iam:*` on itself, and anyone who can land a reviewed change could grant CI anything. Keeping identity in a human-applied root, with an explicit Deny in the apply role, breaks that loop. The plan role leaves the `dev` root with `removed { lifecycle { destroy = false } }`. **Both** roles are adopted into `ci-iam` with `import` blocks (the apply role already exists live, F20, so creating it would fail) (the same pattern as the `removed` block in `environments/dev/main.tf:50-56` and the `import` in `account/main.tf:18-21`). The OIDC provider stays in `account/`.
 
 **`enable_eks` must explain itself (Q4).** The variable's `description` and an adjacent comment must say that it defaults to `false` because the Module 6 apply role is VPC-only on purpose (smallest blast radius while CI apply is new). Setting it to `true` first needs the later EKS-scope apply-role expansion (a follow-up change) with the `dev-workload-boundary` permissions boundary, and dev costs about $0.20/h while EKS is on.
 
@@ -481,7 +502,7 @@ Why a separate `ci-iam` root: if CI applied the root containing its own roles, t
 
 | Item | Setting | File |
 |---|---|---|
-| Environment `dev-apply` (exists) | Required reviewer `kerinschristopher`; deployment branches: `main` only; no secrets | New `dev-apply-environment.json` plus the `gh api -X PUT` command in `docs/ci.md` |
+| Environment `dev-apply` (exists) | Required reviewer `kerinschristopher`; deployment branches: `main` only; no secrets; `can_admins_bypass: true` (the only admin is the reviewer; set `false` when someone joins) | New `dev-apply-environment.json` and `dev-apply-branch-policy.json`, plus the `gh api` commands in `docs/ci.md` |
 | Ruleset `trusted-branches` (exists) | Unchanged | `trusted-branches-ruleset.json` |
 | Ruleset `main-merge-gate` (new) | Target `main`: require a PR; required checks `test-result` (never the per-version matrix legs), `lint`, `kustomize`, `build-scan`, `plan-result` (never `plan-dev`, whose check name changes between run and skipped), `policy`, `fmt`, `validate-result` (never the per-root `validate` legs); admin bypass "pull requests only" | New `main-merge-gate-ruleset.json` |
 | GHCR package `sample-api` | Manage Actions access: `Curriculum` gets **Write** | Manual. Documented in `docs/ci.md` |
@@ -489,19 +510,19 @@ Why a separate `ci-iam` root: if CI applied the root containing its own roles, t
 #### 7. Documentation
 
 - `docs/ci.md` (new): one table per workflow (trigger, jobs, `sub`, role, permissions), the four-way coupling rule, how to approve or reject an apply, how to run Conftest locally, how to roll back, and a **self-hosted vs GitHub-hosted runners** section (cost, queue time, security isolation including the public-repo fork risk, and who patches the machine). Written last (phase 6), so it documents only what exists: no caches or steps the workflows don't have (PR #6 review T7).
-- `docs/iam.md`: add the `pull_request` trust value, an apply-role section in the same "why each statement exists" style, and move the "What the trust policy deliberately doesn't accept (yet)" items (`docs/iam.md:109-115`) into "accepted".
+- `docs/iam.md`: add the `pull_request` trust value, an apply-role section in the same "why each statement exists" style, and move the "What the trust policy deliberately doesn't accept (yet)" items into "accepted". (Done in phase 6; that section is now "What the trust policy deliberately doesn't accept".)
 
 #### 8. Failure modes
 
 | Failure | What happens | Detection / recovery |
 |---|---|---|
 | OIDC trust mismatch (`sub` changed, typo, immutable-subject opt-in) | "Assume role" step fails with AccessDenied, nothing runs against AWS | Fails closed. Compare the `sub` from the job's debug output with the trust policy |
-| Plan role missing a read permission | Plan fails with AccessDenied naming the action | Follow `docs/iam.md:228-229`, then rerun the IAM policy tests (`pytest Acme/infra/scripts/tests`, K1) |
+| Plan role missing a read permission | Plan fails with AccessDenied naming the action | Follow `docs/iam.md`, "Changing the roles", then rerun the IAM policy tests (`pytest Acme/infra/scripts/tests`, K1) |
 | Conftest violation | PR check red; apply workflow stops before approval | Fix the Terraform. Never "skip policy" |
 | Stale saved plan (state changed after plan) | `apply` errors "Saved plan is stale", nothing applied | Re-run the workflow, which re-plans and asks for re-approval |
 | Apply fails midway | Partial changes; lock released by Terraform; state reflects what was done | Fix forward via PR, or revert the PR. Previous state version is in S3 |
 | Runner dies mid-apply | Lock may stay held in DynamoDB | `terraform force-unlock <id>` from WSL by the human (documented in `docs/ci.md`) |
-| Approval never given | Run waits, then expires after 30 days | Nothing applied. The next merge supersedes it (queued by `concurrency`) |
+| Approval never given (or given after 24 h) | Run waits, then expires after 30 days. The saved plan only lives 1 day, so a late approval fails at "Download the saved plan" | Nothing applied. Re-run the workflow to plan again; the next merge also supersedes it (queued by `concurrency`) |
 | GHCR push 403 | `push` job fails; the image isn't published, but the scan passed | Grant the repo Write on the package (F11) |
 | Trivy DB download rate-limited or flaky | Scan step errors | Retry. Trivy's DB is fetched from GHCR mirrors, and a cache can come in Module 7 |
 | Compromised third-party action | Runs with that job's permissions only | SHA pinning; least-privilege jobs; Dependabot for `github-actions` (future) |
@@ -682,7 +703,7 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | R1 | Split IAM ownership (F3) is resolved incorrectly, deleting or reverting the plan role | Med | High | Phase 2 is its own commit, and nobody applies the old `ci-iam` code before it. Use `removed { destroy = false }` + `import`; require "No changes" in both roots before merging |
 | R2 | The apply role can escalate privileges (it creates IAM roles once EKS is managed) | Med (once EKS is in scope) | High | Explicit Deny on CI roles and the OIDC provider; permissions boundary required on any role it creates; human approval of every plan; future Conftest rule "every `aws_iam_role` has `permissions_boundary`" |
 | R3 | Trusting `sub = pull_request` lets any same-repo PR branch (not just ruleset-protected ones) assume the read-only plan role | Low (solo repo) | Low-Med (read of dev config and dev state) | Fork PRs get no OIDC token; the role stays read-only and lockless; revisit if collaborators are added |
-| R4 | Plan artifacts and plan JSON hold plaintext values; in a **public** repo, anyone signed in to GitHub can download run artifacts | Med | Med (currently low: dev has no secrets in state) | Retention 1 day; artifact deleted after a successful apply; never upload `plan.json`; the PR comment uses the redacted text plan; rule: no secrets in Terraform state for this root (Module 10 uses ESO / Secrets Manager). **Revisit trigger:** the moment a secret enters state, move plans to the private S3 state bucket or re-plan inside the approved job |
+| R4 | Plan artifacts and plan JSON hold plaintext values; in a **public** repo, anyone signed in to GitHub can download run artifacts | Med | Med (currently low: dev has no secrets in state) | Retention 1 day; artifact deleted after every apply attempt (`29c94dd`); only the apply caller saves the binary plan; never upload `plan.json`; the PR comment uses the redacted text plan; rule: no secrets in Terraform state for this root (Module 10 uses ESO / Secrets Manager). **Revisit trigger:** the moment a secret enters state, move plans to the private S3 state bucket or re-plan inside the approved job |
 | R5 | A merge recreates EKS + NAT in dev and costs money while you're away | Med | Med (about $0.20/h) | Approval gate shows the plan counts; `enable_eks` toggle defaults to `false`; gated `destroy` dispatch |
 | R6 | Self-approval makes the gate ceremonial | High | Med | Accept for a solo learning repo; the job summary leads with counts and destroys; add a second reviewer when one exists |
 | R7 | Required checks combined with path filters block unrelated PRs | High if done naively | Low (annoyance) | No workflow-level path filters on required workflows; use a `changes` job inside |
@@ -744,14 +765,14 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 | `dev-apply` environment | GitHub | Exists (F6). Captured as JSON in phase 3 |
 | GHCR package Actions access | GitHub | Manual grant (F11) |
 | Actions (pinned by SHA): `actions/checkout`, `actions/setup-go`, `hashicorp/setup-terraform`, `aws-actions/configure-aws-credentials`, `actions/github-script`, `actions/upload-artifact`/`download-artifact`, `docker/setup-buildx-action`, `docker/build-push-action`, `docker/login-action`, `golangci/golangci-lint-action`, `aquasecurity/trivy-action` | Supply chain | Verify each SHA against its release tag. Trivy: a post-incident release only (F17) |
-| Tools: Terraform 1.16.3, Conftest (current at implementation; v0.67.x as of March 2026, [pkg.go.dev](https://pkg.go.dev/github.com/open-policy-agent/conftest@v0.67.1)), Trivy CLI, golangci-lint v2 | Tooling | Conftest is installed in CI by downloading the release binary and verifying its SHA-256 (no first-party action) |
+| Tools: Terraform 1.16.3, Conftest 0.71.1 (pinned with its SHA-256 in `terraform-plan.yml` and `terraform-plan-reusable.yml`), Trivy CLI, golangci-lint v2 | Tooling | Conftest is installed in CI by downloading the release binary and verifying its SHA-256 (no first-party action) |
 | IAM policy tests (K1) | Test | Python + boto3 + pytest rewrite of `simulate-plan-role.sh`, with apply-role cases; run from WSL by a principal with `iam:SimulatePrincipalPolicy` (not CI) |
 
 ---
 
 ## Future Use Cases for This Design
 
-- **Stage and prod:** call the role module per environment (`stage-github-actions-{plan,apply}`), with environments `stage-apply` and `prod-apply`; prod gets a wait timer and, ideally, a second reviewer. The `docs/iam.md:222-225` tightening path applies unchanged.
+- **Stage and prod:** call the role module per environment (`stage-github-actions-{plan,apply}`), with environments `stage-apply` and `prod-apply`; prod gets a wait timer and, ideally, a second reviewer. The tightening path in `docs/iam.md` ("Changing the roles") applies unchanged.
 - **Module 7:** BuildKit/GHA layer cache and `Dockerfile.test` slot into `build-scan`; cold vs warm numbers go into `docs/ci.md`.
 - **Module 8 (Flux):** Flux image automation watches `sha-*` tags and updates `overlays/*/kustomization.yaml`, replacing the manual `newTag` bump. CI still never runs `kubectl apply`. A natural split: dev follows `sha-*`, stage/prod follow semver tags (Flux `ImagePolicy` with a `semver` range).
 - **Automated versioning:** release-please (or similar) proposes the next `v*` tag from commit messages, removing the "forgot to tag" gap (R11).
@@ -769,16 +790,18 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 ## Internal Documentation
 
 - `docs/curriculum.md:284-331`: Module 6 concepts, testing-infra guidance and deliverable
-- `docs/iam.md`: plan role trust and permissions, the trigger/trust/ruleset coupling (`:107`), the planned Module 6 changes (`:109-115`, `:222-227`)
+- `docs/ci.md`: every workflow, job, trigger, permission, `sub` and role; why five workflows; testing the Terraform; approving an apply; rollback
+- `docs/iam.md`: both CI roles' trust and permissions, the trigger/trust/ruleset coupling ("Which runs use the plan role"), GitHub-side controls, how it's verified, changing the roles
 - `Acme/infra/terraform/modules/iam-roles/main.tf:1-19`: future-environments and apply-role notes
-- `Acme/infra/github/trusted-branches-ruleset.json`: who can push trusted branches
-- `.github/workflows/terraform-plan.yml`, `terraform-checks.yml`, `sample-api-checks.yml`: current CI
-- `Acme/infra/scripts/tests/simulate-plan-role.sh`: IAM policy simulator tests (bash; replaced by pytest in phase 2, K1)
+- `Acme/infra/github/`: `trusted-branches-ruleset.json`, `main-merge-gate-ruleset.json`, `dev-apply-environment.json`, `dev-apply-branch-policy.json`
+- `.github/workflows/`: `sample-api-ci.yml`, `sample-api-rescan.yml`, `terraform-plan.yml`, `terraform-plan-reusable.yml`, `terraform-apply.yml` (the old `terraform-checks.yml` and `sample-api-checks.yml` were removed in `7eeba25` and `8282423`)
+- `Acme/infra/scripts/tests/test_iam_policies.py`: IAM policy simulator tests (pytest; replaced `simulate-plan-role.sh` in `c45a9f5`, K1)
+- `Acme/infra/policies/terraform/README.md`: the Conftest policy, its tests and the seeded bad plan
+- `Acme/infra/terraform/modules/vpc/tests/` and `Acme/infra/terraform/test/README.md`: the module unit tests and the Terratest integration test
 - PR #5 review (bgblackmore, approved 2026-10-07): https://github.com/kerinschristopher/Curriculum/pull/5. Module 6 carry-overs are tracked in Findings, "PR #5 carry-overs"
 - Prior art: `git show origin/depmod6:docs/ci.md` and `git log origin/depmod6`
 - PR #6 review and follow-up (bgblackmore, 2026-09-30 and 2026-10-05): https://github.com/kerinschristopher/Curriculum/pull/6. Every item is tracked in Findings, "PR #6 review traceability"
 - **Salvage list (copy as files from `depmod6`, don't retype):** `modules/iam-roles/main.tf` `plan_trust` and `apply_trust`; `.github/workflows/terraform-apply.yml` (environment gate, apply/destroy dispatch input; then split per §3); `.github/workflows/sample-api-ci.yml` (SHA pins, secret-less Trivy, scanned-tarball push); `main_test.go` and the `healthHandler` extraction. Re-apply the `apply_environment` and `state_key` variables to `iam-roles` **by hand**, reading both versions first, because Module 5 rewrote that file. Don't let a conflict resolution decide the design. `.gitattributes` LF enforcement is already on `main`
-- To be created: `docs/ci.md`, `Acme/infra/policies/terraform/README.md`
 
 External references:
 - [GitHub changelog: immutable subject claims for Actions OIDC tokens (2026-04-23)](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens)
@@ -795,7 +818,7 @@ External references:
 |---|---|---|---|
 | Q1 | Where should the CI IAM roles live: a re-homed **`ci-iam/` root** (suggested: isolated blast radius, and the apply role can't write its state) or the existing **`account/` root**? | kerinschristopher | Decided (2026-10-09): `ci-iam/` root, human-applied from WSL |
 | Q2 | How do we clean up the stale `ci-iam` state and the orphan apply role: **adopt them** (state rm stale entries, `import` the live roles into the new root, detach `ReadOnlyAccess`/`AmazonVPCFullAccess`), or **delete the apply role** and recreate it from new code? | kerinschristopher | Decided (2026-10-09): adopt (state rm stale entries, import live roles, detach broad policies) |
-| Q3 | Should the apply job **reuse the saved plan artifact** (the reviewer approves exactly what's applied; plaintext plan sits in a public-repo artifact for 1 day) or **re-plan inside the approved job** (no artifact; the reviewer approves on the PR plan)? | kerinschristopher | Decided (2026-10-09): saved plan artifact; 1-day retention, deleted after apply; revisit if a secret enters state |
+| Q3 | Should the apply job **reuse the saved plan artifact** (the reviewer approves exactly what's applied; plaintext plan sits in a public-repo artifact for 1 day) or **re-plan inside the approved job** (no artifact; the reviewer approves on the PR plan)? | kerinschristopher | Decided (2026-10-09): saved plan artifact; 1-day retention, deleted after apply (after every apply attempt since `29c94dd`); revisit if a secret enters state |
 | Q4 | Apply role scope for Module 6: **VPC-only with `enable_eks = false` by default** (suggested), or full EKS-capable now with a permissions boundary? | kerinschristopher | Decided (2026-10-09): VPC-only, `enable_eks = false`, with a comment on the variable explaining why |
 | Q5 | Should **any** environment auto-apply without approval? Only dev exists today. | kerinschristopher | Decided (2026-10-09): no auto-apply; dev requires approval |
 | Q6 | Who is the required reviewer? Keep **yourself** with `prevent_self_review: false` (the only workable option solo), or add a second GitHub account or collaborator? | kerinschristopher | Decided (2026-10-09): yourself, self-review allowed |
