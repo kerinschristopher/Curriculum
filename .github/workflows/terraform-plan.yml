@@ -52,7 +52,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Did any Terraform, the dev root or this workflow change?
+      - name: Did any Terraform, its policies, the dev root or this workflow change?
         id: diff
         env:
           EVENT: ${{ github.event_name }}
@@ -79,13 +79,13 @@ jobs:
           changed="$(git diff --name-only "$base...$head")"
           echo "$changed"
           workflow='^\.github/workflows/terraform-plan(-reusable)?\.yml$'
-          if grep -qE "^Acme/infra/terraform/|$workflow" <<<"$changed"; then
+          if grep -qE "^Acme/infra/(terraform|policies)/|$workflow" <<<"$changed"; then
             echo "terraform=true" >> "$GITHUB_OUTPUT"
           else
             echo "terraform=false" >> "$GITHUB_OUTPUT"
           fi
-          # The dev plan depends on the dev root and the modules it calls.
-          if grep -qE "^Acme/infra/terraform/(environments/dev|modules)/|$workflow" <<<"$changed"; then
+          # The dev plan depends on the dev root, the modules it calls and the policies it must pass.
+          if grep -qE "^Acme/infra/(terraform/(environments/dev|modules)|policies)/|$workflow" <<<"$changed"; then
             echo "dev=true" >> "$GITHUB_OUTPUT"
           else
             echo "dev=false" >> "$GITHUB_OUTPUT"
@@ -164,8 +164,53 @@ jobs:
           echo "changes=$CHANGES validate=$VALIDATE"
           [ "$CHANGES" = success ] && { [ "$VALIDATE" = success ] || [ "$VALIDATE" = skipped ]; }
 
+  # The policy's own tests, plus proof that it still catches a real (seeded) bad plan. The plan
+  # jobs then run the same policy against each real plan (terraform-plan-reusable.yml).
+  policy:
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: Acme/infra/policies/terraform
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same pinned version and checksum as terraform-plan-reusable.yml; change both together.
+      - name: Install Conftest
+        working-directory: ${{ runner.temp }}
+        env:
+          VERSION: "0.71.1"
+          SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+        run: |
+          tarball="conftest_${VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$tarball" "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/${tarball}"
+          echo "${SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" conftest
+          install -m 0755 conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Policy unit tests
+        run: conftest verify --no-color -p .
+
+      # testdata/seeded-bad/plan.json is a real plan (main.tf next to it) with SSH open to the
+      # world in each of the three resource shapes, plus one CIDR unknown until apply. If the policy
+      # stops reporting exactly that, a rule has silently stopped matching.
+      - name: Seeded bad plan is caught (3 denies, 1 warning)
+        run: |
+          conftest test --no-color -p . testdata/seeded-bad/plan.json || true
+          result="$(conftest test -o json -p . testdata/seeded-bad/plan.json || true)"
+          failures="$(jq '[.[].failures // [] | length] | add' <<<"$result")"
+          warnings="$(jq '[.[].warnings // [] | length] | add' <<<"$result")"
+          echo "failures=$failures warnings=$warnings"
+          [ "$failures" = 3 ] && [ "$warnings" = 1 ]
+
   plan-dev:
-    needs: [changes, fmt, validate-result]
+    needs: [changes, fmt, validate-result, policy]
     # Fork PRs get no OIDC token, so the assume step could only fail; skip them. The post-merge
     # plan in terraform-apply.yml still shows the reviewer the plan before anything is applied.
     if: >-

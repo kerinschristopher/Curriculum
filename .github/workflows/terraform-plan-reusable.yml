@@ -172,6 +172,28 @@ jobs:
           if-no-files-found: error
           overwrite: true # a re-run replaces its earlier plan
 
+      # Policy check on every plan, no-op plans included, so the step is always exercised. It runs
+      # after the summary (the reader still sees the plan when it fails) and before the tfplan
+      # upload (a plan that breaks policy never becomes something the apply job can use).
+      # Rules and tests: Acme/infra/policies/terraform. Never skip it; fix the Terraform.
+      - name: Install Conftest
+        working-directory: ${{ runner.temp }}
+        env:
+          VERSION: "0.71.1"
+          SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+        run: |
+          tarball="conftest_${VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$tarball" "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/${tarball}"
+          echo "${SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" conftest
+          install -m 0755 conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Conftest (Acme/infra/policies/terraform)
+        run: |
+          terraform show -json tfplan > "$RUNNER_TEMP/plan.json"
+          conftest test --no-color -p "$GITHUB_WORKSPACE/Acme/infra/policies/terraform" "$RUNNER_TEMP/plan.json"
+
       # tfplan holds unredacted values (even sensitive ones) and this repo is public, so it is
       # uploaded only for an apply, lives one day at most, and the apply deletes it. Today it holds
       # only resource IDs and ARNs. Revisit before enable_eks = true (the plan would carry
