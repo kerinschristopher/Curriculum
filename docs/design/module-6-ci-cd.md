@@ -636,6 +636,19 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
   - **`7292655`:** `sample-api-rescan` runs with `set -euo pipefail`, and the scanner job gets `permissions: {}`.
   - **`bd9b12b`:** the PR plan comment is replaced with a "no current plan" note when the latest plan failed or was skipped.
   - **`7ac8b84`:** four doc mismatches.
+- **Tested after the push:**
+  - **Linting:** `actionlint` with shellcheck 0.9.0 is clean on all workflows.
+  - **Rescan `pick` step, run locally:** against the real package it picks `0.1.1` (GHCR has no `sha-*` yet, because `sample-api-ci` isn't on `main`). Against a package that doesn't exist, it stops at `curl: (22) … 403`. The pre-`7292655` script on the same input ends in the misleading "No semver release tag / Nothing to scan".
+  - **Plan comment, on throwaway draft PR #10 into `mod6`** (closed unmerged, branch deleted). One marker comment throughout:
+
+    | Push | Run | `plan-dev` | Comment |
+    |---|---|---|---|
+    | Doc only | `38075443090` | skipped | none posted |
+    | SG with SSH from `0.0.0.0/0` | `38075479514` | failure | created, saying the plan failed |
+    | Same SG with `10.0.0.0/8` | `38075584780` | success | updated in place: "Plan: 14 to add" |
+    | SG removed | `38075682106` | skipped | updated in place to "No plan ran" |
+
+    The failed run's cause was the Conftest deny on a real CI plan: `aws_security_group.comment_check ingress[0]: SSH (TCP 22) open to 0.0.0.0/0`.
 - **Deferred to after the merge (architecture review):**
   - H1: ingress-nginx is retired; decide in the Module 8 design.
   - H3: Identity Center for the human admin, before `enable_eks`.
