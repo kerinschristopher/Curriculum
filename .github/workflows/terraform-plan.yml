@@ -157,7 +157,7 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-  # Module unit tests (`terraform test`, modules/<name>/tests/*.tftest.hcl). The AWS provider is
+  # Unit tests (`terraform test`, <folder>/tests/*.tftest.hcl) for modules and roots. The AWS provider is
   # mocked, so they need no credentials and create nothing. The real-AWS counterpart is Terratest
   # (Acme/infra/terraform/test/), run by hand; see docs/ci.md, "Testing the Terraform".
   module-test:
@@ -168,12 +168,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Modules that have a tests/ directory. Add a module here when it gets tests.
-        module:
-          - vpc
+        # Folders under TF_ROOT that have a tests/ directory. Add one here when it gets tests.
+        path:
+          - modules/vpc
+          - environments/dev
     defaults:
       run:
-        working-directory: ${{ env.TF_ROOT }}/modules/${{ matrix.module }}
+        working-directory: ${{ env.TF_ROOT }}/${{ matrix.path }}
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

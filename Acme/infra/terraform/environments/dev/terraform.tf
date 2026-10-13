@@ -1,5 +1,5 @@
 terraform {
-  # 1.9: the eks_public_access_cidrs validation refers to another variable (var.enable_eks)
+  # 1.9: the eks_public_access_cidrs validation refers to another object (local.enable_eks)
   required_version = ">= 1.9"
 
   required_providers {

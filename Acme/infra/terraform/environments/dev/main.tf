@@ -2,6 +2,19 @@ provider "aws" {
   region = "us-east-1"
 }
 
+# Off on purpose (design doc Q4). The CI apply role (ci-iam, modules/iam-roles) can only
+# write VPC resources: the smallest blast radius while apply-from-CI is new. Turning EKS on first
+# needs the EKS-scope apply-role expansion (EKS, KMS, logs and IAM-role writes, with every created
+# role bound to the dev-workload-boundary permissions boundary), a human ci-iam apply, and a
+# conscious decision about cost: dev costs about $0.20/h (about $145/month) while EKS is on.
+#
+# A local, not a variable, so nothing outside the code (tfvars, -var, TF_VAR_) can override it:
+# CI and a local run always agree. To turn EKS on, change it here in a reviewed PR.
+# Above is true as of 10-13-26
+locals {
+  enable_eks = false
+}
+
 module "vpc" {
   source = "../../modules/vpc"
 
@@ -13,7 +26,7 @@ module "vpc" {
 
   # Only the EKS nodes in the private subnets need outbound internet, so the NAT gateway and its
   # Elastic IP (both billed by the hour) exist only with EKS. With EKS off, dev costs nothing.
-  enable_nat_gateway = var.enable_eks
+  enable_nat_gateway = local.enable_eks
 
   tags = {
     Environment = "dev"
@@ -21,10 +34,10 @@ module "vpc" {
   }
 }
 
-# See variables.tf for why this is off by default and what turning it on requires.
+# See the enable_eks local above for why this is off by default and what turning it on requires.
 module "eks" {
   source = "../../modules/eks"
-  count  = var.enable_eks ? 1 : 0
+  count  = local.enable_eks ? 1 : 0
 
   name               = "dev"
   kubernetes_version = "1.36"
@@ -43,14 +56,4 @@ module "eks" {
   }
 
   # depends_on = [module.vpc]
-}
-
-# CI roles moved to ../../ci-iam (human-applied), which imports them. Forget dev's copies without
-# deleting them from AWS. (The GitHub OIDC provider already moved to ../../account in Module 5.)
-removed {
-  from = module.iam_roles
-
-  lifecycle {
-    destroy = false
-  }
 }

@@ -259,8 +259,9 @@ The action, principal and `aud` condition do the same jobs as in the plan role. 
 Three inline policies, no managed policies (enforced the same way as the plan role). It was created on 2026-09-29 with `ReadOnlyAccess`
 and `AmazonVPCFullAccess`; both were detached when `ci-iam` adopted it in Module 6.
 
-**Scope today: dev's state plus the VPC module's EC2 resources.** No EKS, KMS, logs or IAM writes. `enable_eks` in
-`environments/dev/variables.tf` stays `false` until an EKS-scope expansion lands with a permissions boundary (design doc Q4).
+**Scope today: dev's state plus the VPC module's EC2 resources.** No EKS, KMS, logs or IAM writes. `local.enable_eks` in
+`environments/dev/main.tf` stays `false` until an EKS-scope expansion lands with a permissions boundary (design doc Q4). It is a
+local, not a variable, so no tfvars file or CI variable can switch it on.
 
 #### `terraform-plan-read`
 The same document as the plan role's. Apply refreshes every resource before changing anything, so it needs the same reads.
@@ -308,7 +309,8 @@ which a human applies from WSL, and the apply role has an explicit Deny on CI id
 Turning `enable_eks` on first needs a follow-up change to this role: EKS, KMS, logs and IAM-role writes for `role/dev-*`, with
 `iam:CreateRole` and `iam:PutRolePermissionsBoundary` conditioned on `iam:PermissionsBoundary = policy/dev-workload-boundary`, so every
 role it creates is capped by a boundary. Until then, a merge creates only VPC resources (and costs nothing: the NAT gateway also follows
-`enable_eks`).
+`enable_eks`). Order matters: apply the expanded role from `ci-iam` first, then flip `local.enable_eks` in a separate PR. Flipping first makes the
+approved apply create the NAT gateway and then fail on the IAM and EKS creates, leaving dev half built.
 
 ## GitHub-side controls
 

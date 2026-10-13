@@ -505,9 +505,9 @@ Values only known at apply time (`after_unknown`) can't be checked. The design *
 | `dev-github-actions-apply` (exists, re-scoped) | `terraform-apply/apply` only | `...:environment:dev-apply` | Now (`enable_eks = false`): EC2/VPC write limited to the region and to `Environment=dev`-tagged resources where AWS supports tag conditions. State: `s3:GetObject`/`PutObject` on `dev/terraform.tfstate` only. DynamoDB `GetItem`/`PutItem`/`DeleteItem` with `LeadingKeys` = dev's lock and `-md5` keys. **Explicit Deny** on `iam:*` for `role/*-github-actions-*`, the GitHub OIDC provider, and any state key other than `dev/*`. Retagging owned resources is allowed, but never the `Environment` tag itself (`Ec2RetagOwned`, `38cb51c`). **Detach `ReadOnlyAccess` and `AmazonVPCFullAccess`.** Later, when EKS is in scope (a follow-up change): add EKS/KMS/logs/IAM-role writes for `role/dev-*` with `iam:CreateRole`/`PutRolePermissionsBoundary` conditioned on `iam:PermissionsBoundary = policy/dev-workload-boundary` (supported by the EKS module, F15) |
 | (none) | `sample-api-ci` | n/a | `GITHUB_TOKEN` with `packages: write` in the `push` job only |
 
-Why a separate `ci-iam` root: if CI applied the root containing its own roles, the apply role would need `iam:*` on itself, and anyone who can land a reviewed change could grant CI anything. Keeping identity in a human-applied root, with an explicit Deny in the apply role, breaks that loop. The plan role leaves the `dev` root with `removed { lifecycle { destroy = false } }`. **Both** roles are adopted into `ci-iam` with `import` blocks (the apply role already exists live, F20, so creating it would fail) (the same pattern as the `removed` block in `environments/dev/main.tf:50-56` and the `import` in `account/main.tf:18-21`). The OIDC provider stays in `account/`.
+Why a separate `ci-iam` root: if CI applied the root containing its own roles, the apply role would need `iam:*` on itself, and anyone who can land a reviewed change could grant CI anything. Keeping identity in a human-applied root, with an explicit Deny in the apply role, breaks that loop. The plan role leaves the `dev` root with `removed { lifecycle { destroy = false } }`. **Both** roles are adopted into `ci-iam` with `import` blocks (the apply role already exists live, F20, so creating it would fail) (the same pattern as the `removed` block in `environments/dev/main.tf:50-56` and the `import` in `account/main.tf:18-21`). The OIDC provider stays in `account/`. These one-time blocks were deleted after the handover apply (`2fc07e6`, and the dev root in the `enable_eks` commit).
 
-**`enable_eks` must explain itself (Q4).** The variable's `description` and an adjacent comment must say that it defaults to `false` because the Module 6 apply role is VPC-only on purpose (smallest blast radius while CI apply is new). Setting it to `true` first needs the later EKS-scope apply-role expansion (a follow-up change) with the `dev-workload-boundary` permissions boundary, and dev costs about $0.20/h while EKS is on.
+**`enable_eks` must explain itself (Q4).** The `enable_eks` local's comment must say that it is `false` because the Module 6 apply role is VPC-only on purpose (smallest blast radius while CI apply is new). It is a local, not a variable, so a gitignored tfvars file can't make a local run disagree with CI (PR #9 review). Setting it to `true` first needs the later EKS-scope apply-role expansion (a follow-up change) with the `dev-workload-boundary` permissions boundary, and dev costs about $0.20/h while EKS is on.
 
 #### 6. GitHub-side configuration (captured as code in `Acme/infra/github/`)
 
@@ -734,6 +734,26 @@ imported (F20, Q13). Three gaps were closed:
   `terraform-plan.yml` (§2), still five workflows.
   - **Tested so far:** only its script, locally: exit 0 for `false`, exit 1 for `true` and for a missing value.
   - **Not yet:** its first real run, which happens after merge and stays red until the first approved apply.
+
+**PR #9 review (2026-10-13).** The reviewer's point: each finding was a path CI had never executed. Two of the four are
+resolved here; #1 (`imagetools create` on the first `v*` tag) and #2 (`jq '.tags[]'` on `tags: null`) are still open.
+- **#4, `enable_eks` only settable through a gitignored tfvars file** (the one with blast radius): a local `true` plus a
+  merge would make the approved CI apply delete the NAT gateway and EIP, then fail on the EKS deletes, leaving dev half
+  destroyed and drift red.
+  - **Fix:** `enable_eks` is now a committed `local` in `environments/dev/main.tf`, so no tfvars, `-var` or `TF_VAR_` can
+    override it, and turning EKS on is a reviewed PR. The CIDR validation reads `local.enable_eks`.
+  - **Test first:** `environments/dev/tests/enable_eks.tftest.hcl` (mocked provider, now in the `module-test` matrix).
+    `cannot_be_switched_on_from_outside` failed against the old variable (`module.eks`: 1, expected 0) and passes
+    against the local, with Terraform's "undeclared variable" warning. Once EKS is in the plan, the mock needs real-looking
+    values for `aws_caller_identity`, `aws_iam_policy_document` and `aws_partition`.
+  - **Checked in AWS (read-only):** dev's plan is 13 VPC adds, with no `module.eks`, NAT gateway or EIP, plus the removal
+    of the stale `ci_role_arn` output.
+  - **Later:** enabling EKS stays two PRs. First the apply-role expansion (human `ci-iam` apply), then the flip.
+- **#3, handover `import` blocks "break every later plan":** not reproduced. With all 5 blocks in `ci-iam` and the one in
+  `account` still present, and every target already in state, `terraform plan -lock=false` gave "No changes" in both
+  (Terraform 1.16.5). An import block whose ID matches state is a no-op. The quoted error comes from the
+  `terraform import` CLI command. The blocks, and the now-empty `removed` blocks, were deleted anyway (`2fc07e6`, and the
+  dev root's in this change), so a future ID change can't make them fail.
 
 ---
 

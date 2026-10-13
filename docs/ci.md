@@ -132,7 +132,7 @@ from the default branch, and GitHub disables them after 60 days without reposito
 | `changes` | always | `contents: read` | none | Decides whether any Terraform or policy changed (`terraform`), and whether dev's root, its modules or the policies changed (`dev`). Manual runs, the nightly run and new branches run everything |
 | `fmt` | Terraform changed | `contents: read` | none | `terraform fmt -check -recursive -diff` over `Acme/infra/terraform` |
 | `validate` (matrix over `account`, `ci-iam`, `environments/dev`, `state-backend`) | Terraform changed | `contents: read` | none | `init -backend=false`, `validate` |
-| `module-test` (matrix over modules with a `tests/` directory: `vpc`) | Terraform changed | `contents: read` | none | `init -backend=false`, `terraform test` with the AWS provider mocked: no credentials, nothing created |
+| `module-test` (matrix over folders with a `tests/` directory: `modules/vpc`, `environments/dev`) | Terraform changed | `contents: read` | none | `init -backend=false`, `terraform test` with the AWS provider mocked: no credentials, nothing created |
 | `validate-result` | always | `contents: read` | none | Aggregates `validate` and `module-test` |
 | `policy` | Terraform changed | `contents: read` | none | Installs Conftest 0.71.1 (SHA-256 checked), runs `conftest verify`, and requires exactly 3 denies and 1 warning from the seeded bad plan |
 | `plan-dev` | dev changed, on a same-repo PR, a manual run or the nightly run; needs fmt, validate-result, policy | `contents: read`, `id-token: write` | **plan role**, `sub = …:pull_request` or `…:ref:refs/heads/<main or mod*>` (the nightly run is always `main`) | Calls `terraform-plan-reusable.yml` for `environments/dev` |
@@ -203,7 +203,7 @@ trust policies are the same as if the steps were inline.
 branch can plan, but the environment refuses its apply job before any credential exists. From any other branch, the plan role refuses
 the plan too.
 
-With `enable_eks = false` (the default), dev is only the VPC: subnets, internet gateway and route tables, with no NAT gateway, so it costs
+With `local.enable_eks = false` (set in `environments/dev/main.tf`, and not overridable), dev is only the VPC: subnets, internet gateway and route tables, with no NAT gateway, so it costs
 nothing. With EKS on it costs about $0.20/hour, and the apply role can't create it yet (see [`docs/iam.md`](iam.md#before-eks-is-in-scope)).
 
 ## The four-way coupling rule
@@ -228,6 +228,7 @@ unless you widen the trust beyond what GitHub protects, which fails open. That's
 |---|---|---|---|
 | Policy (Conftest) | `Acme/infra/policies/terraform/` | CI, on every plan | The plan breaks no security rule (today: no SSH from the internet). See below |
 | Module unit tests (`terraform test`) | `modules/<name>/tests/*.tftest.hcl` | CI (`module-test`), on every Terraform change | The module's logic with a **mocked** AWS provider: NAT only when asked for (cost), one subnet of each kind per zone, the internet route, the caller's tags on every resource (the apply role requires `Environment`), and a single zone is rejected. Each test was checked to fail against a deliberately broken copy |
+| Root unit tests (`terraform test`) | `environments/dev/tests/*.tftest.hcl` | CI (`module-test`), on every Terraform change | That EKS is off unless the committed code turns it on, and that `enable_eks = true` from outside (as a tfvars file would set it) is ignored. The mocked provider needs real-looking values for `aws_caller_identity`, `aws_iam_policy_document` and `aws_partition` once EKS is in the plan. Checked red against the old variable, then green |
 | Integration test (Terratest) | [`Acme/infra/terraform/test/`](../Acme/infra/terraform/test/README.md) | By hand from WSL, as a human | That AWS accepts the module and the routing really works: builds the VPC module in real AWS, checks it through the AWS API, destroys it |
 | Plan as a test (the curriculum's "minimum viable test") | `plan-dev`, `drift`, and `terraform-apply.yml`'s `has_changes` | CI; `drift` nightly on `main` | The plan is empty when nothing should change: the nightly `drift` job fails on any diff between `main` and dev's real state. A plan with no changes also skips the approval, and an unexpected diff shows up in the PR comment before merge |
 
