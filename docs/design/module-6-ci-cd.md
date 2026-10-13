@@ -735,8 +735,8 @@ imported (F20, Q13). Three gaps were closed:
   - **Tested so far:** only its script, locally: exit 0 for `false`, exit 1 for `true` and for a missing value.
   - **Not yet:** its first real run, which happens after merge and stays red until the first approved apply.
 
-**PR #9 review (2026-10-13).** The reviewer's point: each finding was a path CI had never executed. Two of the four are
-resolved here; #1 (`imagetools create` on the first `v*` tag) and #2 (`jq '.tags[]'` on `tags: null`) are still open.
+**PR #9 review (2026-10-13).** The reviewer's point: each finding was a path CI had never executed. Three of the four are
+resolved here; #1 (`imagetools create` on the first `v*` tag) is still open.
 - **#4, `enable_eks` only settable through a gitignored tfvars file** (the one with blast radius): a local `true` plus a
   merge would make the approved CI apply delete the NAT gateway and EIP, then fail on the EKS deletes, leaving dev half
   destroyed and drift red.
@@ -754,6 +754,18 @@ resolved here; #1 (`imagetools create` on the first `v*` tag) and #2 (`jq '.tags
   (Terraform 1.16.5). An import block whose ID matches state is a no-op. The quoted error comes from the
   `terraform import` CLI command. The blocks, and the now-empty `removed` blocks, were deleted anyway (`2fc07e6`, and the
   dev root's in this change), so a future ID change can't make them fail.
+- **#2, `jq -r '.tags[]'` on `tags: null`:** reproduced. Under `set -euo pipefail`, jq exits 5 ("Cannot iterate over
+  null") and the step dies before the "Nothing to scan" error it was written to reach.
+  - **Fix:** `.tags // [] | .[]`. A null or missing list becomes empty, and a malformed reply (`"tags": "x"`) still
+    fails. `.tags[]?` was rejected because it would report a malformed reply as "nothing to scan".
+  - **Test first:** the pick moved, unchanged, into `.github/scripts/pick-rescan-images.sh` (tags JSON on stdin, a
+    commit file in, the JSON matrix out), with pytest cases in `.github/scripts/tests`: both kinds of tag, only one,
+    non-release tags, empty, `null`, missing and malformed. The `null` and missing cases failed with exit 5, then passed
+    after the fix. `scripts-test` in `sample-api-ci.yml` runs them, with shellcheck, whenever the scripts or either
+    workflow changes.
+  - **Checked against GHCR (read-only):** a package that doesn't exist gives 403 DENIED at the token step, not 404 or
+    `null`. `null` would need an existing package with no tags, which wasn't reproduced live. The real package has only
+    `0.1.1`, so the first rescan after merge takes the "No sha-* image" warning path with a one-entry matrix.
 
 ---
 

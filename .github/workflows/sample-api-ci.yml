@@ -47,6 +47,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       app: ${{ steps.diff.outputs.app }}
+      scripts: ${{ steps.diff.outputs.scripts }}
     steps:
       - name: Check out code (full history, to diff against the base)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,6 +72,7 @@ jobs:
           if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
             echo "No usable base ($base); running all jobs"
             echo "app=true" >> "$GITHUB_OUTPUT"
+            echo "scripts=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed="$(git diff --name-only "$base...$head")"
@@ -79,6 +81,11 @@ jobs:
             echo "app=true" >> "$GITHUB_OUTPUT"
           else
             echo "app=false" >> "$GITHUB_OUTPUT"
+          fi
+          if grep -qE '^(\.github/scripts/|\.github/workflows/sample-api-(ci|rescan)\.yml$)' <<<"$changed"; then
+            echo "scripts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "scripts=false" >> "$GITHUB_OUTPUT"
           fi
 
   lint:
@@ -215,6 +222,32 @@ jobs:
             echo "== $dir"
             kubectl kustomize "$dir" > /dev/null
           done
+
+  # Tests for .github/scripts. sample-api-rescan.yml runs pick-rescan-images.sh once a day from
+  # main, which only ever exercises the branch that day's tags lead to; this runs all of them on
+  # every change. Not a build-scan dependency: it guards the rescan, not the image.
+  scripts-test:
+    needs: changes
+    if: needs.changes.outputs.scripts == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # shellcheck, jq and python3 are preinstalled on the runner image.
+      - name: Lint the scripts (shellcheck)
+        run: shellcheck .github/scripts/*.sh
+
+      - name: Run the script tests (pytest)
+        run: |
+          set -euo pipefail
+          # A venv: Ubuntu 24.04 refuses pip installs into the system Python (PEP 668).
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -r .github/scripts/tests/requirements.txt
+          "$RUNNER_TEMP/venv/bin/pytest" -v .github/scripts/tests
 
   build-scan:
     needs: [changes, lint, test-result, kustomize]

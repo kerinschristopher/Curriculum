@@ -53,21 +53,14 @@ jobs:
           # pipefail: a failed curl must fail the step, not hand jq empty input
           set -euo pipefail
           token="$(curl -fsS "https://ghcr.io/token?scope=repository:${REPOSITORY}:pull" | jq -r .token)"
-          tags="$(curl -fsS -H "Authorization: Bearer $token" "https://ghcr.io/v2/${REPOSITORY}/tags/list" | jq -r '.tags[]')"
-          echo "Tags in GHCR:"; echo "$tags"
+          curl -fsS -H "Authorization: Bearer $token" -o "$RUNNER_TEMP/tags.json" \
+            "https://ghcr.io/v2/${REPOSITORY}/tags/list"
+          # Newest first; no sha-* image in the last 500 commits on main is a warning.
+          git log --format=%H -n 500 origin/main > "$RUNNER_TEMP/commits.txt"
 
-          images=()
-          # sha-<7 chars of the commit>, as sample-api-ci.yml tags it
-          for c in $(git log --format=%H -n 500 origin/main); do
-            if grep -qx "sha-${c:0:7}" <<<"$tags"; then images+=("sha-${c:0:7}"); break; fi
-          done
-          [ ${#images[@]} -gt 0 ] || echo "::warning::No sha-* image for the last 500 commits on main"
-
-          release="$(grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags" | sort -V | tail -1 || true)"
-          if [ -n "$release" ]; then images+=("$release"); else echo "::warning::No semver release tag"; fi
-
-          [ ${#images[@]} -gt 0 ] || { echo "::error::Nothing to scan"; exit 1; }
-          json="$(printf '%s\n' "${images[@]}" | jq -R . | jq -cs .)"
+          # The pick is a script so its tests (.github/scripts/tests, run by sample-api-ci) can reach
+          # every branch, including the ones no daily run has hit yet.
+          json="$(.github/scripts/pick-rescan-images.sh "$RUNNER_TEMP/commits.txt" < "$RUNNER_TEMP/tags.json")"
           echo "Scanning: $json"
           echo "images=$json" >> "$GITHUB_OUTPUT"
 

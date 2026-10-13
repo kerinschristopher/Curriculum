@@ -81,6 +81,7 @@ the ruleset after editing its JSON with
 | `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases, with a Go build cache per version |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |
 | `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays and the infrastructure overlays |
+| `scripts-test` | `.github/scripts/`, `sample-api-ci.yml` or `sample-api-rescan.yml` changed | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`. Runs every branch of `pick-rescan-images.sh`, including the ones the daily rescan has never hit. Not a `build-scan` dependency |
 | `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). On `push` to `main` only, uploads the tarball (1 day) |
 | `push` | `push` to `main`, after build-scan | `contents: read`, `packages: write` | Downloads the scanned tarball, `docker load`, logs in to GHCR with the run's `GITHUB_TOKEN`, pushes `ghcr.io/kerinschristopher/sample-api:sha-<short>`. Never checks out code, so what's pushed is what was scanned |
 | `release-tag` | `push` of a `v<major>.<minor>.<patch>` tag | `packages: write` only | Adds the `<major>.<minor>.<patch>` tag to the existing `sha-<short>` image of the tagged commit (`imagetools create`), then checks both tags have the same digest. Nothing is rebuilt |
@@ -117,7 +118,7 @@ The first push needs a one-time manual setting: in the `sample-api` package's se
 
 | Job | Needs | Permissions | Does |
 |---|---|---|---|
-| `resolve` | none | `contents: read` | Lists the package's tags (anonymously: the package is public). Picks the newest `sha-*` image (walking `main`'s history from the tip) and the highest semver tag |
+| `resolve` | none | `contents: read` | Lists the package's tags (anonymously: the package is public) and the last 500 commits on `main`, then runs `.github/scripts/pick-rescan-images.sh`: the newest `sha-*` image (walking `main`'s history from the tip) and the highest semver tag. No tags at all (an empty, `null` or missing `tags` list) ends in `::error::Nothing to scan`; a malformed reply fails as an error of its own. Tested by `scripts-test` in `sample-api-ci.yml`|
 | `rescan` (matrix: one leg per picked image) | resolve | none (`permissions: {}`) | Trivy v0.75.0 against each image with `build-scan`'s thresholds. `fail-fast: false`, so one vulnerable image doesn't hide the other's result |
 
 The image doesn't change between scans, but the vulnerability database does. A red run means a fix is available for something in a
