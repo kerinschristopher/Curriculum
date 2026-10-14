@@ -482,6 +482,37 @@ data "aws_iam_policy_document" "apply_vpc" {
     }
   }
 
+  # Creating inside a parent: AWS also authorizes CreateSubnet and CreateRouteTable against the
+  # parent VPC, and CreateNatGateway against its subnet and Elastic IP, each ARN on its own. The
+  # request's tags only exist for the new resource, so Ec2CreateTagged can't pass for a parent:
+  # the parent must already be this environment's. That also means no creating inside a VPC
+  # this role doesn't own (was risk R12).
+  statement {
+    sid = "Ec2CreateInOwned"
+    actions = [
+      "ec2:CreateSubnet",
+      "ec2:CreateRouteTable",
+      "ec2:CreateNatGateway",
+    ]
+    resources = [
+      "arn:aws:ec2:${local.region}:${local.account_id}:vpc/*",
+      "arn:aws:ec2:${local.region}:${local.account_id}:subnet/*",
+      "arn:aws:ec2:${local.region}:${local.account_id}:elastic-ip/*",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Environment"
+      values   = [var.name]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [local.region]
+    }
+  }
+
   # Tags applied as part of those creates (TagSpecifications)
   statement {
     sid       = "Ec2TagOnCreate"
