@@ -81,10 +81,10 @@ the ruleset after editing its JSON with
 | `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases, with a Go build cache per version |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |
 | `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays and the infrastructure overlays |
-| `scripts-test` | `.github/scripts/`, `sample-api-ci.yml` or `sample-api-rescan.yml` changed | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`. Runs every branch of `pick-rescan-images.sh`, including the ones the daily rescan has never hit. Not a `build-scan` dependency |
+| `scripts-test` | `.github/scripts/`, `sample-api-ci.yml` or `sample-api-rescan.yml` changed | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`, with a throwaway `registry:3` service container (pinned by digest) for the release-tag tests. `REQUIRE_REGISTRY=1` makes a missing registry a failure, not a skip. Runs every branch of `pick-rescan-images.sh` and `release-tag.sh`, including ones the daily rescan and the once-per-release job have never hit. Not a `build-scan` dependency |
 | `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). On `push` to `main` only, uploads the tarball (1 day) |
 | `push` | `push` to `main`, after build-scan | `contents: read`, `packages: write` | Downloads the scanned tarball, `docker load`, logs in to GHCR with the run's `GITHUB_TOKEN`, pushes `ghcr.io/kerinschristopher/sample-api:sha-<short>`. Never checks out code, so what's pushed is what was scanned |
-| `release-tag` | `push` of a `v<major>.<minor>.<patch>` tag | `packages: write` only | Adds the `<major>.<minor>.<patch>` tag to the existing `sha-<short>` image of the tagged commit (`imagetools create`), then checks both tags have the same digest. Nothing is rebuilt |
+| `release-tag` | `push` of a `v<major>.<minor>.<patch>` tag | `contents: read`, `packages: write` | Runs `.github/scripts/release-tag.sh`: adds the `<major>.<minor>.<patch>` tag to the existing `sha-<short>` image of the tagged commit with `imagetools create --prefer-index=false`, which copies the manifest as-is (the default wraps it in a new index with a new digest), then checks both tags have the same digest. Nothing is rebuilt. Checks out only `.github/scripts`. Tested by `scripts-test`; the job itself first runs on a real `v*` tag |
 
 - **No `latest` tag.** A moving label lets nodes with cached images run different builds under one name.
 - **No AWS access at all**, so the `pull_request` trigger is safe here.
@@ -108,7 +108,7 @@ the ruleset after editing its JSON with
 ### Releasing an image
 1. Merge to `main` and wait for a green `sample-api-ci` run. GHCR then has `sha-<short>` for the merge commit.
 2. Tag that commit and push the tag: `git tag v0.2.0 <commit> && git push origin v0.2.0`.
-3. `release-tag` adds `0.2.0` to the same image. If the commit has no `sha-*` image (not on `main`, or its run failed), the job fails and says so.
+3. `release-tag` adds `0.2.0` to the same image. If the commit has no `sha-*` image (not on `main`, or its run failed), the job fails and says so. If it fails on a digest mismatch, the release tag was already pushed: delete that package version (Packages > sample-api > versions), fix the cause and re-run the job.
 4. Point the overlays' `images[].newTag` at the release in a PR. Nothing deploys automatically yet (Flux arrives in Module 8).
 
 The first push needs a one-time manual setting: in the `sample-api` package's settings, under "Manage Actions access", give the
@@ -118,7 +118,7 @@ The first push needs a one-time manual setting: in the `sample-api` package's se
 
 | Job | Needs | Permissions | Does |
 |---|---|---|---|
-| `resolve` | none | `contents: read` | Lists the package's tags (anonymously: the package is public) and the last 500 commits on `main`, then runs `.github/scripts/pick-rescan-images.sh`: the newest `sha-*` image (walking `main`'s history from the tip) and the highest semver tag. No tags at all (an empty, `null` or missing `tags` list) ends in `::error::Nothing to scan`; a malformed reply fails as an error of its own. Tested by `scripts-test` in `sample-api-ci.yml`|
+| `resolve` | none | `contents: read` | Lists the package's tags (anonymously: the package is public) and the last 500 commits on `main`, then runs `.github/scripts/pick-rescan-images.sh`: the newest `sha-*` image (walking `main`'s history from the tip) and the highest semver tag. No tags at all (an empty, `null` or missing `tags` list) ends in `::error::Nothing to scan`; a malformed reply fails as an error of its own. Tested by `scripts-test` in `sample-api-ci.yml` |
 | `rescan` (matrix: one leg per picked image) | resolve | none (`permissions: {}`) | Trivy v0.75.0 against each image with `build-scan`'s thresholds. `fail-fast: false`, so one vulnerable image doesn't hide the other's result |
 
 The image doesn't change between scans, but the vulnerability database does. A red run means a fix is available for something in a

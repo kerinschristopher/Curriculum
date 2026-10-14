@@ -735,8 +735,8 @@ imported (F20, Q13). Three gaps were closed:
   - **Tested so far:** only its script, locally: exit 0 for `false`, exit 1 for `true` and for a missing value.
   - **Not yet:** its first real run, which happens after merge and stays red until the first approved apply.
 
-**PR #9 review (2026-10-13).** The reviewer's point: each finding was a path CI had never executed. Three of the four are
-resolved here; #1 (`imagetools create` on the first `v*` tag) is still open.
+**PR #9 review (2026-10-13).** The reviewer's point: each finding was a path CI had never executed. All four are resolved
+here.
 - **#4, `enable_eks` only settable through a gitignored tfvars file** (the one with blast radius): a local `true` plus a
   merge would make the approved CI apply delete the NAT gateway and EIP, then fail on the EKS deletes, leaving dev half
   destroyed and drift red.
@@ -765,7 +765,25 @@ resolved here; #1 (`imagetools create` on the first `v*` tag) is still open.
     workflow changes.
   - **Checked against GHCR (read-only):** a package that doesn't exist gives 403 DENIED at the token step, not 404 or
     `null`. `null` would need an existing package with no tags, which wasn't reproduced live. The real package has only
-    `0.1.1`, so the first rescan after merge takes the "No sha-* image" warning path with a one-entry matrix.
+    `0.1.1`: run against it locally, the pick gives `["0.1.1"]` and the "No sha-* image" warning. A rescan after merge
+    picks two images once the merge's `push` has published `sha-<merge commit>`, and takes the one-entry path only
+    before that.
+- **#1, `imagetools create` on the first `v*` tag:** reproduced. Against a local `registry:3`, a plain manifest
+  (what CI's `docker push` makes on the runner's classic image store) retagged with the default `--prefer-index=true`
+  came back as a `manifest.list` with a new digest, so the digest check failed after the release tag was pushed.
+  An index source (like GHCR's `0.1.1`) kept its digest, which is why testing against `0.1.1` wouldn't show it.
+  - **Fix:** `--prefer-index=false`, which copies a single source as-is. `--dry-run` prints re-formatted JSON, not the
+    bytes it would push, so the digest can't be checked before the push. Instead, a mismatch now ends with an
+    `::error::` that says how to delete the bad tag.
+  - **Test first:** the retag moved, unchanged, into `.github/scripts/release-tag.sh`, with pytest cases in
+    `.github/scripts/tests/test_release_tag.py`. The tests push hand-built images over the registry API, not with
+    `docker push`, because WSL's Docker (containerd store) and the runner's (classic store) push differently. The cases
+    are: three non-release tags, a missing `sha-*` image, and a plain-manifest and an index source. Only the plain
+    manifest failed before the fix. `scripts-test` runs them against a `registry:3` service container, with
+    `REQUIRE_REGISTRY=1` so they can't skip.
+  - **Still never run:** the `release-tag` job's own steps (checkout, GHCR login and Write access, calling the
+    script), and the mismatch `::error::`, which no test can reach now that the fix is in. The first real `v*` tag after
+    merge is the check.
 
 ---
 

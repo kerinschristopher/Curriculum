@@ -223,14 +223,20 @@ jobs:
             kubectl kustomize "$dir" > /dev/null
           done
 
-  # Tests for .github/scripts. sample-api-rescan.yml runs pick-rescan-images.sh once a day from
-  # main, which only ever exercises the branch that day's tags lead to; this runs all of them on
-  # every change. Not a build-scan dependency: it guards the rescan, not the image.
+  # Tests for .github/scripts: pick-rescan-images.sh (sample-api-rescan.yml, daily from main) and
+  # release-tag.sh (release-tag, once per v* tag). Neither path runs often enough to find its own
+  # bugs, so every change runs all of their branches here. Not a build-scan dependency.
   scripts-test:
     needs: changes
     if: needs.changes.outputs.scripts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # A throwaway registry for test_release_tag.py: empty at the start, gone when the job ends.
+    services:
+      registry:
+        image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8 # 3.1
+        ports:
+          - 5000:5000
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -242,6 +248,9 @@ jobs:
         run: shellcheck .github/scripts/*.sh
 
       - name: Run the script tests (pytest)
+        # Fail, don't skip, if the registry isn't up: a skipped test proves nothing.
+        env:
+          REQUIRE_REGISTRY: "1"
         run: |
           set -euo pipefail
           # A venv: Ubuntu 24.04 refuses pip installs into the system Python (PEP 668).
@@ -350,8 +359,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      contents: read # to check out .github/scripts/release-tag.sh
       packages: write
     steps:
+      # Only the scripts: this job builds nothing. Any commit with a sha-* image was built by this
+      # workflow on main, so it already has the script.
+      - name: Check out the release script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -359,24 +377,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The retag and its digest check are a script so tests can run them (.github/scripts/tests,
+      # in scripts-test, against a throwaway registry). This job otherwise runs once per release.
       - name: Add the release tag to the already-scanned image
         env:
           TAG: ${{ github.ref_name }}
-        run: |
-          semver="${TAG#v}"
-          if ! [[ "$semver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag $TAG is not v<major>.<minor>.<patch>"
-            exit 1
-          fi
-          src="${IMAGE_NAME}:sha-${GITHUB_SHA::7}"
-          if ! docker buildx imagetools inspect "$src" > /dev/null 2>&1; then
-            echo "::error::$src doesn't exist. Tag a commit that's on main with a green sample-api-ci run."
-            exit 1
-          fi
-          docker buildx imagetools create --tag "${IMAGE_NAME}:${semver}" "$src"
-
-          # Prove the release label points at the same image, not a copy.
-          a="$(docker buildx imagetools inspect "$src" --format '{{json .Manifest.Digest}}')"
-          b="$(docker buildx imagetools inspect "${IMAGE_NAME}:${semver}" --format '{{json .Manifest.Digest}}')"
-          echo "sha tag: $a  release tag: $b"
-          [ "$a" = "$b" ]
+        run: .github/scripts/release-tag.sh "$IMAGE_NAME" "sha-${GITHUB_SHA::7}" "$TAG"
