@@ -1,0 +1,2 @@
+# pick-rescan-images.sh tests. Exact pin, same as Acme/infra/scripts/tests.
+pytest==9.1.1

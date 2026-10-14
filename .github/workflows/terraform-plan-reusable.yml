@@ -1,0 +1,216 @@
+name: terraform-plan-reusable
+
+# One Terraform plan, shared by terraform-plan.yml (PR and manual plans) and terraform-apply.yml
+# (the post-merge plan that a reviewer approves). It's a whole job, not a few steps: credentials
+# and an initialised .terraform/ don't carry from one job to the next, so a reusable "setup only"
+# workflow would do nothing useful.
+#
+# Called workflows get no more permissions than the calling job grants, and the OIDC token's sub
+# describes the CALLER's trigger (pull_request, ref:refs/heads/main), so the role trust policies
+# are the same as if these steps were inline. Each caller job must grant contents: read and
+# id-token: write.
+#
+# Design: docs/design/module-6-ci-cd.md, Components §2a.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Terraform root to plan
+        type: string
+        required: true
+      role-arn:
+        description: Role to assume through OIDC (a read-only plan role)
+        type: string
+        required: true
+      artifact-name:
+        description: "Artifact base name: <name>-text holds the text plan; <name> holds tfplan and the lock file when save-plan is true"
+        type: string
+        required: true
+      save-plan:
+        description: Upload the binary tfplan for a later apply. It holds unredacted values, so only the apply caller sets this
+        type: boolean
+        default: false
+      destroy:
+        description: Plan a destroy instead of an apply
+        type: boolean
+        default: false
+      gated:
+        description: Tell the reader in the run summary that an approval follows
+        type: boolean
+        default: false
+    outputs:
+      has_changes:
+        description: '"true" if the plan changes anything (from -detailed-exitcode)'
+        value: ${{ jobs.plan.outputs.has_changes }}
+      plan_artifact_id:
+        description: ID of the <artifact-name> artifact (save-plan only), so the apply can delete it
+        value: ${{ jobs.plan.outputs.plan_artifact_id }}
+
+permissions:
+  contents: read
+
+env:
+  # Keep equal to TF_VERSION in terraform-plan.yml and terraform-apply.yml.
+  TF_VERSION: "1.16.3"
+  AWS_REGION: us-east-1
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+      plan_artifact_id: ${{ steps.upload-plan.outputs.artifact-id }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Assume the read-only plan role via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.role-arn }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-terraform-plan-${{ github.run_id }}
+
+      # Proves the OIDC exchange worked: should print assumed-role/<plan role>/...
+      - name: Show AWS identity
+        run: aws sts get-caller-identity --query Arn --output text
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      # -lock=false: the plan role has no DynamoDB PutItem/DeleteItem (it would let CI release a
+      # lock held by someone's apply). Safe because a plan never writes state; the worst case is a
+      # plan computed against the state from just before a concurrent apply, which a rerun fixes,
+      # and an apply refuses such a stale saved plan. Applies still lock. To lock CI plans again,
+      # see S3 native locking in docs/iam.md: the apply role's state Denies must exclude the
+      # .tflock key first (design doc Q12).
+      # -detailed-exitcode: 0 = no changes, 1 = error, 2 = changes.
+      - name: Terraform plan
+        id: plan
+        env:
+          DESTROY: ${{ inputs.destroy }}
+        run: |
+          mode=()
+          if [ "$DESTROY" = true ]; then mode=(-destroy); fi
+          set +e
+          terraform plan -input=false -lock=false -no-color -detailed-exitcode "${mode[@]}" -out=tfplan
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$code" ;;
+          esac
+          # Sensitive values are shown as (sensitive value) in this text form.
+          terraform show -no-color tfplan > "$RUNNER_TEMP/plan.txt"
+
+      # The counts, anything destroyed or replaced called out on its own, then the full plan.
+      - name: Plan summary
+        env:
+          ROOT: ${{ inputs.working-directory }}
+          DESTROY: ${{ inputs.destroy }}
+          GATED: ${{ inputs.gated }}
+          HAS_CHANGES: ${{ steps.plan.outputs.has_changes }}
+        run: |
+          plan="$RUNNER_TEMP/plan.txt"
+          action=apply
+          if [ "$DESTROY" = true ]; then action=destroy; fi
+          # An outputs-only plan has no "Plan:" line, but still needs an apply to update state.
+          summary="$(grep -m1 -E '^(Plan: |No changes\.)' "$plan" || true)"
+          if [ -z "$summary" ] && grep -q '^Changes to Outputs:' "$plan"; then
+            summary="No resource changes; only output values change."
+          fi
+          {
+            echo "### Terraform ${action}: \`${ROOT#Acme/infra/terraform/}\`"
+            echo
+            echo "**${summary:-(no summary line found)}**"
+            echo
+            if [ "$GATED" = true ] && [ "$HAS_CHANGES" = true ]; then
+              echo "Approve or reject in the review box on this run. Approving applies exactly this plan."
+              echo
+            fi
+            risky="$(grep -E '^  # .* (will be destroyed|must be replaced)' "$plan" || true)"
+            if [ -n "$risky" ]; then
+              echo "**:warning: This plan destroys or replaces resources:**"
+              echo
+              echo '```'
+              echo "$risky"
+              echo '```'
+              echo
+            fi
+            echo '<details><summary>Full plan</summary>'
+            echo
+            echo '```'
+            cat "$plan"
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The redacted text plan, for the PR comment (and anyone reading the run later).
+      - name: Upload the text plan
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}-text
+          path: ${{ runner.temp }}/plan.txt
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true # a re-run replaces its earlier plan
+
+      # Policy check on every plan, no-op plans included, so the step is always exercised. It runs
+      # after the summary (the reader still sees the plan when it fails) and before the tfplan
+      # upload (a plan that breaks policy never becomes something the apply job can use).
+      # Rules and tests: Acme/infra/policies/terraform. Never skip it; fix the Terraform.
+      - name: Install Conftest
+        working-directory: ${{ runner.temp }}
+        env:
+          VERSION: "0.71.1"
+          SHA256: c3f6b2a753bd56e377a1e51a95ae3e057f926f2e9139f7d5b5dfbbaf810f7985
+        run: |
+          tarball="conftest_${VERSION}_Linux_x86_64.tar.gz"
+          curl -fsSLo "$tarball" "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/${tarball}"
+          echo "${SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" conftest
+          install -m 0755 conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Conftest (Acme/infra/policies/terraform)
+        run: |
+          terraform show -json tfplan > "$RUNNER_TEMP/plan.json"
+          conftest test --no-color -p "$GITHUB_WORKSPACE/Acme/infra/policies/terraform" "$RUNNER_TEMP/plan.json"
+
+      # tfplan holds unredacted values (even sensitive ones) and this repo is public, so it is
+      # uploaded only for an apply, lives one day at most, and the apply deletes it. Today it holds
+      # only resource IDs and ARNs. Revisit before enable_eks = true (the plan would carry
+      # eks_public_access_cidrs) or any secret enters the state: keep the plan in the private
+      # state bucket instead, or re-plan inside the approved job (design doc Q3, risk R4).
+      # The lock file pins the provider builds the plan was made with; apply must use the same.
+      - name: Upload the saved plan
+        id: upload-plan
+        if: inputs.save-plan && steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: |
+            ${{ inputs.working-directory }}/tfplan
+            ${{ inputs.working-directory }}/.terraform.lock.hcl
+          include-hidden-files: true # .terraform.lock.hcl
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
