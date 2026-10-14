@@ -22,6 +22,9 @@ them.
    have settled.
 4. **Run the tool rather than imitate it.** Hand-written `terraform fmt` alignment and hand-written validation
    conditions failed the real tool.
+5. **A check whose job never started proves nothing.** A skipped `apply` job never asks for its environment, and a
+   rejected one runs none of its steps, cleanup included. Before calling a check passed, confirm that the path it's
+   meant to exercise actually ran.
 
 ---
 
@@ -41,6 +44,8 @@ them.
 | 10 | **The `Ec2CreateInOwned` snippet was hand-aligned** (`sid     = …`) | `terraform fmt` only aligns consecutive single-line arguments. Committed, it would have failed the required `fmt` check | `terraform fmt -check` before committing | Run `terraform fmt` rather than hand-aligning |
 | 11 | **The PR description used relative links** (`../blob/mod6/…`) | Unverified whether they resolve from a PR page | Claude's own check while applying | Changed to absolute URLs |
 | 12 | **The PR stays a draft until the user says it's ready**, so the post-merge checks were treated as later work | PR #9 was merged that evening, so "post-merge" became the very next run, and #1 surfaced straight away | The failed apply run on `main` | Lesson: post-merge risks are pre-merge risks for whoever clicks merge. Rehearse the first real run where possible (here, apply-role cases with the parent ARNs) |
+| 13 | **`gh workflow run terraform-apply.yml --ref mod6` would test that the environment refuses `mod6`** | Dev already matched the code, so the plan had no changes and `apply` (`if: has_changes`) was **skipped**. It never asked for `dev-apply`, and the run went green without testing anything (run `38502992425`) | The user asked why it "worked without issue"; the job list showed `apply: skipped` | Re-run with `-f action=destroy`, so the plan has changes and `apply` must try to start: refused with "Branch "mod6" is not allowed to deploy to dev-apply" (run `38503255363`), and AWS unchanged |
+| 14 | **The saved plan "is deleted after every apply attempt, failed ones included"** (`docs/ci.md`, and risk R4 relies on it). The delete step's `if: always()` was taken to cover every outcome | The delete is a step *inside* the `apply` job. A rejected run (`38504172153`) or one refused by the environment (`38503255363`) never starts that job, so no step runs and the unredacted `tfplan-dev` stays downloadable for its 1-day retention | Checking the artifacts after the reject test | Fixed on `mod7`: the delete is its own `cleanup` job (`needs: [plan, apply]`, `if: always()` and a saved plan, `actions: write` only), guarded by `test_terraform_apply_workflow.py`, and the docs are corrected. The two leftover artifacts were left to expire. Low impact today (no secrets in dev's plan) |
 
 ### Also learned this session (not errors, but surprises)
 - An index source keeps its digest under `imagetools create` with the default settings; only a plain manifest gets

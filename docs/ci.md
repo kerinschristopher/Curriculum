@@ -175,7 +175,8 @@ trust policies are the same as if the steps were inline.
 | Job | Needs / runs when | Permissions | AWS | Does |
 |---|---|---|---|---|
 | `plan` | always | `contents: read`, `id-token: write` | **plan role**, `sub = …:ref:refs/heads/main` (`…:ref:refs/heads/mod…` for a dispatch from a `mod*` branch) | Calls the reusable plan with `save-plan`, `gated`, and `destroy` for a destroy dispatch |
-| `apply` | `has_changes`; **`environment: dev-apply`** | `contents: read`, `id-token: write`, `actions: write` | **apply role**, `sub = …:environment:dev-apply` | Waits for approval. Then checks out the same commit, downloads `tfplan` and the lock file, `init -lockfile=readonly`, `terraform apply tfplan` (this one takes the state lock), and deletes the plan artifact |
+| `apply` | `has_changes`; **`environment: dev-apply`** | `contents: read`, `id-token: write` | **apply role**, `sub = …:environment:dev-apply` | Waits for approval. Then checks out the same commit, downloads `tfplan` and the lock file, `init -lockfile=readonly`, `terraform apply tfplan` (this one takes the state lock) |
+| `cleanup` | `plan` and `apply`; `always()`, when a plan was saved (`plan_artifact_id` set) | `actions: write` | none | Deletes the saved plan artifact whatever `apply`'s result: applied, failed, rejected or refused by the environment. It's a separate job because a step inside `apply` never runs when `apply` never starts |
 
 - **The plan is visible before anyone approves.** The `plan` job has no gate and finishes first. Only then does `apply` ask for approval,
   so the reviewer reads the plan in the run summary before deciding.
@@ -186,7 +187,7 @@ trust policies are the same as if the steps were inline.
   Today the only admin is also the only reviewer, so this changes nothing; set it to `false` when someone else joins
   (recorded in [`docs/iam.md`](iam.md#github-side-controls)).
 - **Concurrency:** `terraform-dev-apply`, never cancelled. A newer run waits for the current one; GitHub keeps only the newest pending run.
-- **The saved plan is unredacted** and the repo is public, so it lives one day at most and is deleted after every apply attempt, failed ones included. Today it holds
+- **The saved plan is unredacted** and the repo is public, so it lives one day at most and is deleted by the `cleanup` job after every run that saved one, including rejected and refused runs. Today it holds
   only resource IDs and ARNs. Revisit before `enable_eks = true`, or before any secret enters dev's state: keep the plan in the private state
   bucket, or re-plan inside the approved job.
 
@@ -194,7 +195,7 @@ trust policies are the same as if the steps were inline.
 1. Open the run from the Actions tab (or the "Review deployments" notification).
 2. Read the **plan** job's summary: the counts first, then anything destroyed or replaced, then the full plan.
 3. Click **Review deployments**, tick `dev-apply`, and choose **Approve and deploy** or **Reject**.
-   - **Reject:** nothing is applied, and the apply role is never assumed.
+   - **Reject:** nothing is applied, and the apply role is never assumed. `apply` shows as failed, and `cleanup` still deletes the saved plan.
    - **Approve:** the apply runs the saved plan. If the state changed meanwhile, it fails as stale; re-run the workflow to re-plan.
    - **Ignore it:** the request expires after 30 days. Nothing is applied.
    - **Approve within 24 hours.** The saved plan artifact is kept for 1 day only. After that, approving fails at

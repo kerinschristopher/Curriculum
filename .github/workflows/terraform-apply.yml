@@ -6,6 +6,8 @@ name: terraform-apply
 #   plan   (no gate)  read-only plan role; saves tfplan, writes it to the run summary, uploads it
 #   apply  (gated)    environment dev-apply: waits for the required reviewer, then assumes the
 #                     apply role and applies the saved tfplan. Skipped when the plan has no changes.
+#   cleanup (no gate) deletes the saved tfplan artifact however apply ended: applied, failed,
+#                     rejected or refused by the environment. actions: write only, no AWS.
 #
 # The plan job finishes before the approval request appears, so the reviewer reads the plan on
 # the run page first. Rejecting (or never approving) applies nothing; approval requests expire
@@ -90,7 +92,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      actions: write # delete the plan artifact afterwards
     steps:
       - name: Check out the commit that was planned
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -130,9 +131,18 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false -no-color tfplan
 
-      # always(): a failed apply also cleans up, instead of leaving the plan until it expires.
+  # Its own job, not a step in apply: a rejected run, or one the environment refuses, never
+  # starts apply, so none of apply's steps would run. needs + always() runs this whatever
+  # apply's result. plan_artifact_id is empty when no plan was saved (no changes), so this skips.
+  cleanup:
+    needs: [plan, apply]
+    if: always() && needs.plan.outputs.plan_artifact_id != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write # delete the plan artifact; nothing else
+    steps:
       - name: Delete the plan artifact
-        if: always() && needs.plan.outputs.plan_artifact_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           ARTIFACT_ID: ${{ needs.plan.outputs.plan_artifact_id }}

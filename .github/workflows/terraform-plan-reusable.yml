@@ -196,9 +196,9 @@ jobs:
           conftest test --no-color -p "$GITHUB_WORKSPACE/Acme/infra/policies/terraform" "$RUNNER_TEMP/plan.json"
 
       # tfplan holds unredacted values (even sensitive ones) and this repo is public, so it is
-      # uploaded only for an apply, lives one day at most, and the apply deletes it. Today it holds
-      # only resource IDs and ARNs. Revisit before enable_eks = true (the plan would carry
-      # eks_public_access_cidrs) or any secret enters the state: keep the plan in the private
+      # uploaded only for an apply, lives one day at most, and the caller's cleanup job deletes it.
+      # Today it holds only resource IDs and ARNs. Revisit before enable_eks = true (the plan would
+      # carry eks_public_access_cidrs) or any secret enters the state: keep the plan in the private
       # state bucket instead, or re-plan inside the approved job (design doc Q3, risk R4).
       # The lock file pins the provider builds the plan was made with; apply must use the same.
       - name: Upload the saved plan
