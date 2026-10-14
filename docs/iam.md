@@ -283,6 +283,7 @@ Every taggable resource in `modules/vpc` carries `Environment = dev`, so the pol
 | Sid | Actions | Scope | Why it's there |
 |---|---|---|---|
 | `Ec2CreateTagged` | `ec2:CreateVpc`, `CreateSubnet`, `CreateInternetGateway`, `CreateRouteTable`, `CreateNatGateway`, `AllocateAddress` | `*` **with** `aws:RequestTag/Environment = N`, region-locked | Create the VPC module's resources, only if the create request tags them for this environment. An untagged or wrongly tagged create is denied |
+| `Ec2CreateInOwned` | `ec2:CreateSubnet`, `CreateRouteTable`, `CreateNatGateway` | the parent ARNs `vpc/*`, `subnet/*`, `elastic-ip/*` **with** `aws:ResourceTag/Environment = N`, region-locked | AWS also authorizes these creates against the parent: the VPC, or the NAT gateway's subnet and Elastic IP, each ARN on its own. The request's tags only exist for the new resource, so `Ec2CreateTagged` can't pass for a parent. This lets the role create only inside resources this environment already owns |
 | `Ec2TagOnCreate` | `ec2:CreateTags` | `*` **with** `ec2:CreateAction` = one of those six creates, region-locked | Terraform tags resources inside the create call. This allows tagging only as part of those creates, not retagging something that already exists |
 | `Ec2ChangeOwned` | modify, delete, attach/detach, route and association actions for the same resource types | `*` **with** `aws:ResourceTag/Environment = N`, region-locked | Change or delete only resources that already carry this environment's tag. Another environment's VPC, or an untagged one, is out of reach |
 | `Ec2RetagOwned` | `ec2:CreateTags`, `ec2:DeleteTags` | `*` **with** `aws:ResourceTag/Environment = N`, `aws:TagKeys` present and never `Environment`, region-locked | Change other tags (e.g. `Name`) on owned resources. The `Environment` tag itself can't be changed or removed, so the role can't hand its VPC to another environment. `DeleteTags` with no keys (which removes every tag) is refused too. Terraform sends only the tags that change, so an unchanged `Environment` never appears |
@@ -291,9 +292,8 @@ Every taggable resource in `modules/vpc` carries `Environment = dev`, so the pol
 #### What the apply role deliberately can't do
 - Anything before a reviewer approves: no token exists until then.
 - Create, change or delete EKS, KMS, CloudWatch Logs or IAM resources (until the EKS-scope expansion).
-- Change or delete EC2 resources not tagged `Environment = dev`, or launch instances. One known gap: it can *create* a dev-tagged
-  subnet, route table or NAT gateway inside a VPC it doesn't own, because the create statement checks the new resource's tag,
-  not the parent's. It still can't connect that resource to anything there. Deferred; see risk R12 in the design doc.
+- Change or delete EC2 resources not tagged `Environment = dev`, launch instances, or create anything inside a VPC, subnet or
+  Elastic IP that isn't tagged `Environment = dev` (`Ec2CreateInOwned`; this closed risk R12).
 - Change or remove the `Environment` tag on anything it owns.
 - Write or delete any state other than dev's, or delete dev's state.
 - Change any CI role or the OIDC provider, even after future expansions (explicit Deny).
@@ -329,7 +329,7 @@ The bypass actor list can't be seen by people without admin access to the repo, 
 
 | Check | What it proves | Status |
 |---|---|---|
-| [`test_iam_policies.py`](../Acme/infra/scripts/tests/test_iam_policies.py) (pytest + boto3): 34 plan-role and 45 apply-role permission cases through the IAM policy simulator, plus 17 trust cases | Permissions: allowed actions are allowed, out-of-scope ones denied (every lock write for the plan role; untagged creates, other state and CI identity for the apply role). Trust: which `sub`/`aud` values each role accepts. Condition values are supplied by hand. A harness failure reports as a pytest ERROR, not a policy FAIL | Passing, 96/96 against the live roles (2026-10-10). Before the `pull_request` trust was applied, exactly one case failed (that one); before `Ec2RetagOwned` was applied, exactly the 4 new retag denials failed |
+| [`test_iam_policies.py`](../Acme/infra/scripts/tests/test_iam_policies.py) (pytest + boto3): 34 plan-role and 51 apply-role permission cases through the IAM policy simulator, plus 17 trust cases | Permissions: allowed actions are allowed, out-of-scope ones denied (every lock write for the plan role; untagged creates, other state and CI identity for the apply role). Trust: which `sub`/`aud` values each role accepts. Condition values are supplied by hand. A harness failure reports as a pytest ERROR, not a policy FAIL | Passing, 102/102 against the live roles (2026-10-14). Before the `pull_request` trust was applied, exactly one case failed (that one); before `Ec2RetagOwned` was applied, exactly the 4 new retag denials failed. Before `Ec2CreateInOwned` was applied, exactly the 4 new create-inside-a-parent cases failed |
 | `SIM_PLAN_JSON=<plan JSON>` run of the same tests | The *planned* `ci-iam` policies, before they're applied | Used before every `ci-iam` apply in Module 6 (73/73, then 90/90, then 96/96) |
 | Real plan on a PR (PR #9, run `38032703703`) | The real `pull_request` trust match: `assumed-role/dev-github-actions-plan/...`, plan of dev with no AccessDenied | Passed |
 | Real manual plan on `mod6` (run `38032295497`) | The real branch trust match and condition values with `-lock=false` | Passed |

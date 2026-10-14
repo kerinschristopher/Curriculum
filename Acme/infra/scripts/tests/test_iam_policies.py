@@ -157,6 +157,16 @@ def apply_cases(acct):
         apply(ALLOWED, "ec2:CreateNatGateway", "*", R, tag_create),
         apply(ALLOWED, "ec2:AllocateAddress", "*", R, tag_create),
         apply(ALLOWED, "ec2:CreateTags", "*", R, entry("ec2:CreateAction", "CreateVpc")),
+        # Creating inside a parent. AWS authorizes CreateSubnet and CreateRouteTable against the new
+        # resource *and* the parent VPC (CreateNatGateway: its subnet and Elastic IP), one ARN at a
+        # time. The request's tags (aws:RequestTag) only exist for the new resource, so a parent is
+        # judged on its own tag alone: tag_create is left out on purpose. Without these cases the
+        # first CI apply (run 38492865526) failed on CreateSubnet while every case above passed.
+        apply(ALLOWED, "ec2:CreateSubnet", vpc, R, owned),
+        apply(ALLOWED, "ec2:CreateRouteTable", vpc, R, owned),
+        apply(ALLOWED, "ec2:CreateNatGateway", subnet, R, owned),
+        apply(ALLOWED, "ec2:CreateNatGateway", eip, R, owned),
+
         apply(ALLOWED, "ec2:ModifyVpcAttribute", vpc, R, owned),
         apply(ALLOWED, "ec2:DeleteVpc", vpc, R, owned),
         apply(ALLOWED, "ec2:DeleteSubnet", subnet, R, owned),
@@ -180,6 +190,9 @@ def apply_cases(acct):
         apply(IMPLICIT, "ec2:CreateVpc", "*", region("us-west-2"), tag_create),
         apply(IMPLICIT, "ec2:DeleteVpc", vpc, R, entry("aws:ResourceTag/Environment", "prod")),
         apply(IMPLICIT, "ec2:DeleteVpc", vpc, R),  # untagged resource
+        # R12: no creating inside a VPC this environment doesn't own
+        apply(IMPLICIT, "ec2:CreateSubnet", vpc, R, entry("aws:ResourceTag/Environment", "prod")),
+        apply(IMPLICIT, "ec2:CreateSubnet", vpc, R),  # untagged, e.g. the default VPC
         apply(IMPLICIT, "ec2:CreateTags", vpc, R),  # retagging something that isn't ours
         # handing an owned VPC to another environment, or dropping its tag
         apply(IMPLICIT, "ec2:CreateTags", vpc, R, owned, entry("aws:TagKeys", ["Environment"], "stringList"),

@@ -790,6 +790,22 @@ here.
   `test-result`. The cost: Docker Hub (`registry:3`) and PyPI are now on the merge path for PRs that touch the
   scripts or the sample-api workflows. The way out is the logged admin bypass on the PR.
 
+**First apply after merge (2026-10-14).** The first `terraform-apply` run on `main` (run `38492865526`, approved) created
+the VPC and the internet gateway, then failed: `CreateSubnet` (4) and `CreateRouteTable` (2) were denied "on resource
+`vpc/vpc-041ca2b270dd566ab`". AWS authorizes those creates against the new resource **and** its parent VPC (and
+`CreateNatGateway` against its subnet and Elastic IP), each ARN on its own. `aws:RequestTag` only exists for the new
+resource, so `Ec2CreateTagged` couldn't allow the parent, and nothing else did.
+- **Why the simulator missed it (96/96):** every create case used resource `*` with the request tag supplied by hand,
+  so no case asked about the parent. That's the limit the test file's docstring names: it proves policy logic, not what
+  AWS sends.
+- **Test first:** 4 allowed cases with the parent ARN and only the parent's own tag (`CreateSubnet` and
+  `CreateRouteTable` on a dev VPC, `CreateNatGateway` on a dev subnet and Elastic IP), plus 2 denials (a `prod` and an
+  untagged VPC). The 4 allowed cases failed `implicitDeny` against the live role, the same answer CI got.
+- **Fix:** a new `Ec2CreateInOwned` statement (parent ARNs, `aws:ResourceTag/Environment = dev`). `ci-iam` was planned,
+  passed 102/102 against the plan JSON, was applied (one inline policy updated), and passed 102/102 live. This also
+  resolves R12.
+- **State after the failed run:** the VPC and the IGW are in state (both free), and no lock is held. The re-run's plan
+  job makes a fresh plan with 11 adds; the old saved plan was deleted and would be stale.
 
 ---
 
@@ -808,7 +824,7 @@ here.
 | R9 | Mutable-subject risk: if the repo is renamed or deleted and the name re-registered, the new owner matches `repo:kerinschristopher/Curriculum:*` | Low | High | Don't rename or delete the repo; plan an opt-in to immutable subjects (F8) as a coordinated change to every trust policy |
 | R10 | DynamoDB locking is deprecated (F12) | Certain (eventually) | Low | Keep it for Module 6; migrate to `use_lockfile` in a dedicated change, which also lets plans lock again |
 | R11 | Release versions depend on you pushing a `v*` git tag; forget and there's simply no new version (main still gets `sha-` images) | Med | Low | Documented in `docs/ci.md`; automate with release-please later (Future Use Cases) |
-| R12 | The apply role can create a dev-tagged subnet, route table or NAT gateway **inside a VPC (or subnet) it doesn't own**: `Ec2CreateTagged` checks the tag on the new resource (`aws:RequestTag`), not on the parent. Found in the final code review, 2026-10-10 | Low (needs a reviewed and approved plan) | Low today, higher once stage/prod share the account | It can't connect such a resource to anything there: attach, route and associate actions need the dev tag on every resource (`Ec2ChangeOwned`), and no other VPC exists besides the default one. **Deferred** to the EKS-scope apply-role expansion, or before any stage/prod VPC appears in this account, whichever is first: split the create statement by resource ARN (new resources need `aws:RequestTag`, parent `vpc/*` and `subnet/*` need `aws:ResourceTag/Environment`), confirm with the simulator which ARNs each action is checked against, and add cases such as `CreateSubnet` in a `prod`-tagged VPC is denied |
+| R12 | ~~The apply role can create a dev-tagged subnet, route table or NAT gateway inside a VPC it doesn't own~~ **Resolved 2026-10-14.** The premise was wrong: AWS checks these creates against the parent too, where `aws:RequestTag` doesn't exist, so the role couldn't create inside *any* VPC. That broke the first CI apply (see "First apply after merge") | — | — | `Ec2CreateInOwned` allows creates only in parents tagged `Environment = dev`. Simulator cases: `CreateSubnet` in a `prod`-tagged or untagged VPC is denied |
 | C1 | Constraint: GitHub expires waiting environment approvals after 30 days | n/a | n/a | Re-run the workflow |
 | C2 | Constraint: PR comments max 65,536 characters | n/a | n/a | Truncate at about 60k and link the run |
 
