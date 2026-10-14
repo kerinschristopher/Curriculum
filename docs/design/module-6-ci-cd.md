@@ -784,6 +784,12 @@ here.
   - **Still never run:** the `release-tag` job's own steps (checkout, GHCR login and Write access, calling the
     script), and the mismatch `::error::`, which no test can reach now that the fix is in. The first real `v*` tag after
     merge is the check.
+- **`scripts-test` is a required check** in `main-merge-gate`, the ninth. The scripts it tests run too rarely (daily,
+  and once per release) to find their own bugs, so their tests have to gate the merge. Its name is stable and it's
+  skipped when nothing it covers changed, so it can't block unrelated PRs; a failed `changes` is still caught by
+  `test-result`. The cost: Docker Hub (`registry:3`) and PyPI are now on the merge path for PRs that touch the
+  scripts or the sample-api workflows. The way out is the logged admin bypass on the PR.
+
 
 ---
 

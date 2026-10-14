@@ -35,6 +35,7 @@
           { "context": "test-result", "integration_id": 15368 },
           { "context": "kustomize", "integration_id": 15368 },
           { "context": "build-scan", "integration_id": 15368 },
+          { "context": "scripts-test", "integration_id": 15368 },
           { "context": "fmt", "integration_id": 15368 },
           { "context": "validate-result", "integration_id": 15368 },
           { "context": "policy", "integration_id": 15368 },

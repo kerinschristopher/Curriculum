@@ -56,6 +56,7 @@ only accepts changes to `main` through a pull request whose required checks pass
 | `test-result` | sample-api-ci | every `test (<go version>)` leg passed (or the app didn't change) |
 | `kustomize` | sample-api-ci | every Kustomize base and overlay renders (or nothing it covers changed) |
 | `build-scan` | sample-api-ci | the image builds and Trivy finds no fixable HIGH/CRITICAL vulnerability (or the app didn't change) |
+| `scripts-test` | sample-api-ci | shellcheck and the pytest tests for `.github/scripts/` pass, against a throwaway registry (or no script or sample-api workflow changed) |
 | `fmt` | terraform-plan | `terraform fmt -check -recursive` is clean (or no Terraform changed) |
 | `validate-result` | terraform-plan | every root validates and every module's `terraform test` passes (or no Terraform changed) |
 | `policy` | terraform-plan | the Conftest policy tests pass and the seeded bad plan is still caught (or no Terraform changed) |

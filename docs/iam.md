@@ -319,7 +319,7 @@ IAM is half of each control; GitHub holds the other half. All of these are captu
 | Control | What it does | Live state (checked 2026-10-10) |
 |---|---|---|
 | Ruleset `trusted-branches` (`24627971`) | Only admins can create, update, delete or force-push `main`, `mod*` and `mod*/**/*`. Backs the plan role's branch patterns | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
-| Ruleset `main-merge-gate` (`24832716`) | `main` changes only through a PR whose 8 required checks pass (listed in [`docs/ci.md`](ci.md)) | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: pull_request}]`: an admin can merge a PR over a failing check, explicitly, but can't push to `main` directly |
+| Ruleset `main-merge-gate` (`24832716`) | `main` changes only through a PR whose 9 required checks pass (listed in [`docs/ci.md`](ci.md)) | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: pull_request}]`: an admin can merge a PR over a failing check, explicitly, but can't push to `main` directly |
 | Environment `dev-apply` | Required reviewer `kerinschristopher`, `prevent_self_review: false`, deployment branch `main` only. Backs the apply role's trust | `can_admins_bypass: true`. The only admin is also the only reviewer, so this changes nothing today; set it to `false` when someone else joins |
 
 The bypass actor list can't be seen by people without admin access to the repo, so it's recorded here. Re-check it with
