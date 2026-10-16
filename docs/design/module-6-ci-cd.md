@@ -434,7 +434,7 @@ The PR plan and the post-merge plan share checkout, setup-terraform, the OIDC as
 | `inputs.destroy` | Plan a destroy (the apply workflow's teardown dispatch) |
 | `inputs.gated` | Tell the reader in the run summary that an approval follows |
 | `outputs.has_changes` | From `-detailed-exitcode`, so the caller can skip the apply |
-| `outputs.plan_artifact_id` | The saved plan's artifact ID, so the apply job can delete it |
+| `outputs.plan_artifact_id` | The saved plan's artifact ID, so the caller's `cleanup` job can delete it |
 
 - **Callers:** `terraform-plan.yml` (`plan-dev` becomes `uses: ./.github/workflows/terraform-plan-reusable.yml`, then a small `comment` job posts the text plan to the PR) and `terraform-apply.yml` (its `plan` job).
 - **Permissions:** a called workflow can't grant itself more than its caller. Each caller job grants `contents: read` and `id-token: write`, and only the PR caller's `comment` job gets `pull-requests: write`.
@@ -446,13 +446,14 @@ The PR plan and the post-merge plan share checkout, setup-terraform, the OIDC as
 | Job | Credentials | Does |
 |---|---|---|
 | `plan` | plan role (`sub = ...:ref:refs/heads/main`) | Calls `terraform-plan-reusable.yml` (§2a): `init`, `plan -lock=false -out=tfplan`, `conftest test`, write the summary to `$GITHUB_STEP_SUMMARY` (counts, then any `destroy`/`replace` lines highlighted, then the full plan), upload `tfplan` + `.terraform.lock.hcl` as an artifact (retention 1 day). Sets output `has_changes` from `-detailed-exitcode` |
-| `apply` (needs plan, `if: has_changes`) | `environment: dev-apply`, then the apply role (`sub = ...:environment:dev-apply`) | Wait for approval. Then checkout the **same SHA**, `init`, download the artifact, `terraform apply -input=false tfplan` (this one **does** lock), then **delete the plan artifact** after every apply attempt, failed ones included (`if: always()`, `29c94dd`; needs `actions: write` on this job only) |
+| `apply` (needs plan, `if: has_changes`) | `environment: dev-apply`, then the apply role (`sub = ...:environment:dev-apply`) | Wait for approval. Then checkout the **same SHA**, `init`, download the artifact, `terraform apply -input=false tfplan` (this one **does** lock) |
+| `cleanup` (needs plan and apply, `if: always()` and a saved plan) | none (`actions: write` only) | Delete the plan artifact after every run that saved one: applied, failed, rejected or refused. Until the Module 7 fix this was a step inside `apply`, which never ran when `apply` never started (lessons learned row 14) |
 
 - **Triggers:** `push` to `main` with paths `Acme/infra/terraform/environments/dev/**`, `Acme/infra/terraform/modules/**`, this workflow file and `terraform-plan-reusable.yml`. Optional `workflow_dispatch` with an `apply`/`destroy` choice for the end-of-day teardown, which goes through the same gate.
 - **Concurrency:** `group: terraform-dev-apply`, `cancel-in-progress: false`. Never kill an apply mid-flight.
 - **No change, no approval request:** `-detailed-exitcode` (0 means no changes, 2 means changes) skips the apply job. The curriculum's "minimum viable test" (fail when the plan isn't empty and nothing is expected) is the nightly `drift` job in `terraform-plan.yml` (§2).
 - **Why plan with the plan role and apply with the apply role:** the write-capable credential exists only after approval, and only for the minutes the apply takes.
-- **Why apply the saved plan (Q3):** the reviewer approves exactly what gets applied, and Terraform refuses a stale plan. The cost is that `tfplan` holds unredacted values (even ones marked `sensitive`) and sits in a public-repo artifact. Today that's only resource IDs and ARNs: labels, not credentials, and the account ID is already in the repo. Guardrails: 1-day retention, deleted after every apply attempt, and a **revisit trigger**. If any secret ever enters this root's state (a DB password, `random_password`, and so on), move the plan file to the private S3 state bucket or switch to re-planning inside the approved job (see R4).
+- **Why apply the saved plan (Q3):** the reviewer approves exactly what gets applied, and Terraform refuses a stale plan. The cost is that `tfplan` holds unredacted values (even ones marked `sensitive`) and sits in a public-repo artifact. Today that's only resource IDs and ARNs: labels, not credentials, and the account ID is already in the repo. Guardrails: 1-day retention, deleted by the `cleanup` job after every run that saved it, and a **revisit trigger**. If any secret ever enters this root's state (a DB password, `random_password`, and so on), move the plan file to the private S3 state bucket or switch to re-planning inside the approved job (see R4).
 
 #### 4. Conftest policy set: `Acme/infra/policies/terraform/`
 
@@ -807,6 +808,16 @@ resource, so `Ec2CreateTagged` couldn't allow the parent, and nothing else did.
 - **State after the failed run:** the VPC and the IGW are in state (both free), and no lock is held. The re-run's plan
   job makes a fresh plan with 11 adds; the old saved plan was deleted and would be stale.
 
+**Plan-artifact cleanup gap (2026-10-14, fixed on `mod7`).** The reject check (run `38504172153`) and the refused
+`mod6` dispatch (run `38503255363`) each left `tfplan-dev` behind. The delete was a step inside `apply`, and in both runs
+`apply` never started, so its result was `failure` and none of its steps ran.
+- **Test first:** `.github/scripts/tests/test_terraform_apply_workflow.py`, three structural tests: no gated job
+  deletes the plan; exactly one `cleanup` job does, with `needs: [plan, apply]`, `always()` and the saved-plan guard;
+  and `apply` has no `actions: write`. All three were red, then green.
+- **Fix:** a `cleanup` job (`actions: write` only, no AWS), and `apply` no longer has `actions: write`. `scripts-test`
+  now also runs when `terraform-apply.yml` changes.
+- **End-to-end:** a destroy dispatch from `mod7` must be refused at the environment, and `cleanup` must still delete the plan.
+
 ---
 
 ## Risks / Constraints
@@ -816,7 +827,7 @@ resource, so `Ec2CreateTagged` couldn't allow the parent, and nothing else did.
 | R1 | Split IAM ownership (F3) is resolved incorrectly, deleting or reverting the plan role | Med | High | Phase 2 is its own commit, and nobody applies the old `ci-iam` code before it. Use `removed { destroy = false }` + `import`; require "No changes" in both roots before merging |
 | R2 | The apply role can escalate privileges (it creates IAM roles once EKS is managed) | Med (once EKS is in scope) | High | Explicit Deny on CI roles and the OIDC provider; permissions boundary required on any role it creates; human approval of every plan; future Conftest rule "every `aws_iam_role` has `permissions_boundary`" |
 | R3 | Trusting `sub = pull_request` lets any same-repo PR branch (not just ruleset-protected ones) assume the read-only plan role | Low (solo repo) | Low-Med (read of dev config and dev state) | Fork PRs get no OIDC token; the role stays read-only and lockless; revisit if collaborators are added |
-| R4 | Plan artifacts and plan JSON hold plaintext values; in a **public** repo, anyone signed in to GitHub can download run artifacts | Med | Med (currently low: dev has no secrets in state) | Retention 1 day; artifact deleted after every apply attempt (`29c94dd`); only the apply caller saves the binary plan; never upload `plan.json`; the PR comment uses the redacted text plan; rule: no secrets in Terraform state for this root (Module 10 uses ESO / Secrets Manager). **Revisit trigger:** the moment a secret enters state, move plans to the private S3 state bucket or re-plan inside the approved job |
+| R4 | Plan artifacts and plan JSON hold plaintext values; in a **public** repo, anyone signed in to GitHub can download run artifacts | Med | Med (currently low: dev has no secrets in state) | Retention 1 day; artifact deleted by a separate `cleanup` job after every run that saved it, rejected and refused runs included (until Module 7 this was a step in `apply`; `29c94dd` covered failed applies only); only the apply caller saves the binary plan; never upload `plan.json`; the PR comment uses the redacted text plan; rule: no secrets in Terraform state for this root (Module 10 uses ESO / Secrets Manager). **Revisit trigger:** the moment a secret enters state, move plans to the private S3 state bucket or re-plan inside the approved job |
 | R5 | A merge recreates EKS + NAT in dev and costs money while you're away | Med | Med (about $0.20/h) | Approval gate shows the plan counts; `enable_eks` toggle defaults to `false`; gated `destroy` dispatch |
 | R6 | Self-approval makes the gate ceremonial | High | Med | Accept for a solo learning repo; the job summary leads with counts and destroys; add a second reviewer when one exists |
 | R7 | Required checks combined with path filters block unrelated PRs | High if done naively | Low (annoyance) | No workflow-level path filters on required workflows; use a `changes` job inside |
@@ -932,7 +943,7 @@ External references:
 |---|---|---|---|
 | Q1 | Where should the CI IAM roles live: a re-homed **`ci-iam/` root** (suggested: isolated blast radius, and the apply role can't write its state) or the existing **`account/` root**? | kerinschristopher | Decided (2026-10-09): `ci-iam/` root, human-applied from WSL |
 | Q2 | How do we clean up the stale `ci-iam` state and the orphan apply role: **adopt them** (state rm stale entries, `import` the live roles into the new root, detach `ReadOnlyAccess`/`AmazonVPCFullAccess`), or **delete the apply role** and recreate it from new code? | kerinschristopher | Decided (2026-10-09): adopt (state rm stale entries, import live roles, detach broad policies) |
-| Q3 | Should the apply job **reuse the saved plan artifact** (the reviewer approves exactly what's applied; plaintext plan sits in a public-repo artifact for 1 day) or **re-plan inside the approved job** (no artifact; the reviewer approves on the PR plan)? | kerinschristopher | Decided (2026-10-09): saved plan artifact; 1-day retention, deleted after apply (after every apply attempt since `29c94dd`); revisit if a secret enters state |
+| Q3 | Should the apply job **reuse the saved plan artifact** (the reviewer approves exactly what's applied; plaintext plan sits in a public-repo artifact for 1 day) or **re-plan inside the approved job** (no artifact; the reviewer approves on the PR plan)? | kerinschristopher | Decided (2026-10-09): saved plan artifact; 1-day retention, deleted by the `cleanup` job after every run that saved it (before the Module 7 fix, only in runs where `apply` started); revisit if a secret enters state |
 | Q4 | Apply role scope for Module 6: **VPC-only with `enable_eks = false` by default** (suggested), or full EKS-capable now with a permissions boundary? | kerinschristopher | Decided (2026-10-09): VPC-only, `enable_eks = false`, with a comment on the variable explaining why |
 | Q5 | Should **any** environment auto-apply without approval? Only dev exists today. | kerinschristopher | Decided (2026-10-09): no auto-apply; dev requires approval |
 | Q6 | Who is the required reviewer? Keep **yourself** with `prevent_self_review: false` (the only workable option solo), or add a second GitHub account or collaborator? | kerinschristopher | Decided (2026-10-09): yourself, self-review allowed |

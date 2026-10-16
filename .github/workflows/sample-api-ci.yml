@@ -82,7 +82,7 @@ jobs:
           else
             echo "app=false" >> "$GITHUB_OUTPUT"
           fi
-          if grep -qE '^(\.github/scripts/|\.github/workflows/sample-api-(ci|rescan)\.yml$)' <<<"$changed"; then
+          if grep -qE '^(\.github/scripts/|\.github/workflows/(sample-api-(ci|rescan)|terraform-apply)\.yml$)' <<<"$changed"; then
             echo "scripts=true" >> "$GITHUB_OUTPUT"
           else
             echo "scripts=false" >> "$GITHUB_OUTPUT"
@@ -224,8 +224,9 @@ jobs:
           done
 
   # Tests for .github/scripts: pick-rescan-images.sh (sample-api-rescan.yml, daily from main) and
-  # release-tag.sh (release-tag, once per v* tag). Neither path runs often enough to find its own
-  # bugs, so every change runs all of their branches here. Not a build-scan dependency.
+  # release-tag.sh (release-tag, once per v* tag), plus terraform-apply.yml's job layout (the
+  # plan-artifact cleanup). None of these paths runs often enough to find its own bugs, so every
+  # change runs all of their branches here. Not a build-scan dependency.
   scripts-test:
     needs: changes
     if: needs.changes.outputs.scripts == 'true'
