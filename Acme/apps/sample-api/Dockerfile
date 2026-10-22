@@ -6,7 +6,7 @@
 # tag via buildx, $BUILDPLATFORM/$TARGETARCH and an image index) are deferred to Module 7,
 # where buildx is the topic, to keep the Module 6 change small enough to review. They also
 # need the CI scan-then-push hand-off reworked (docs/design/module-6-ci-cd.md).
-FROM golang:1.27.2-alpine@sha256:85dc1069ac644ea3c527b177303a406eb3358192816cd7f9e5848eb658851673 AS builder
+FROM golang:1.27.3-alpine@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e5b16ed69dbc00fba4 AS builder
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
