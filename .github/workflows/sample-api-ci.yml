@@ -77,7 +77,7 @@ jobs:
           fi
           changed="$(git diff --name-only "$base...$head")"
           echo "$changed"
-          if grep -qE '^(Acme/apps/sample-api/|Acme/platform/|\.github/workflows/sample-api-ci\.yml$)' <<<"$changed"; then
+          if grep -qE '^(Acme/apps/sample-api/|Acme/platform/|\.github/workflows/sample-api-ci\.yml$|\.github/scripts/(oci-platform-layout|push-oci|check-trivy-db)\.sh$)' <<<"$changed"; then
             echo "app=true" >> "$GITHUB_OUTPUT"
           else
             echo "app=false" >> "$GITHUB_OUTPUT"

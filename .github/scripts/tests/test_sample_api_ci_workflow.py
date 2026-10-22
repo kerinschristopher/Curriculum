@@ -41,3 +41,17 @@ def test_scripts_filter_covers_guarded_files(filters):
     # grep -E and Python's re agree on what these regexes use: ^ $ ( | ) and \.
     missed = [path for path in GUARDED if not re.search(filters["scripts"], path)]
     assert missed == []
+
+
+# Scripts on the image's build, scan and push path. A change to one alone must run build-scan and
+# push (the app filter), not just scripts-test. Listed before they exist, like GUARDED (L9a-7).
+IMAGE_SCRIPTS = [
+    ".github/scripts/oci-platform-layout.sh",
+    ".github/scripts/push-oci.sh",
+    ".github/scripts/check-trivy-db.sh",
+]
+
+
+def test_app_filter_covers_image_scripts(filters):
+    missed = [path for path in IMAGE_SCRIPTS if not re.search(filters["app"], path)]
+    assert missed == []
