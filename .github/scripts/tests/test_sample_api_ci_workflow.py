@@ -1,4 +1,4 @@
-"""Structural tests for sample-api-ci.yml's `changes` job: which changed paths turn on which jobs.
+"""Structural tests for sample-api-ci.yml: which changed paths turn on which jobs, and build caching.
 
 `changes` greps the PR's changed files with one regex per output. `scripts=true` runs scripts-test,
 so every file a test in this directory reads must match the scripts regex. Otherwise a change to
@@ -55,3 +55,23 @@ IMAGE_SCRIPTS = [
 def test_app_filter_covers_image_scripts(filters):
     missed = [path for path in IMAGE_SCRIPTS if not re.search(filters["app"], path)]
     assert missed == []
+
+
+def build_options():
+    """The `with:` of build-scan's docker/build-push-action step."""
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["build-scan"]["steps"]
+    step = next(s for s in steps if s.get("uses", "").startswith("docker/build-push-action@"))
+    return step["with"]
+
+
+def cache_settings(value):
+    """'type=gha,scope=x' -> {'type': 'gha', 'scope': 'x'}, so the order of the parts doesn't matter."""
+    return dict(part.split("=", 1) for part in value.split(","))
+
+
+def test_build_scan_uses_the_gha_layer_cache():
+    options = build_options()
+    assert "cache-from" in options and "cache-to" in options, sorted(options)
+    assert cache_settings(options["cache-from"]) == {"type": "gha", "scope": "sample-api"}
+    # mode=max also saves the builder stage, where the compile runs; mode=min saves only scratch.
+    assert cache_settings(options["cache-to"]) == {"type": "gha", "scope": "sample-api", "mode": "max"}
