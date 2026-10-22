@@ -1,0 +1,43 @@
+"""Structural tests for sample-api-ci.yml's `changes` job: which changed paths turn on which jobs.
+
+`changes` greps the PR's changed files with one regex per output. `scripts=true` runs scripts-test,
+so every file a test in this directory reads must match the scripts regex. Otherwise a change to
+that file alone skips the test that would catch it, and a skipped job counts as passing.
+
+    ~/.venvs/iam-tests/bin/pytest -v .github/scripts/tests
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+WORKFLOW = Path(__file__).resolve().parents[2] / "workflows" / "sample-api-ci.yml"
+
+# Files a structural test reads. Some don't exist yet: listing them now covers their tests from
+# the commit that adds them.
+GUARDED = [
+    "Acme/infra/github/main-merge-gate-ruleset.json",
+    ".github/workflows/terraform-plan.yml",
+    "Acme/apps/sample-api/Dockerfile",
+    "Acme/apps/sample-api/Dockerfile.test",
+]
+
+
+@pytest.fixture(scope="module")
+def filters():
+    """{output: regex} from the diff step's `grep -qE '<regex>' ...; then echo "<output>=true"` lines."""
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["changes"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "diff")
+    found = re.findall(r"grep -qE '([^']+)' <<<\"\$changed\"; then\s+echo \"(\w+)=true\"", script)
+    filters = {output: regex for regex, output in found}
+    # If the step is reworded and nothing is extracted, fail here rather than with a KeyError.
+    assert set(filters) == {"app", "scripts"}, found
+    return filters
+
+
+def test_scripts_filter_covers_guarded_files(filters):
+    # grep -E and Python's re agree on what these regexes use: ^ $ ( | ) and \.
+    missed = [path for path in GUARDED if not re.search(filters["scripts"], path)]
+    assert missed == []
