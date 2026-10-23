@@ -13,8 +13,9 @@ name: terraform-plan
 #   - pull_request runs ("repo:<repo>:pull_request", from any same-repo branch; forks get no token)
 #   - workflow_dispatch runs on main or mod*, and the schedule (which always runs on main)
 #     ("repo:<repo>:ref:refs/heads/<branch>")
-# Who can create or push main and mod* is set by the trusted-branches ruleset (Acme/infra/github/).
-# The triggers, the trust list and the ruleset move together: change one, check the other two.
+# Who can create or push mod* is set by the trusted-branches ruleset; main by main-protect and
+# main-merge-gate (Acme/infra/github/; see docs/iam.md, "GitHub-side controls").
+# The triggers, the trust list and the rulesets move together: change one, check the others.
 #
 # Design: docs/design/module-6-ci-cd.md, Components §2.
 

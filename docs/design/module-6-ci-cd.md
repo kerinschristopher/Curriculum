@@ -639,6 +639,11 @@ Phases follow the PR #6 reviewer's suggested order (T28): app CI first because i
 - **Live bypass state (K4), 2026-10-10:**
   - `trusted-branches` (`24627971`): `{actor_id: 5, RepositoryRole (admin), bypass_mode: always}`.
   - `main-merge-gate` (`24832716`): `{actor_id: 5, RepositoryRole (admin), bypass_mode: pull_request}`.
+  - **Later finding (Module 7, 2026-10-22/23):** `trusted-branches` also had an `update` rule on `main`, so every PR merge was
+    refused and went in through the admin bypass, which skips the required checks. Direct pushes were still refused, but the
+    required checks never decided a merge, PR #9's included. Module 7 splits `main` out into a new `main-protect` ruleset
+    (creation, deletion, non_fast_forward; no `update`), and `trusted-branches` covers `mod*` only (applied live just before
+    PR #15 merges). See `docs/iam.md`, "GitHub-side controls", and the Module 7 design doc (X5).
 
 **Phase 6 result (2026-10-10):**
 - **`docs/ci.md` (new).** Covers:

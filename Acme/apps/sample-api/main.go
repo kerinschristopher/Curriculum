@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// version is set at build time: go build -ldflags "-X main.version=<v>". CI passes sha-<short>.
+// version is set at build time: go build -ldflags "-X main.version=<v>". CI passes sha-<first 7 hex of the commit>.
 var version = "dev"
 
 // shutdownTimeout must stay below the pod's terminationGracePeriodSeconds (Kubernetes default 30s),

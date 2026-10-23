@@ -84,5 +84,5 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
-          # Off until Module 7 adds caching deliberately (see sample-api-ci.yml).
+          # Off, like build-scan's: no cached DB or Trivy program (see sample-api-ci.yml).
           cache: false

@@ -55,7 +55,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Did the app, its manifests or this workflow change?
+      - name: Did the app, its manifests, this workflow or a tested file change?
         id: diff
         env:
           EVENT: ${{ github.event_name }}
@@ -77,12 +77,12 @@ jobs:
           fi
           changed="$(git diff --name-only "$base...$head")"
           echo "$changed"
-          if grep -qE '^(Acme/apps/sample-api/|Acme/platform/|\.github/workflows/sample-api-ci\.yml$)' <<<"$changed"; then
+          if grep -qE '^(Acme/apps/sample-api/|Acme/platform/|\.github/workflows/sample-api-ci\.yml$|\.github/scripts/(oci-platform-layout|push-oci)\.sh$)' <<<"$changed"; then
             echo "app=true" >> "$GITHUB_OUTPUT"
           else
             echo "app=false" >> "$GITHUB_OUTPUT"
           fi
-          if grep -qE '^(\.github/scripts/|\.github/workflows/(sample-api-(ci|rescan)|terraform-apply)\.yml$)' <<<"$changed"; then
+          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/[^/]+-ruleset\.json$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
             echo "scripts=true" >> "$GITHUB_OUTPUT"
           else
             echo "scripts=false" >> "$GITHUB_OUTPUT"
@@ -223,10 +223,11 @@ jobs:
             kubectl kustomize "$dir" > /dev/null
           done
 
-  # Tests for .github/scripts: pick-rescan-images.sh (sample-api-rescan.yml, daily from main) and
-  # release-tag.sh (release-tag, once per v* tag), plus terraform-apply.yml's job layout (the
-  # plan-artifact cleanup). None of these paths runs often enough to find its own bugs, so every
-  # change runs all of their branches here. Not a build-scan dependency.
+  # Tests for .github/scripts and the CI config: pick-rescan-images.sh (sample-api-rescan.yml, daily
+  # from main) and release-tag.sh (release-tag, once per v* tag), plus structural tests of the
+  # workflows, the merge-gate ruleset and the Dockerfile. None of these paths runs often enough to
+  # find its own bugs, so every change to a file those tests read (the scripts filter) runs all of
+  # them here. Not a build-scan dependency.
   scripts-test:
     needs: changes
     if: needs.changes.outputs.scripts == 'true'
@@ -281,9 +282,41 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      # The Dockerfile's go build mounts a Go build cache, but the gha layer cache doesn't save
+      # mount contents, so a fresh runner starts with it empty (G2). This keeps it in a host
+      # directory instead. Listed before the dance on purpose: post steps run in reverse, so this
+      # step saves the directory after the dance's post step has copied the mount back into it.
+      # Its own key prefix (Q7), so lint/test and build-scan never restore each other's caches.
+      - name: Restore the Docker Go build cache
+        id: go-build-docker
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-build-amd64
+          key: go-build-docker-${{ runner.os }}-amd64-${{ hashFiles('Acme/apps/sample-api/Dockerfile', 'Acme/apps/sample-api/go.mod', 'Acme/apps/sample-api/**/*.go') }}
+          restore-keys: go-build-docker-${{ runner.os }}-amd64-
+
+      # Copies that directory into BuildKit's go-build-amd64 cache mount now, and back out in its
+      # post step. It runs its helper container from busybox, pinned here because the default is
+      # :latest (L9a-6). On an exact key hit nothing new is saved, so the extract is skipped.
+      - name: Inject the Go build cache into BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@5422eac04292c961a382e0f584ea0f03ad9da723 # v3.4.0
+        with:
+          utility-image: ghcr.io/containerd/busybox:1.36@sha256:7b3ccabffc97de872a30dfd234fd972a66d247c8cfc69b0550f276481852627c
+          cache-map: |
+            {
+              "${{ runner.temp }}/go-build-amd64": {
+                "id": "go-build-amd64",
+                "target": "/root/.cache/go-build"
+              }
+            }
+          skip-extraction: ${{ steps.go-build-docker.outputs.cache-hit }}
+
       # Build once and save the image as a tarball. The push job pushes this exact file,
-      # so what gets published is byte-for-byte what was scanned.
-      # No layer cache on purpose: Module 7 measures cold vs warm builds and needs this baseline.
+      # so what gets published is byte-for-byte what was scanned. The layer cache changes how
+      # those bytes are made, not which bytes are scanned and pushed.
+      # mode=max also saves the builder stage, where the compile runs (mode=min saves only scratch).
+      # The cache is written with the runner's own token, which `permissions:` doesn't limit
+      # (G1 in docs/design/module-7-docker-builds.md).
       - name: Build image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -296,6 +329,8 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           outputs: type=docker,dest=${{ runner.temp }}/sample-api.tar
           provenance: false
+          cache-from: type=gha,scope=sample-api
+          cache-to: type=gha,scope=sample-api,mode=max
 
       - name: Scan image (Trivy)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -306,8 +341,12 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
-          # The action caches its vulnerability DB by default. Off until Module 7 adds caching
-          # deliberately, so docs/ci.md never describes a cache nobody chose.
+          # Off: no Trivy cache. With it on, the vulnerability DB and the Trivy program itself were
+          # cached under keys that never expire and used unchecked on a hit, so a poisoned DB or a
+          # trojaned binary would scan every later build (G1b, G1c in docs/design/module-7-docker-builds.md).
+          # Phase 9a measured no speed gain (run 39902968713), so it was removed after the PR #15 review.
+          # Off, Trivy v0.75.0 is downloaded fresh each run, so the pin is what runs. Set explicitly,
+          # because the action's default is true.
           cache: false
 
       - name: Upload scanned image for the push job
