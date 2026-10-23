@@ -341,8 +341,10 @@ jobs:
           exit-code: "1"
           format: table
           # The vulnerability DB is cached per day (key cache-trivy-<date>). Set explicitly, not
-          # left to the action's default, so a pin bump can't change it unseen. The cache is a
-          # write path a poisoned DB could use (G1b in docs/design/module-7-docker-builds.md).
+          # left to the action's default, so a pin bump can't change it unseen. Measured in Phase 9a
+          # (run 39902968713): no speed gain, since restoring it takes about as long as downloading
+          # it from mirror.gcr.io. Kept for now; whether to remove it is revisited later in Module 7.
+          # The cache is a write path a poisoned DB could use (G1b in docs/design/module-7-docker-builds.md).
           cache: true
 
       - name: Upload scanned image for the push job
