@@ -340,9 +340,10 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
-          # The action caches its vulnerability DB by default. Off until Module 7 adds caching
-          # deliberately, so docs/ci.md never describes a cache nobody chose.
-          cache: false
+          # The vulnerability DB is cached per day (key cache-trivy-<date>). Set explicitly, not
+          # left to the action's default, so a pin bump can't change it unseen. The cache is a
+          # write path a poisoned DB could use (G1b in docs/design/module-7-docker-builds.md).
+          cache: true
 
       - name: Upload scanned image for the push job
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
