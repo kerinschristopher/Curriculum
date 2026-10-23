@@ -104,6 +104,9 @@ This condition does three jobs:
 A branch pattern in the trust list is only as narrow as the set of people who can create a branch matching it. That half lives in GitHub,
 in the `trusted-branches` ruleset ([`Acme/infra/github/trusted-branches-ruleset.json`](../Acme/infra/github/trusted-branches-ruleset.json)).
 It covers `main`, `mod*` and `mod*/**/*`, and only repository admins can create, push to, delete or force-push those branches.
+**Module 7 splits `main` out (pending the live apply, just before PR #15 merges):** the `update` rule refuses every PR merge too, so
+`trusted-branches` will cover `mod*` and `mod*/**/*` only, and `main` will be covered by two others (see "GitHub-side controls"): it
+changes only through a PR whose required checks pass, and only admins can delete or force-push it.
 The two systems read `*` differently. IAM's `*` matches `/`, so trust `mod*` accepts `mod/anything`. GitHub matches ruleset patterns
 with `fnmatch` in pathname mode, where `*` stops at `/`, and so does `**` unless it's written as `**/`. A ruleset on `mod*` alone, or on `mod**`
 (tried, and confirmed with the `rules/branches` API), leaves `mod/anything` open to collaborators while AWS still trusts it.
@@ -251,7 +254,9 @@ The action, principal and `aud` condition do the same jobs as in the plan role. 
   ([`Acme/infra/github/dev-apply-environment.json`](../Acme/infra/github/dev-apply-environment.json)) requires reviewer `kerinschristopher`
   and allows deployments from `main` only. So a job from any other branch, or one nobody approves, never holds a token this policy accepts.
   The trust policy and the environment are one control in two places: change them together.
-- **Self-review is allowed** (`prevent_self_review: false`). With one maintainer, the only possible reviewer is the person who merged.
+- **Self-review is allowed** (`prevent_self_review: false`). The only required reviewer is the maintainer, who usually merged the
+  change too. Once the merge-gate split is live, a collaborator can merge as well, so the reviewer checks the merge commit's diff
+  before approving (see "GitHub-side controls").
   The gate still forces a deliberate look at the plan before anything is written (design doc Q6).
 
 ### Permissions: what the apply role can do
@@ -318,12 +323,37 @@ IAM is half of each control; GitHub holds the other half. All of these are captu
 
 | Control | What it does | Live state (checked 2026-10-10) |
 |---|---|---|
-| Ruleset `trusted-branches` (`24627971`) | Only admins can create, update, delete or force-push `main`, `mod*` and `mod*/**/*`. Backs the plan role's branch patterns | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
+| Ruleset `trusted-branches` (`24627971`) | Only admins can create, update, delete or force-push `main`, `mod*` and `mod*/**/*`. Backs the plan role's branch patterns. **The file now lists `mod*` only; live still includes `main` until the Module 7 PUT (see below)** | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
+| Ruleset `main-protect` (Module 7) | Only admins can create, delete or force-push `main`. No `update` rule, so it doesn't refuse merges | **Not yet created** (pending the live apply). File: `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
 | Ruleset `main-merge-gate` (`24832716`) | `main` changes only through a PR whose 9 required checks pass (listed in [`docs/ci.md`](ci.md)) | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: pull_request}]`: an admin can merge a PR over a failing check, explicitly, but can't push to `main` directly |
 | Environment `dev-apply` | Required reviewer `kerinschristopher`, `prevent_self_review: false`, deployment branch `main` only. Backs the apply role's trust | `can_admins_bypass: true`. The only admin is also the only reviewer, so this changes nothing today; set it to `false` when someone else joins |
 
 The bypass actor list can't be seen by people without admin access to the repo, so it's recorded here. Re-check it with
 `gh api repos/kerinschristopher/Curriculum/rulesets/<id> --jq .bypass_actors` and update this table when it changes.
+
+**The merge gate split (Module 7, pending the live apply just before PR #15 merges).** `trusted-branches` covers `main` as well,
+and its `update` rule refuses any update to `main` by someone without its bypass. A merge is an update, so every PR was refused
+however green its checks, and every one merged into `main` (#9, #11-#14) went in through the admin bypass, which skips the required
+checks as well. `main-merge-gate`'s PR-only rule worked (direct pushes were refused), but its required checks never decided a merge.
+After the split, `trusted-branches` covers `mod*` only, and `main-protect` keeps the rest of `main`'s protection.
+`.github/scripts/tests/test_branch_rulesets.py` checks the JSON files (not the live rulesets): no ruleset puts an `update` rule on
+`main`; `main` still can't be deleted or force-pushed; `mod*` keeps all four rules and its `mod*/**/*` pattern; every branch ruleset
+targets branches and lets only the admin role bypass.
+
+What that allows, accepted on purpose (2026-10-23):
+- **Anyone with write access can merge a PR whose 9 checks pass.** The gate needs 0 approvals (you can't approve your own PR), so a
+  collaborator (today the instructor, `bgblackmore`) can merge without the maintainer's review. That's the gate as designed in
+  Module 6; the bug hid it. A personal repository has no read-only or triage role: a collaborator can always push and merge.
+- **So the `dev-apply` approval no longer implies the code was reviewed.** `terraform-apply.yml` runs on every push to `main` and
+  checks out that commit, so a merged PR could change `terraform-apply.yml` or `terraform-plan-reusable.yml` to show a harmless plan
+  and then run anything with the apply role once approved. Likewise a merged workflow change could use `push`'s `packages: write` to
+  overwrite any GHCR tag, including a release the overlays deploy, not only a new `sha-*`. (The plan role is unaffected: it already
+  trusts any same-repo PR; see "Admits pull requests" above, whose "one maintainer" note predates the collaborator.) **The
+  mitigation is a habit:** before approving any `dev-apply` run, read the merge commit's diff (`git show --stat <sha>`) and check it
+  for changes under `.github/`; a PR you didn't merge yourself gets a full read.
+- **The admin bypass is still offered on every PR**, so the gate holds only if the admin doesn't use it.
+- **`strict_required_status_checks_policy: false`:** a PR's checks may have run against an older `main`, so two PRs that each pass
+  can still break `main` together.
 
 ## How it's verified
 
@@ -334,7 +364,8 @@ The bypass actor list can't be seen by people without admin access to the repo, 
 | Real plan on a PR (PR #9, run `38032703703`) | The real `pull_request` trust match: `assumed-role/dev-github-actions-plan/...`, plan of dev with no AccessDenied | Passed |
 | Real manual plan on `mod6` (run `38032295497`) | The real branch trust match and condition values with `-lock=false` | Passed |
 | Negative trust test, dispatch from throwaway branch `trust-check` (run `37571573254`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted |
-| Ruleset coverage: `gh api repos/kerinschristopher/Curriculum/rules/branches/<name>` (encode `/` as `%2F`) | `main`, `mod5`, `modern`, `mod/evil` and `mod/a/b` get the `trusted-branches` rules, and `trust-check` and `feature/mod5` get none | Passed |
+| Ruleset coverage: `gh api repos/kerinschristopher/Curriculum/rules/branches/<name>` (encode `/` as `%2F`) | `main`, `mod5`, `modern`, `mod/evil` and `mod/a/b` get the `trusted-branches` rules, and `trust-check` and `feature/mod5` get none | Passed (before the Module 7 split, when `trusted-branches` still covered `main`) |
+| Ruleset coverage after the split (Module 7) | `main` gets `main-protect` and `main-merge-gate` rules and no `update` rule; `mod7-caching` still gets all four `trusted-branches` rules; a PR with green checks reads `CLEAN`, not `BLOCKED` | **Not yet run** (with the live ruleset change) |
 | Ruleset enforcement: push `HEAD:mod/evil` with the `trusted-branches` bypass temporarily set to "pull requests only" (Module 5) | A push that doesn't bypass is rejected | Passed: `GH013 ... Cannot create ref due to creations being restricted`; bypass restored to Always |
 | Direct push to `main` (2026-10-10) | `main-merge-gate` refuses it even for an admin | Passed: `GH013 ... Changes must be made through a pull request` |
 | Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM read statements against real resources | Passed in Module 5: 58 resources refreshed with no AccessDenied (`eb34972`) |

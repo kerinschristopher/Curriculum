@@ -20,7 +20,9 @@ module "dev" {
   apply_environment = "dev-apply"
 
   # "mod*" is only safe because the trusted-branches ruleset (Acme/infra/github/) limits who can
-  # create, push to or delete main, mod* and mod*/**/*. Change this list and the ruleset together.
+  # create, push to or delete mod* and mod*/**/*. main is guarded by main-protect and
+  # main-merge-gate: changes only through a PR with passing checks, which any collaborator can
+  # merge (docs/iam.md, "GitHub-side controls"). Change this list and the rulesets together.
   github_branches = ["main", "mod*"]
 
   # PR plans (.github/workflows/terraform-plan.yml). Widens the read-only plan role to PRs from any

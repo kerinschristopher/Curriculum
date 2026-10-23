@@ -355,6 +355,8 @@ This module is about a specific feedback-loop optimization. A test pipeline that
 
 Update `apps/sample-api/`'s CI to use BuildKit cache. Add a `apps/sample-api/Dockerfile.test` that runs the test suite in a container, and a workflow that invokes it. Time the cold-cache vs warm-cache runs and put the numbers in `docs/ci.md`. The numbers are the point.
 
+> **Progress (2026-10-23):** the BuildKit caching and the timings are in PR A (PR #15, open). The containerised tests and DinD demo (PR B) and multi-arch images (PR C) are designed in `docs/design/module-7-docker-builds.md` but **postponed indefinitely**: Module 8 and later modules come first.
+
 ---
 
 ## Module 8: GitOps with Flux (week 9)
