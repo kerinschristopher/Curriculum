@@ -10,9 +10,12 @@ FROM golang:1.27.3-alpine@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
+# Set by BuildKit; declared here so the stage can read it (the cache mount's id).
+ARG TARGETARCH
 # CI passes sha-<short>; a local build without --build-arg reports "dev".
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /server .
+RUN --mount=type=cache,id=go-build-${TARGETARCH},target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /server .
 
 FROM scratch
 COPY --from=builder /server /server
