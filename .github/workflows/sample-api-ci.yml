@@ -77,7 +77,7 @@ jobs:
           fi
           changed="$(git diff --name-only "$base...$head")"
           echo "$changed"
-          if grep -qE '^(Acme/apps/sample-api/|Acme/platform/|\.github/workflows/sample-api-ci\.yml$|\.github/scripts/(oci-platform-layout|push-oci|check-trivy-db)\.sh$)' <<<"$changed"; then
+          if grep -qE '^(Acme/apps/sample-api/|Acme/platform/|\.github/workflows/sample-api-ci\.yml$|\.github/scripts/(oci-platform-layout|push-oci)\.sh$)' <<<"$changed"; then
             echo "app=true" >> "$GITHUB_OUTPUT"
           else
             echo "app=false" >> "$GITHUB_OUTPUT"
@@ -341,12 +341,13 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
-          # The vulnerability DB is cached per day (key cache-trivy-<date>). Set explicitly, not
-          # left to the action's default, so a pin bump can't change it unseen. Measured in Phase 9a
-          # (run 39902968713): no speed gain, since restoring it takes about as long as downloading
-          # it from mirror.gcr.io. Kept for now; whether to remove it is revisited later in Module 7.
-          # The cache is a write path a poisoned DB could use (G1b in docs/design/module-7-docker-builds.md).
-          cache: true
+          # Off: no Trivy cache. With it on, the vulnerability DB and the Trivy program itself were
+          # cached under keys that never expire and used unchecked on a hit, so a poisoned DB or a
+          # trojaned binary would scan every later build (G1b, G1c in docs/design/module-7-docker-builds.md).
+          # Phase 9a measured no speed gain (run 39902968713), so it was removed after the PR #15 review.
+          # Off, Trivy v0.75.0 is downloaded fresh each run, so the pin is what runs. Set explicitly,
+          # because the action's default is true.
+          cache: false
 
       - name: Upload scanned image for the push job
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

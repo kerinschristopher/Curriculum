@@ -84,7 +84,5 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
-          # Cached per day, like build-scan's (see sample-api-ci.yml). This daily run on main saves
-          # the day's DB first, and branches and PRs can read main's caches, so they restore it.
-          # No measured speed gain; kept for now (see sample-api-ci.yml).
-          cache: true
+          # Off, like build-scan's: no cached DB or Trivy program (see sample-api-ci.yml).
+          cache: false

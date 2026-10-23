@@ -22,10 +22,12 @@ def trivy_steps(workflow):
 
 
 @pytest.mark.parametrize("workflow", sorted(TRIVY_STEPS))
-def test_trivy_caches_its_db(workflow):
+def test_trivy_does_not_cache(workflow):
     steps = trivy_steps(workflow)
     assert len(steps) == TRIVY_STEPS[workflow], [s.get("name") for s in steps]
-    # Set explicitly, not left to the action's default, which a pin bump could change unseen.
-    # YAML reads `true` as a bool and `"true"` as a string; the action gets "true" either way.
-    off = {s["name"]: s.get("with", {}).get("cache") for s in steps if str(s.get("with", {}).get("cache")).lower() != "true"}
-    assert off == {}
+    # Off explicitly: the action's default is true, which caches both the DB and the Trivy binary
+    # under keys that never expire (G1b, G1c; removed after the PR #15 review). A step with no
+    # cache line counts as on. YAML reads `false` as a bool and `"false"` as a string; the action
+    # gets "false" either way.
+    on = {s["name"]: s.get("with", {}).get("cache") for s in steps if str(s.get("with", {}).get("cache")).lower() != "false"}
+    assert on == {}

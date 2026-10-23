@@ -55,7 +55,6 @@ def test_scripts_filter_covers_guarded_files(filters):
 IMAGE_SCRIPTS = [
     ".github/scripts/oci-platform-layout.sh",
     ".github/scripts/push-oci.sh",
-    ".github/scripts/check-trivy-db.sh",
 ]
 
 
