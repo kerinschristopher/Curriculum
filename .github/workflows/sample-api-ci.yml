@@ -82,7 +82,7 @@ jobs:
           else
             echo "app=false" >> "$GITHUB_OUTPUT"
           fi
-          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/main-merge-gate-ruleset\.json$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
+          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/[^/]+-ruleset\.json$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
             echo "scripts=true" >> "$GITHUB_OUTPUT"
           else
             echo "scripts=false" >> "$GITHUB_OUTPUT"

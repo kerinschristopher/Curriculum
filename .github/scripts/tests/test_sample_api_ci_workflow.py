@@ -29,6 +29,8 @@ GUARDED = [
     ".github/workflows/new-workflow.yml",
     "Acme/apps/sample-api/Dockerfile",
     "Acme/apps/sample-api/Dockerfile.test",
+    "Acme/infra/github/trusted-branches-ruleset.json",
+    "Acme/infra/github/main-protect-ruleset.json",
 ]
 
 
