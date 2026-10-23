@@ -50,16 +50,20 @@ def test_scripts_filter_covers_guarded_files(filters):
     assert missed == []
 
 
-# Scripts on the image's build, scan and push path. A change to one alone must run build-scan and
-# push (the app filter), not just scripts-test. Listed before they exist, like GUARDED (L9a-7).
-IMAGE_SCRIPTS = [
+# One path per prefix in the app filter: the app's code, its manifests, this workflow and the
+# scripts on the image's build, scan and push path. A change to any one alone must run lint,
+# test, build-scan and push, not just scripts-test. Scripts are listed before they exist (L9a-7).
+APP_PATHS = [
+    "Acme/apps/sample-api/main.go",
+    "Acme/platform/apps/sample-api/base/deployment.yaml",
+    ".github/workflows/sample-api-ci.yml",
     ".github/scripts/oci-platform-layout.sh",
     ".github/scripts/push-oci.sh",
 ]
 
 
-def test_app_filter_covers_image_scripts(filters):
-    missed = [path for path in IMAGE_SCRIPTS if not re.search(filters["app"], path)]
+def test_app_filter_covers_app_paths(filters):
+    missed = [path for path in APP_PATHS if not re.search(filters["app"], path)]
     assert missed == []
 
 
@@ -122,5 +126,9 @@ def test_build_scan_persists_the_go_build_cache_mount():
     # The Dockerfile pins Go: without it, a Go bump with unchanged source is an exact hit, so the
     # new compile is never saved (skip-extraction) and every later build compiles from scratch.
     assert "'Acme/apps/sample-api/Dockerfile'" in cache["with"]["key"], cache["with"]["key"]
+    # The source is the rest of the compile's input: without it, a code change is an exact hit,
+    # so the new compile is never saved and every later build recompiles the changed packages.
+    for source in ("'Acme/apps/sample-api/go.mod'", "'Acme/apps/sample-api/**/*.go'"):
+        assert source in cache["with"]["key"], cache["with"]["key"]
     # Keys are write-once: on an exact hit nothing will be saved, so skip the extract.
     assert dance["with"]["skip-extraction"] == f"${{{{ steps.{cache['id']}.outputs.cache-hit }}}}"
