@@ -17,10 +17,16 @@ import yaml
 WORKFLOW = Path(__file__).resolve().parents[2] / "workflows" / "sample-api-ci.yml"
 
 # Files a structural test reads. Some don't exist yet: listing them now covers their tests from
-# the commit that adds them.
+# the commit that adds them. test_merge_gate_ruleset.py reads every workflow, so a new one must
+# be covered too: new-workflow.yml stands for any workflow added later.
 GUARDED = [
     "Acme/infra/github/main-merge-gate-ruleset.json",
+    ".github/workflows/sample-api-ci.yml",
+    ".github/workflows/sample-api-rescan.yml",
+    ".github/workflows/terraform-apply.yml",
     ".github/workflows/terraform-plan.yml",
+    ".github/workflows/terraform-plan-reusable.yml",
+    ".github/workflows/new-workflow.yml",
     "Acme/apps/sample-api/Dockerfile",
     "Acme/apps/sample-api/Dockerfile.test",
 ]
@@ -113,5 +119,9 @@ def test_build_scan_persists_the_go_build_cache_mount():
     assert cache["with"]["path"] == host_dir
     # Q7: a prefix of its own, so lint/test and build-scan never restore each other's caches.
     assert cache["with"]["key"].startswith("go-build-docker-"), cache["with"]["key"]
+    assert cache["with"]["restore-keys"].startswith("go-build-docker-"), cache["with"]["restore-keys"]
+    # The Dockerfile pins Go: without it, a Go bump with unchanged source is an exact hit, so the
+    # new compile is never saved (skip-extraction) and every later build compiles from scratch.
+    assert "'Acme/apps/sample-api/Dockerfile'" in cache["with"]["key"], cache["with"]["key"]
     # Keys are write-once: on an exact hit nothing will be saved, so skip the extract.
     assert dance["with"]["skip-extraction"] == f"${{{{ steps.{cache['id']}.outputs.cache-hit }}}}"
