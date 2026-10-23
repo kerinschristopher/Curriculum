@@ -56,7 +56,7 @@ only accepts changes to `main` through a pull request whose required checks pass
 | `test-result` | sample-api-ci | every `test (<go version>)` leg passed (or the app didn't change) |
 | `kustomize` | sample-api-ci | every Kustomize base and overlay renders (or nothing it covers changed) |
 | `build-scan` | sample-api-ci | the image builds and Trivy finds no fixable HIGH/CRITICAL vulnerability (or the app didn't change) |
-| `scripts-test` | sample-api-ci | shellcheck and the pytest tests for `.github/scripts/` pass, against a throwaway registry (or no script or sample-api workflow changed) |
+| `scripts-test` | sample-api-ci | shellcheck and the pytest tests for `.github/scripts/` pass, against a throwaway registry (or no file those tests read changed) |
 | `fmt` | terraform-plan | `terraform fmt -check -recursive` is clean (or no Terraform changed) |
 | `validate-result` | terraform-plan | every root validates and every module's `terraform test` passes (or no Terraform changed) |
 | `policy` | terraform-plan | the Conftest policy tests pass and the seeded bad plan is still caught (or no Terraform changed) |
@@ -82,7 +82,7 @@ the ruleset after editing its JSON with
 | `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases, with a Go build cache per version |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |
 | `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays and the infrastructure overlays |
-| `scripts-test` | `.github/scripts/`, `sample-api-ci.yml`, `sample-api-rescan.yml`, `terraform-plan.yml`, `terraform-apply.yml`, the merge-gate ruleset JSON or a sample-api `Dockerfile` changed: every file a test there reads, so a change to one alone can't skip the test that would catch it | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`, with a throwaway `registry:3` service container (pinned by digest) for the release-tag tests. `REQUIRE_REGISTRY=1` makes a missing registry a failure, not a skip. Runs every branch of `pick-rescan-images.sh` and `release-tag.sh`, including ones the daily rescan and the once-per-release job have never hit. Not a `build-scan` dependency |
+| `scripts-test` | `.github/scripts/`, any workflow file in `.github/workflows/`, the merge-gate ruleset JSON or a sample-api `Dockerfile` changed: every file a test there reads, so a change to one alone can't skip the test that would catch it | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`, with a throwaway `registry:3` service container (pinned by digest) for the release-tag tests. `REQUIRE_REGISTRY=1` makes a missing registry a failure, not a skip. Runs every branch of `pick-rescan-images.sh` and `release-tag.sh`, including ones the daily rescan and the once-per-release job have never hit. Not a `build-scan` dependency |
 | `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). Caches the image layers, the Go build cache inside the build and Trivy's DB (see "Caching"). On `push` to `main` only, uploads the tarball (1 day) |
 | `push` | `push` to `main`, after build-scan | `contents: read`, `packages: write` | Downloads the scanned tarball, `docker load`, logs in to GHCR with the run's `GITHUB_TOKEN`, pushes `ghcr.io/kerinschristopher/sample-api:sha-<short>`. Never checks out code, so what's pushed is what was scanned |
 | `release-tag` | `push` of a `v<major>.<minor>.<patch>` tag | `contents: read`, `packages: write` | Runs `.github/scripts/release-tag.sh`: adds the `<major>.<minor>.<patch>` tag to the existing `sha-<short>` image of the tagged commit with `imagetools create --prefer-index=false`, which copies the manifest as-is (the default wraps it in a new index with a new digest), then checks both tags have the same digest. Nothing is rebuilt. Checks out only `.github/scripts`. Tested by `scripts-test`; the job itself first runs on a real `v*` tag |
@@ -110,14 +110,22 @@ the ruleset after editing its JSON with
     it would start empty. `buildkit-cache-dance` copies it in from a runner directory before the build and back out after it,
     and `actions/cache` saves that directory under its own prefix, `go-build-docker-` (so `lint` and `test` never restore it).
     On an exact key hit (no source change) nothing new is saved and the copy back out is skipped.
-  - **Trivy's vulnerability DB (`cache: true`), in `build-scan` and `rescan`.** Cached per day (`cache-trivy-<date>`). It's set
-    explicitly, not left to the action's default, so a pin bump can't change it unseen. It saves no measurable time (see "Run
-    times"); it's kept for now, and Module 7 decides later whether to remove it (design doc Q9).
+  - **Trivy's DB and the Trivy program (`cache: true`), in `build-scan` and `rescan`.** The DB is cached per day
+    (`cache-trivy-<date>`). The same switch also caches the `trivy` binary itself (`trivy-binary-v0.75.0-Linux-X64`, through
+    the action's `setup-trivy` step). It's set explicitly, not left to the action's default, so a pin bump can't change it
+    unseen. It saves no measurable time (see "Run times").
   - **Any step in a job can write the cache.** The cache service takes the runner's own token, which `permissions:` doesn't
-    limit, so a compromised scanner in `build-scan` could poison the layer cache or the Trivy DB. The pushed image is still
+    limit, so a compromised step in `build-scan` could poison the layer cache or the Trivy DB. The pushed image is still
     exactly the scanned one; the risk is to the builds and scans that start from that cache later (G1, G1b in the design doc).
-    The Trivy DB's safeguards (never skip its update; fail on an old or forged DB) wait for the decision on keeping that cache,
-    so for now it has none.
+  - **Open concern: the cached Trivy program (G1c, R9 in the design doc).** On a cache hit the action skips installing Trivy
+    and runs the restored file without checking it, so with the cache on, "pinned to v0.75.0" only names the cache key. A
+    trojaned `trivy` saved under that key would run in every scan and could report "clean" every time, and since the daily
+    rescan restores it each day it's never evicted. Keys are write-once, so an attacker needs an empty slot first (after
+    eviction, a cache delete or a Trivy version bump). Nothing checks for this today, and the DB's planned safeguards (never
+    skip its update; fail on an old or forged DB) are deferred too. The cache is kept for now; **whether to remove it, or to
+    install Trivy uncached and cache only the DB, is to be decided with the instructor before Module 8 starts** (design doc
+    Q9). Until then, after any Trivy or GitHub Actions cache advisory, delete every `trivy-binary-*` and `cache-trivy-*`
+    entry (`gh cache delete <key>`).
   - **Scope:** a run can restore the caches its own branch saved and those `main` saved; a PR's caches are visible only to that
     PR. GitHub evicts caches unused for 7 days, and the oldest ones once the repository passes 10 GB.
   - **The first run on `main` after a merge is partly warm, not cold.** Module 6 said it was cold, reasoning that a PR's caches
@@ -335,7 +343,9 @@ commit; a "new commit" changes the source or the Dockerfile.
   throwaway branch that's never merged.
 - **The Trivy DB cache gains nothing.** In run `39902968713`, attempt 1 downloaded the DB from `mirror.gcr.io` in about 5 s;
   attempt 2 restored it from the cache in about 4 s (job 40 s, then 41 s). The DB is the same file for every Trivy user, so
-  caching it saves no work of ours, while it adds a cache write path and about 140 MB per branch per day toward the 10 GB limit.
+  caching it saves no work of ours. It also costs: about 4 s to save the DB on each branch's first run of the day, 95.6 MB per
+  branch per day plus the 47.3 MB Trivy binary once per version per branch toward the 10 GB limit, and a write path for both
+  (see "Caching").
 - **n=1 rows show a direction, not a measurement.** The final numbers, n=3 for every condition, come at the end of Module 7.
 
 ## Runners: GitHub-hosted vs self-hosted
