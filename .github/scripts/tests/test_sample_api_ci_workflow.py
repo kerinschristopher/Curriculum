@@ -7,6 +7,7 @@ that file alone skips the test that would catch it, and a skipped job counts as 
     ~/.venvs/iam-tests/bin/pytest -v .github/scripts/tests
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -75,3 +76,42 @@ def test_build_scan_uses_the_gha_layer_cache():
     assert cache_settings(options["cache-from"]) == {"type": "gha", "scope": "sample-api"}
     # mode=max also saves the builder stage, where the compile runs; mode=min saves only scratch.
     assert cache_settings(options["cache-to"]) == {"type": "gha", "scope": "sample-api", "mode": "max"}
+
+
+def build_scan_steps():
+    return yaml.safe_load(WORKFLOW.read_text())["jobs"]["build-scan"]["steps"]
+
+
+def step_index(steps, action):
+    """Index of the first step that uses `action@...`."""
+    uses = [s.get("uses", "").split("@")[0] for s in steps]
+    assert action in uses, uses
+    return uses.index(action)
+
+
+def test_build_scan_persists_the_go_build_cache_mount():
+    # G2: the gha layer cache doesn't save mount contents, so actions/cache keeps a host
+    # directory and buildkit-cache-dance copies it into the mount and back out.
+    steps = build_scan_steps()
+    dance_at = step_index(steps, "reproducible-containers/buildkit-cache-dance")
+    dance = steps[dance_at]
+    # A commit SHA, not a tag: a tag can be moved to other code.
+    assert re.fullmatch(r"reproducible-containers/buildkit-cache-dance@[0-9a-f]{40}", dance["uses"]), dance["uses"]
+    # The helper image defaults to busybox:latest, so pin it by digest (NFR2, L9a-6).
+    image = dance["with"].get("utility-image", "")
+    assert re.fullmatch(r"ghcr\.io/containerd/busybox(:[\w.-]+)?@sha256:[0-9a-f]{64}", image), image
+    # The builder must exist first, and the mount must be filled before the build reads it.
+    assert step_index(steps, "docker/setup-buildx-action") < dance_at < step_index(steps, "docker/build-push-action")
+    # The id is what the Dockerfile's go-build-${TARGETARCH} becomes on amd64.
+    ((host_dir, mount),) = json.loads(dance["with"]["cache-map"]).items()
+    assert mount == {"id": "go-build-amd64", "target": "/root/.cache/go-build"}
+    # actions/cache restores the host directory first. Post steps run in reverse, so its save
+    # runs after the dance's extract.
+    cache_at = step_index(steps, "actions/cache")
+    assert cache_at < dance_at
+    cache = steps[cache_at]
+    assert cache["with"]["path"] == host_dir
+    # Q7: a prefix of its own, so lint/test and build-scan never restore each other's caches.
+    assert cache["with"]["key"].startswith("go-build-docker-"), cache["with"]["key"]
+    # Keys are write-once: on an exact hit nothing will be saved, so skip the extract.
+    assert dance["with"]["skip-extraction"] == f"${{{{ steps.{cache['id']}.outputs.cache-hit }}}}"
