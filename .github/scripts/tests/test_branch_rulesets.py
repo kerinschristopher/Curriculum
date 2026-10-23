@@ -16,6 +16,7 @@ import pytest
 
 GITHUB = Path(__file__).resolve().parents[3] / "Acme" / "infra" / "github"
 MAIN = "refs/heads/main"
+ADMIN = {"actor_id": 5, "actor_type": "RepositoryRole"}
 
 
 @pytest.fixture(scope="module")
@@ -53,3 +54,21 @@ def test_mod_branches_keep_all_four_rules(rulesets):
     trusted = rulesets["trusted-branches-ruleset.json"]
     assert applies_to(trusted, "refs/heads/mod7-caching")
     assert rule_types(trusted) == {"creation", "update", "deletion", "non_fast_forward"}
+    # fnmatch's * crosses /, GitHub's doesn't: mod/evil is covered only by this pattern (docs/iam.md).
+    assert "refs/heads/mod*/**/*" in trusted["conditions"]["ref_name"]["include"]
+
+
+def test_only_admins_bypass_branch_rulesets(rulesets):
+    # "Only admins" is what the plan role's mod* trust relies on (docs/iam.md). Role 5 is admin;
+    # on a personal repo, 4 (write) would be every collaborator.
+    wrong = {
+        name: r["bypass_actors"]
+        for name, r in rulesets.items()
+        if [{key: actor[key] for key in ADMIN} for actor in r["bypass_actors"]] != [ADMIN]
+    }
+    assert wrong == {}
+
+
+def test_every_ruleset_targets_branches(rulesets):
+    # applies_to reads ref_name as branch names; a tag ruleset would be misread as a branch one.
+    assert {name: r["target"] for name, r in rulesets.items() if r["target"] != "branch"} == {}
