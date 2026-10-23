@@ -77,13 +77,13 @@ the ruleset after editing its JSON with
 
 | Job | Needs / runs when | Permissions | Does |
 |---|---|---|---|
-| `changes` | not on tags | `contents: read` | Decides whether `Acme/apps/sample-api/`, `Acme/platform/` or this workflow changed. A new branch or force-push (no usable base) runs everything |
+| `changes` | not on tags | `contents: read` | Decides whether `Acme/apps/sample-api/`, `Acme/platform/`, this workflow or one of the image scripts Module 7 adds (`oci-platform-layout.sh`, `push-oci.sh`, `check-trivy-db.sh`) changed (`app`), and whether a file a test in `.github/scripts/tests` reads changed (`scripts`). Both are tested there. A new branch or force-push (no usable base) runs everything |
 | `lint` | app changed | `contents: read` | gofmt, `go vet ./...`, golangci-lint v2.14.0, on the Go version in `go.mod`. Restores the Go build cache first (see "Caching") |
 | `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases, with a Go build cache per version |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |
 | `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays and the infrastructure overlays |
-| `scripts-test` | `.github/scripts/`, `sample-api-ci.yml` or `sample-api-rescan.yml` changed | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`, with a throwaway `registry:3` service container (pinned by digest) for the release-tag tests. `REQUIRE_REGISTRY=1` makes a missing registry a failure, not a skip. Runs every branch of `pick-rescan-images.sh` and `release-tag.sh`, including ones the daily rescan and the once-per-release job have never hit. Not a `build-scan` dependency |
-| `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). On `push` to `main` only, uploads the tarball (1 day) |
+| `scripts-test` | `.github/scripts/`, `sample-api-ci.yml`, `sample-api-rescan.yml`, `terraform-plan.yml`, `terraform-apply.yml`, the merge-gate ruleset JSON or a sample-api `Dockerfile` changed: every file a test there reads, so a change to one alone can't skip the test that would catch it | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`, with a throwaway `registry:3` service container (pinned by digest) for the release-tag tests. `REQUIRE_REGISTRY=1` makes a missing registry a failure, not a skip. Runs every branch of `pick-rescan-images.sh` and `release-tag.sh`, including ones the daily rescan and the once-per-release job have never hit. Not a `build-scan` dependency |
+| `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). Caches the image layers, the Go build cache inside the build and Trivy's DB (see "Caching"). On `push` to `main` only, uploads the tarball (1 day) |
 | `push` | `push` to `main`, after build-scan | `contents: read`, `packages: write` | Downloads the scanned tarball, `docker load`, logs in to GHCR with the run's `GITHUB_TOKEN`, pushes `ghcr.io/kerinschristopher/sample-api:sha-<short>`. Never checks out code, so what's pushed is what was scanned |
 | `release-tag` | `push` of a `v<major>.<minor>.<patch>` tag | `contents: read`, `packages: write` | Runs `.github/scripts/release-tag.sh`: adds the `<major>.<minor>.<patch>` tag to the existing `sha-<short>` image of the tagged commit with `imagetools create --prefer-index=false`, which copies the manifest as-is (the default wraps it in a new index with a new digest), then checks both tags have the same digest. Nothing is rebuilt. Checks out only `.github/scripts`. Tested by `scripts-test`; the job itself first runs on a real `v*` tag |
 
@@ -101,10 +101,39 @@ the ruleset after editing its JSON with
   - **Not `setup-go`'s cache:** that one is keyed on `go.sum`, and this app has none (standard library only, nothing to
     download).
   - **golangci-lint** keeps its own analysis cache (the action's default).
-  - **Scope:** caches from a PR are only visible to that PR, and GitHub evicts caches unused for 7 days. The first run on `main`
-    after a merge is cold again.
-- **Not here yet, on purpose:** Docker layer caching (BuildKit) and the Trivy DB cache (`cache: false`) come in Module 7, which
-  measures cold vs warm image builds. Images are amd64 only; multi-arch is also Module 7.
+  - **`build-scan`'s image layers (BuildKit, `type=gha`, `scope=sample-api`, `mode=max`).** Every Dockerfile step whose inputs
+    didn't change is reused (`CACHED` in the log). `mode=max` also saves the builder stage, where the compile runs; `mode=min`
+    would save only the final `scratch` stage. The compile step takes `VERSION=sha-<short>` as a build argument, so a new commit
+    always recompiles: only a re-run of the same commit is fully cached.
+  - **`build-scan`'s Go build cache, inside the image build.** The Dockerfile's `go build` mounts a cache
+    (`--mount=type=cache,id=go-build-${TARGETARCH}`), but the layer cache doesn't save a mount's contents, so on a fresh runner
+    it would start empty. `buildkit-cache-dance` copies it in from a runner directory before the build and back out after it,
+    and `actions/cache` saves that directory under its own prefix, `go-build-docker-` (so `lint` and `test` never restore it).
+    On an exact key hit (no source change) nothing new is saved and the copy back out is skipped.
+  - **Trivy's vulnerability DB (`cache: true`), in `build-scan` and `rescan`.** Cached per day (`cache-trivy-<date>`). It's set
+    explicitly, not left to the action's default, so a pin bump can't change it unseen. It saves no measurable time (see "Run
+    times"); it's kept for now, and Module 7 decides later whether to remove it (design doc Q9).
+  - **Any step in a job can write the cache.** The cache service takes the runner's own token, which `permissions:` doesn't
+    limit, so a compromised scanner in `build-scan` could poison the layer cache or the Trivy DB. The pushed image is still
+    exactly the scanned one; the risk is to the builds and scans that start from that cache later (G1, G1b in the design doc).
+    The Trivy DB's safeguards (never skip its update; fail on an old or forged DB) wait for the decision on keeping that cache,
+    so for now it has none.
+  - **Scope:** a run can restore the caches its own branch saved and those `main` saved; a PR's caches are visible only to that
+    PR. GitHub evicts caches unused for 7 days, and the oldest ones once the repository passes 10 GB.
+  - **The first run on `main` after a merge is partly warm, not cold.** Module 6 said it was cold, reasoning that a PR's caches
+    never reach `main`. That part is true, but `main` saves caches on every run of its own, and a branch can read what it saved
+    for 7 days. So the merge commit's run misses on the exact keys (the merged source is new to `main`), then falls back to
+    `main`'s newest earlier entries:
+    - the Go build caches in `lint`, `test` and `build-scan` through their `restore-keys` prefixes, so only the changed packages
+      recompile;
+    - the image layers through the shared `scope=sample-api`, so every Dockerfile step before the first changed input is reused;
+    - the Trivy DB through its `cache-trivy-` prefix: that day's if `main` already saved it, otherwise an older one, which
+      Trivy then updates.
+
+    It's fully cold only when `main` has no earlier entry to fall back on: the first run after the merge that adds a cache (for
+    the image caches, the first run after Module 7's PR A merges), after 7 days with no run on `main`, or after the entries
+    were deleted (`gh cache delete`) or evicted by the 10 GB limit.
+- **Images are amd64 only;** multi-arch comes later in Module 7.
 
 ### Releasing an image
 1. Merge to `main` and wait for a green `sample-api-ci` run. GHCR then has `sha-<short>` for the merge commit.
@@ -120,7 +149,7 @@ The first push needs a one-time manual setting: in the `sample-api` package's se
 | Job | Needs | Permissions | Does |
 |---|---|---|---|
 | `resolve` | none | `contents: read` | Lists the package's tags (anonymously: the package is public) and the last 500 commits on `main`, then runs `.github/scripts/pick-rescan-images.sh`: the newest `sha-*` image (walking `main`'s history from the tip) and the highest semver tag. No tags at all (an empty, `null` or missing `tags` list) ends in `::error::Nothing to scan`; a malformed reply fails as an error of its own. Tested by `scripts-test` in `sample-api-ci.yml` |
-| `rescan` (matrix: one leg per picked image) | resolve | none (`permissions: {}`) | Trivy v0.75.0 against each image with `build-scan`'s thresholds. `fail-fast: false`, so one vulnerable image doesn't hide the other's result |
+| `rescan` (matrix: one leg per picked image) | resolve | none (`permissions: {}`) | Trivy v0.75.0 against each image with `build-scan`'s thresholds, with the DB cached per day like `build-scan`'s. `fail-fast: false`, so one vulnerable image doesn't hide the other's result |
 
 The image doesn't change between scans, but the vulnerability database does. A red run means a fix is available for something in a
 published image: rebuild (merge anything to the app, or bump Go or the base image), release, and move the overlays. Scheduled workflows run only
@@ -270,14 +299,44 @@ Measured on draft PR #9 (2026-10-10), wall clock from the first job's start to t
 | `test (1.26)`: job / `go test` step | 35 s / 26 s | 11 s / 5 s |
 | `test (1.27)`: job / `go test` step | 42 s / 23 s | 17 s / 2 s |
 | `lint`: job / `go vet` step | 34 s / 19 s | 15 s / 4 s |
-| `build-scan` (not cached; Module 7) | 44 s | 48 s |
+| `build-scan` (no cache yet) | 44 s | 48 s |
 | Whole `sample-api-ci` run | 100 s | 82 s |
 
 - **The compile was most of each Go job**, and the cache removes it (the race-instrumented standard library above all). The whole
   run gains less, because `build-scan` waits for `lint`, `test` and `kustomize` and then takes about 45 s itself: it is now the
-  longest step in the chain. Shortening it is Module 7's BuildKit cache.
-- **When the warm path applies:** re-runs, and later pushes to the same PR (through the restore key). The first run on `main` after
-  a merge is cold.
+  longest step in the chain. Shortening it is Module 7's BuildKit cache (below).
+- **When the warm path applies:** re-runs, later pushes to the same PR (through the restore key), and later runs on `main`, which
+  restore `main`'s own earlier caches. Module 6 wrote here that the first run on `main` after a merge is cold: it's partly warm
+  (see "Caching" under `sample-api-ci.yml`).
+
+**`build-scan` with image caches (Module 7).** Each sample, with its run ID, attempt and the caches that existed before it, is a row
+in [`ci-timings.csv`](ci-timings.csv). "Empty" means every cache was deleted first; a "re-run" is another attempt on the same
+commit; a "new commit" changes the source or the Dockerfile.
+
+| Condition | Run / attempts | `build-scan` job | `Build image` step |
+|---|---|---|---|
+| No cache (baseline, n=6) | `39853501547` / 2-7 | 45-51 s | 14-18 s |
+| Layer cache, empty (n=3) | `39868715776` / 2, 4, 6 | 55-67 s | 27-34 s |
+| Layer cache, re-run (n=3) | `39868715776` / 3, 5, 7 | 24-33 s | 2-3 s |
+| + Go cache mount, new commit (n=1) | `39884322656` / 1 | 63 s | 22 s |
+| + cache-dance, new commit, nothing to restore (n=1) | `39893262563` / 1 | 50 s | 19 s |
+| + cache-dance, one-line `main.go` change (n=1) | `39897448709` / 1 | 58 s | 15 s |
+| + cache-dance, source unchanged (exact hit, n=1) | `39902968713` / 1 | 40 s | 8 s |
+
+- **The layer cache pays only on a re-run of the same commit** (`Build image` 2-3 s instead of 14-18 s). A new commit always
+  recompiles, because the version is a build argument of the compile step. An empty cache is about 10 s *slower* than no cache:
+  the run uploads every layer.
+- **The cache mount alone gains nothing in CI,** as expected: the layer cache doesn't save a mount's contents, so each fresh
+  runner starts with it empty.
+- **cache-dance makes the compile nearly free, but not the job.** On the one-line change the compile took 0.3 s instead of
+  11.6 s, but carrying the cache cost about 19 s (restore 6 s, copy in 3 s, copy out 8 s, save 2 s). For a one-package,
+  standard-library app that's about what it saves. It pays when the source didn't change (an exact hit skips the copy out and
+  the save), as in a workflow-only commit. A larger Go codebase should gain more; Module 7 measures that separately, on a
+  throwaway branch that's never merged.
+- **The Trivy DB cache gains nothing.** In run `39902968713`, attempt 1 downloaded the DB from `mirror.gcr.io` in about 5 s;
+  attempt 2 restored it from the cache in about 4 s (job 40 s, then 41 s). The DB is the same file for every Trivy user, so
+  caching it saves no work of ours, while it adds a cache write path and about 140 MB per branch per day toward the 10 GB limit.
+- **n=1 rows show a direction, not a measurement.** The final numbers, n=3 for every condition, come at the end of Module 7.
 
 ## Runners: GitHub-hosted vs self-hosted
 
