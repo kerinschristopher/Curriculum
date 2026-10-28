@@ -41,6 +41,7 @@ GUARDED = [
     "Acme/infra/bootstrap/flux-operator-values.yaml",
     "Acme/infra/bootstrap/flux-instance.yaml",
     "Acme/infra/bootstrap/kustomization.yaml",
+    "Acme/infra/bootstrap/platform.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap

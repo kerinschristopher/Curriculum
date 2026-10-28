@@ -72,3 +72,38 @@ def test_flux_syncs_its_own_folder_from_main_anonymously():
     folder = REPO / sync.get("path", "")
     resources = yaml.safe_load((folder / "kustomization.yaml").read_text()).get("resources", [])
     assert "flux-instance.yaml" in resources, folder
+
+
+def flux_kustomizations():
+    """{name: spec} of the Flux Kustomizations in platform.yaml."""
+    docs = yaml.safe_load_all((BOOTSTRAP / "platform.yaml").read_text())
+    return {d["metadata"]["name"]: d["spec"] for d in docs if d and d["kind"] == "Kustomization"}
+
+
+def test_platform_applies_infrastructure_then_each_env():
+    resources = yaml.safe_load((BOOTSTRAP / "kustomization.yaml").read_text())["resources"]
+    # Not listed means Flux never applies it.
+    assert "platform.yaml" in resources, resources
+    kustomizations = flux_kustomizations()
+    envs = sorted(path.parent.name for path in APPS_ENTRY_POINTS.glob("*/kustomization.yaml"))
+    assert envs, APPS_ENTRY_POINTS
+    assert sorted(kustomizations) == sorted(["infrastructure"] + [f"apps-{env}" for env in envs])
+    assert kustomizations["infrastructure"]["path"] == "./Acme/platform/infrastructure/overlays/kind"
+    # The ingress webhook must be running before any Ingress is applied.
+    assert kustomizations["infrastructure"].get("wait") is True
+    for env in envs:
+        spec = kustomizations[f"apps-{env}"]
+        assert spec["path"] == f"./Acme/platform/apps/overlays/{env}", env
+        assert {"name": "infrastructure"} in spec.get("dependsOn", []), env
+    for name, spec in kustomizations.items():
+        assert (REPO / spec["path"] / "kustomization.yaml").exists(), name
+        assert spec["sourceRef"] == {"kind": "GitRepository", "name": "flux-system"}, name
+        assert spec.get("prune") is True, name
+        # Deleting Flux's objects (a recovery drill) must not delete the workloads.
+        assert spec.get("deletionPolicy") == "Orphan", name
+
+
+def test_flux_instance_is_never_pruned():
+    # If flux-instance.yaml left Git, prune would make Flux uninstall itself.
+    annotations = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["metadata"].get("annotations", {})
+    assert annotations.get("kustomize.toolkit.fluxcd.io/prune") == "disabled", annotations

@@ -4,6 +4,9 @@ kind: FluxInstance
 metadata:
   name: flux
   namespace: flux-system
+  annotations:
+    # Never pruned: if this file left Git, Flux would otherwise uninstall itself.
+    kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
   distribution:
     version: "2.10.0"
