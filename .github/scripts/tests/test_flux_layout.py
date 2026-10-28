@@ -58,3 +58,17 @@ def test_flux_instance_pins_an_exact_flux_version():
     distribution = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]["distribution"]
     assert re.fullmatch(r"\d+\.\d+\.\d+", distribution["version"]), distribution["version"]
     assert distribution["registry"] == "ghcr.io/fluxcd", distribution["registry"]
+
+
+def test_flux_syncs_its_own_folder_from_main_anonymously():
+    sync = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"].get("sync", {})
+    assert sync.get("kind") == "GitRepository", sync
+    # Anonymous HTTPS (D3): the repo is public, so no credential sits in the cluster.
+    assert sync.get("url", "").startswith("https://"), sync
+    assert "pullSecret" not in sync, sync
+    # Only main is behind the merge gate; any other branch reaches a cluster-admin controller unreviewed.
+    assert sync.get("ref") == "refs/heads/main", sync
+    # Flux applies its own folder, so a change to the FluxInstance is a PR.
+    folder = REPO / sync.get("path", "")
+    resources = yaml.safe_load((folder / "kustomization.yaml").read_text()).get("resources", [])
+    assert "flux-instance.yaml" in resources, folder

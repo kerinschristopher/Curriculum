@@ -13,3 +13,8 @@ spec:
     - kustomize-controller
     - helm-controller
     - notification-controller
+  sync:
+    kind: GitRepository
+    url: https://github.com/kerinschristopher/Curriculum.git
+    ref: refs/heads/main
+    path: ./Acme/infra/bootstrap
