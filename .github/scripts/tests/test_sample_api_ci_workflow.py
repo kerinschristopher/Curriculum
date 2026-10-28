@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 WORKFLOW = Path(__file__).resolve().parents[2] / "workflows" / "sample-api-ci.yml"
+REPO = WORKFLOW.parents[2]
 
 # Files a structural test reads. Some don't exist yet: listing them now covers their tests from
 # the commit that adds them. test_merge_gate_ruleset.py reads every workflow, so a new one must
@@ -34,6 +35,9 @@ GUARDED = [
     "Acme/platform/apps/sample-api/overlays/dev/kustomization.yaml",
     "Acme/platform/apps/sample-api/overlays/stage/kustomization.yaml",
     "Acme/platform/apps/sample-api/overlays/prod/kustomization.yaml",
+    "Acme/platform/apps/overlays/dev/kustomization.yaml",
+    "Acme/platform/apps/overlays/stage/kustomization.yaml",
+    "Acme/platform/apps/overlays/prod/kustomization.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
@@ -47,6 +51,14 @@ APP_PATHS = [
     ".github/scripts/oci-platform-layout.sh",
     ".github/scripts/push-oci.sh",
     "Acme/infra/bootstrap/kustomization.yaml",
+]
+
+# The directories Flux applies (Module 8). The required kustomize check must render each one, or a
+# broken entry point merges and only fails in the cluster.
+ENTRY_POINTS = [
+    "Acme/platform/apps/overlays/dev",
+    "Acme/platform/apps/overlays/stage",
+    "Acme/platform/apps/overlays/prod",
 ]
 
 
@@ -70,6 +82,18 @@ def test_scripts_filter_covers_guarded_files(filters):
 
 def test_app_filter_covers_app_paths(filters):
     missed = [path for path in APP_PATHS if not re.search(filters["app"], path)]
+    assert missed == []
+
+
+def test_kustomize_job_renders_every_entry_point():
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["kustomize"]["steps"]
+    script = next(s["run"] for s in steps if s.get("name") == "Render every base and overlay")
+    loop = re.search(r"for dir in (.*?); do", script, re.DOTALL)
+    assert loop, script
+    # Expand each entry as bash would: a glob counts only for directories that exist.
+    entries = [entry for entry in loop.group(1).split() if entry != "\\"]
+    rendered = {path.relative_to(REPO).as_posix() for entry in entries for path in REPO.glob(entry)}
+    missed = [path for path in ENTRY_POINTS if path not in rendered]
     assert missed == []
 
 

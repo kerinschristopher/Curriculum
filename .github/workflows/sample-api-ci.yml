@@ -82,7 +82,7 @@ jobs:
           else
             echo "app=false" >> "$GITHUB_OUTPUT"
           fi
-          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/[^/]+-ruleset\.json$|Acme/platform/apps/sample-api/overlays/[^/]+/kustomization\.yaml$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
+          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/[^/]+-ruleset\.json$|Acme/platform/apps/(sample-api/)?overlays/[^/]+/kustomization\.yaml$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
             echo "scripts=true" >> "$GITHUB_OUTPUT"
           else
             echo "scripts=false" >> "$GITHUB_OUTPUT"
@@ -218,6 +218,7 @@ jobs:
           set -euo pipefail
           for dir in Acme/platform/apps/sample-api/base \
                      Acme/platform/apps/sample-api/overlays/* \
+                     Acme/platform/apps/overlays/* \
                      Acme/platform/infrastructure/overlays/*; do
             echo "== $dir"
             kubectl kustomize "$dir" > /dev/null
