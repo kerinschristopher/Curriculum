@@ -31,6 +31,9 @@ GUARDED = [
     "Acme/apps/sample-api/Dockerfile.test",
     "Acme/infra/github/trusted-branches-ruleset.json",
     "Acme/infra/github/main-protect-ruleset.json",
+    "Acme/platform/apps/sample-api/overlays/dev/kustomization.yaml",
+    "Acme/platform/apps/sample-api/overlays/stage/kustomization.yaml",
+    "Acme/platform/apps/sample-api/overlays/prod/kustomization.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap

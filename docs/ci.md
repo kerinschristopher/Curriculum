@@ -149,7 +149,7 @@ allows, and the gaps left open, are in `docs/iam.md` ("GitHub-side controls").
 1. Merge to `main` and wait for a green `sample-api-ci` run. GHCR then has `sha-<short>` for the merge commit.
 2. Tag that commit and push the tag: `git tag v0.2.0 <commit> && git push origin v0.2.0`.
 3. `release-tag` adds `0.2.0` to the same image. If the commit has no `sha-*` image (not on `main`, or its run failed), the job fails and says so. If it fails on a digest mismatch, the release tag was already pushed: delete that package version (Packages > sample-api > versions), fix the cause and re-run the job.
-4. Point the overlays' `images[].newTag` at the release in a PR. Nothing deploys automatically yet (Flux arrives in Module 8).
+4. Point the overlays' `images[]` at the release in a PR: set `newTag` to the release, and `digest` to its digest from `docker buildx imagetools inspect ghcr.io/kerinschristopher/sample-api:0.2.0 --format '{{.Manifest.Digest}}'`. Change both lines together: the runtime pulls by digest, so a new `newTag` with the old `digest` still runs the old image. Nothing deploys automatically yet (Flux arrives in Module 8).
 
 The first push needs a one-time manual setting: in the `sample-api` package's settings, under "Manage Actions access", give the
 `Curriculum` repository the **Write** role. Without it, `push` fails with a 403.
@@ -289,7 +289,7 @@ Fix the Terraform; don't skip the policy.
 | What went wrong | Roll back by |
 |---|---|
 | A bad app change merged | Revert the PR. CI builds, scans and publishes a new `sha-*` image. Releases are untouched until you tag |
-| A bad release is deployed | Move the overlays' `newTag` back to the previous release in a PR. Every release tag stays in GHCR |
+| A bad release is deployed | Move the overlays' `newTag` and `digest` back to the previous release in a PR (both lines, as in "Releasing an image", step 4). Every release tag stays in GHCR |
 | A bad infrastructure change was applied | Revert the PR. The merge produces a new plan to undo it, which you approve like any other. Old state versions are kept in the versioned S3 bucket if you need to inspect them |
 | An apply failed halfway | Terraform releases the lock and state records what was done. Fix forward in a PR, or revert |
 | A runner died mid-apply and the lock is still held | From WSL: `terraform force-unlock <lock id>` in `Acme/infra/terraform/environments/dev` (the ID is in the error message). Only once you're sure no apply is running |
