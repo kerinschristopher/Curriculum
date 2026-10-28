@@ -86,7 +86,7 @@ allows, and the gaps left open, are in `docs/iam.md` ("GitHub-side controls").
 
 | Job | Needs / runs when | Permissions | Does |
 |---|---|---|---|
-| `changes` | not on tags | `contents: read` | Decides whether `Acme/apps/sample-api/`, `Acme/platform/`, this workflow or one of the image scripts Module 7 adds (`oci-platform-layout.sh`, `push-oci.sh`) changed (`app`), and whether a file a test in `.github/scripts/tests` reads changed (`scripts`). Both are tested there. A new branch or force-push (no usable base) runs everything |
+| `changes` | not on tags | `contents: read` | Decides whether `Acme/apps/sample-api/`, `Acme/platform/`, Flux's bootstrap manifests (Acme/infra/bootstrap/, Module 8), this workflow or one of the image scripts Module 7 adds (`oci-platform-layout.sh`, `push-oci.sh`) changed (`app`), and whether a file a test in `.github/scripts/tests` reads changed (`scripts`). Both are tested there. A new branch or force-push (no usable base) runs everything |
 | `lint` | app changed | `contents: read` | gofmt, `go vet ./...`, golangci-lint v2.14.0, on the Go version in `go.mod`. Restores the Go build cache first (see "Caching") |
 | `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases, with a Go build cache per version |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |

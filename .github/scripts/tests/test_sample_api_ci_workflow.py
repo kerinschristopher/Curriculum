@@ -33,6 +33,19 @@ GUARDED = [
     "Acme/infra/github/main-protect-ruleset.json",
 ]
 
+# One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
+# manifests (Module 8), this workflow and the
+# scripts on the image's build, scan and push path. A change to any one alone must run lint,
+# test, build-scan and push, not just scripts-test. Scripts are listed before they exist (L9a-7).
+APP_PATHS = [
+    "Acme/apps/sample-api/main.go",
+    "Acme/platform/apps/sample-api/base/deployment.yaml",
+    ".github/workflows/sample-api-ci.yml",
+    ".github/scripts/oci-platform-layout.sh",
+    ".github/scripts/push-oci.sh",
+    "Acme/infra/bootstrap/kustomization.yaml",
+]
+
 
 @pytest.fixture(scope="module")
 def filters():
@@ -50,18 +63,6 @@ def test_scripts_filter_covers_guarded_files(filters):
     # grep -E and Python's re agree on what these regexes use: ^ $ ( | ) and \.
     missed = [path for path in GUARDED if not re.search(filters["scripts"], path)]
     assert missed == []
-
-
-# One path per prefix in the app filter: the app's code, its manifests, this workflow and the
-# scripts on the image's build, scan and push path. A change to any one alone must run lint,
-# test, build-scan and push, not just scripts-test. Scripts are listed before they exist (L9a-7).
-APP_PATHS = [
-    "Acme/apps/sample-api/main.go",
-    "Acme/platform/apps/sample-api/base/deployment.yaml",
-    ".github/workflows/sample-api-ci.yml",
-    ".github/scripts/oci-platform-layout.sh",
-    ".github/scripts/push-oci.sh",
-]
 
 
 def test_app_filter_covers_app_paths(filters):
