@@ -1,0 +1,23 @@
+# The Flux installation the Operator builds and keeps running (docs/design/module-8-gitops-flux.md §1).
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+  annotations:
+    # Never pruned: if this file left Git, Flux would otherwise uninstall itself.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  distribution:
+    version: "2.10.0"
+    registry: ghcr.io/fluxcd
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
+  sync:
+    kind: GitRepository
+    url: https://github.com/kerinschristopher/Curriculum.git
+    ref: refs/heads/main
+    path: ./Acme/infra/bootstrap

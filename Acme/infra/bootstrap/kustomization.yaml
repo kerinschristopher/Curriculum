@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Listed by name, so the Helm values file is never applied as a manifest (design doc F6).
+# flux-operator.yaml and the values ConfigMap come in step 6.
+resources:
+  - flux-instance.yaml
+  - platform.yaml

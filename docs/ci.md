@@ -86,11 +86,11 @@ allows, and the gaps left open, are in `docs/iam.md` ("GitHub-side controls").
 
 | Job | Needs / runs when | Permissions | Does |
 |---|---|---|---|
-| `changes` | not on tags | `contents: read` | Decides whether `Acme/apps/sample-api/`, `Acme/platform/`, this workflow or one of the image scripts Module 7 adds (`oci-platform-layout.sh`, `push-oci.sh`) changed (`app`), and whether a file a test in `.github/scripts/tests` reads changed (`scripts`). Both are tested there. A new branch or force-push (no usable base) runs everything |
+| `changes` | not on tags | `contents: read` | Decides whether `Acme/apps/sample-api/`, `Acme/platform/`, Flux's bootstrap manifests (`Acme/infra/bootstrap/`, Module 8), this workflow or one of the image scripts Module 7 adds (`oci-platform-layout.sh`, `push-oci.sh`) changed (`app`), and whether a file a test in `.github/scripts/tests` reads changed (`scripts`). Both are tested there. A new branch or force-push (no usable base) runs everything |
 | `lint` | app changed | `contents: read` | gofmt, `go vet ./...`, golangci-lint v2.14.0, on the Go version in `go.mod`. Restores the Go build cache first (see "Caching") |
 | `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases, with a Go build cache per version |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |
-| `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays and the infrastructure overlays |
+| `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays, the infrastructure overlays and the apps entry points (`Acme/platform/apps/overlays/*`, Module 8) |
 | `scripts-test` | `.github/scripts/`, any workflow file in `.github/workflows/`, a ruleset JSON in `Acme/infra/github/` or a sample-api `Dockerfile` changed: every file a test there reads, so a change to one alone can't skip the test that would catch it | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`, with a throwaway `registry:3` service container (pinned by digest) for the release-tag tests. `REQUIRE_REGISTRY=1` makes a missing registry a failure, not a skip. Runs every branch of `pick-rescan-images.sh` and `release-tag.sh`, including ones the daily rescan and the once-per-release job have never hit. Not a `build-scan` dependency |
 | `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). Caches the image layers and the Go build cache inside the build, but not Trivy (see "Caching"). On `push` to `main` only, uploads the tarball (1 day) |
 | `push` | `push` to `main`, after build-scan | `contents: read`, `packages: write` | Downloads the scanned tarball, `docker load`, logs in to GHCR with the run's `GITHUB_TOKEN`, pushes `ghcr.io/kerinschristopher/sample-api:sha-<short>`. Never checks out code, so what's pushed is what was scanned |
@@ -149,7 +149,7 @@ allows, and the gaps left open, are in `docs/iam.md` ("GitHub-side controls").
 1. Merge to `main` and wait for a green `sample-api-ci` run. GHCR then has `sha-<short>` for the merge commit.
 2. Tag that commit and push the tag: `git tag v0.2.0 <commit> && git push origin v0.2.0`.
 3. `release-tag` adds `0.2.0` to the same image. If the commit has no `sha-*` image (not on `main`, or its run failed), the job fails and says so. If it fails on a digest mismatch, the release tag was already pushed: delete that package version (Packages > sample-api > versions), fix the cause and re-run the job.
-4. Point the overlays' `images[].newTag` at the release in a PR. Nothing deploys automatically yet (Flux arrives in Module 8).
+4. Point the overlays' `images[]` at the release in a PR: set `newTag` to the release, and `digest` to its digest from `docker buildx imagetools inspect ghcr.io/kerinschristopher/sample-api:0.2.0 --format '{{.Manifest.Digest}}'`. Change both lines together: the runtime pulls by digest, so a new `newTag` with the old `digest` still runs the old image. Nothing deploys automatically yet (Flux arrives in Module 8).
 
 The first push needs a one-time manual setting: in the `sample-api` package's settings, under "Manage Actions access", give the
 `Curriculum` repository the **Write** role. Without it, `push` fails with a 403.
@@ -289,7 +289,7 @@ Fix the Terraform; don't skip the policy.
 | What went wrong | Roll back by |
 |---|---|
 | A bad app change merged | Revert the PR. CI builds, scans and publishes a new `sha-*` image. Releases are untouched until you tag |
-| A bad release is deployed | Move the overlays' `newTag` back to the previous release in a PR. Every release tag stays in GHCR |
+| A bad release is deployed | Move the overlays' `newTag` and `digest` back to the previous release in a PR (both lines, as in "Releasing an image", step 4). Every release tag stays in GHCR |
 | A bad infrastructure change was applied | Revert the PR. The merge produces a new plan to undo it, which you approve like any other. Old state versions are kept in the versioned S3 bucket if you need to inspect them |
 | An apply failed halfway | Terraform releases the lock and state records what was done. Fix forward in a PR, or revert |
 | A runner died mid-apply and the lock is still held | From WSL: `terraform force-unlock <lock id>` in `Acme/infra/terraform/environments/dev` (the ID is in the error message). Only once you're sure no apply is running |

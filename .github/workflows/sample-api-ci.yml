@@ -77,12 +77,12 @@ jobs:
           fi
           changed="$(git diff --name-only "$base...$head")"
           echo "$changed"
-          if grep -qE '^(Acme/apps/sample-api/|Acme/platform/|\.github/workflows/sample-api-ci\.yml$|\.github/scripts/(oci-platform-layout|push-oci)\.sh$)' <<<"$changed"; then
+          if grep -qE '^(Acme/apps/sample-api/|Acme/platform/|Acme/infra/bootstrap/|\.github/workflows/sample-api-ci\.yml$|\.github/scripts/(oci-platform-layout|push-oci)\.sh$)' <<<"$changed"; then
             echo "app=true" >> "$GITHUB_OUTPUT"
           else
             echo "app=false" >> "$GITHUB_OUTPUT"
           fi
-          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/[^/]+-ruleset\.json$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
+          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/[^/]+-ruleset\.json$|Acme/infra/bootstrap/[^/]+\.yaml$|Acme/platform/apps/(sample-api/)?overlays/[^/]+/kustomization\.yaml$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
             echo "scripts=true" >> "$GITHUB_OUTPUT"
           else
             echo "scripts=false" >> "$GITHUB_OUTPUT"
@@ -218,7 +218,9 @@ jobs:
           set -euo pipefail
           for dir in Acme/platform/apps/sample-api/base \
                      Acme/platform/apps/sample-api/overlays/* \
-                     Acme/platform/infrastructure/overlays/*; do
+                     Acme/platform/apps/overlays/* \
+                     Acme/platform/infrastructure/overlays/* \
+                     Acme/infra/bootstrap; do
             echo "== $dir"
             kubectl kustomize "$dir" > /dev/null
           done
