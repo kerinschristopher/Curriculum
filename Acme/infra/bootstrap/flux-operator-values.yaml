@@ -1,0 +1,4 @@
+# Helm values for the Flux Operator chart 0.62.1. Read by `helm install` (docs/design/module-8-gitops-flux.md §2).
+# Not a Kubernetes object, so kustomization.yaml never lists it as a resource.
+image:
+  tag: v0.62.1@sha256:1d09a3f96524d0895fb11e8072d84a3dd029cecdec0f869efa371be6b001469c

@@ -38,6 +38,8 @@ GUARDED = [
     "Acme/platform/apps/overlays/dev/kustomization.yaml",
     "Acme/platform/apps/overlays/stage/kustomization.yaml",
     "Acme/platform/apps/overlays/prod/kustomization.yaml",
+    "Acme/infra/bootstrap/flux-operator-values.yaml",
+    "Acme/infra/bootstrap/flux-instance.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
@@ -59,7 +61,10 @@ ENTRY_POINTS = [
     "Acme/platform/apps/overlays/dev",
     "Acme/platform/apps/overlays/stage",
     "Acme/platform/apps/overlays/prod",
+    "Acme/infra/bootstrap",
+    "Acme/platform/infrastructure/overlays/kind",
 ]
+
 
 
 @pytest.fixture(scope="module")

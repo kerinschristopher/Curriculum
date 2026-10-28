@@ -1,0 +1,15 @@
+# The Flux installation the Operator builds and keeps running (docs/design/module-8-gitops-flux.md §1).
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.10.0"
+    registry: ghcr.io/fluxcd
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
