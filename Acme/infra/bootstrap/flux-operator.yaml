@@ -1,0 +1,45 @@
+# The Operator's own Helm release, handed to Flux (design doc D2b (c)): the Operator docs' "Automating Flux Operator
+# upgrades" example (operator-migration.md, v0.62.1) with an exact version instead of "*", values from the ConfigMap
+# kustomization.yaml generates from flux-operator-values.yaml, and no serviceAccountName (so the HelmRelease runs as
+# helm-controller). The HelmRelease adopts the release helm install made (same name and namespace) and reverts hand changes.
+# An Operator upgrade is one PR: the version here and the image tag@digest in flux-operator-values.yaml.
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: flux-operator
+  namespace: flux-system
+  annotations:
+    # Never pruned: deleting this ResourceSet deletes the HelmRelease, and that uninstalls the Operator.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  inputs:
+    - version: "0.62.1"
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: << inputs.provider.name >>
+        namespace: << inputs.provider.namespace >>
+      spec:
+        interval: 30m
+        url: oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator
+        layerSelector:
+          mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+          operation: copy
+        ref:
+          semver: << inputs.version | quote >>
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: << inputs.provider.name >>
+        namespace: << inputs.provider.namespace >>
+      spec:
+        interval: 30m
+        releaseName: << inputs.provider.name >>
+        chartRef:
+          kind: OCIRepository
+          name: << inputs.provider.name >>
+        valuesFrom:
+          - kind: ConfigMap
+            name: flux-operator-values
+            valuesKey: values.yaml
