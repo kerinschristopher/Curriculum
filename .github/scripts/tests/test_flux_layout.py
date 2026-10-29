@@ -107,3 +107,19 @@ def test_flux_instance_is_never_pruned():
     # If flux-instance.yaml left Git, prune would make Flux uninstall itself.
     annotations = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["metadata"].get("annotations", {})
     assert annotations.get("kustomize.toolkit.fluxcd.io/prune") == "disabled", annotations
+
+
+def test_operator_values_reach_flux_as_one_configmap():
+    # helm install and Flux's HelmRelease read the same file, so the tag@digest lives in one place (D2b).
+    kustomization = yaml.safe_load((BOOTSTRAP / "kustomization.yaml").read_text())
+    generators = {g["name"]: g for g in kustomization.get("configMapGenerator", [])}
+    assert "flux-operator-values" in generators, kustomization
+    generator = generators["flux-operator-values"]
+    # valuesFrom reads a ConfigMap in the HelmRelease's own namespace.
+    assert generator.get("namespace") == "flux-system", generator
+    assert generator.get("files") == ["values.yaml=flux-operator-values.yaml"], generator
+    options = generator.get("options", {})
+    # The HelmRelease names the ConfigMap inside a ResourceSet template, which kustomize doesn't rewrite.
+    assert options.get("disableNameSuffixHash") is True, generator
+    # helm-controller acts on a values change at once instead of at its 30m interval.
+    assert options.get("labels", {}).get("reconcile.fluxcd.io/watch") == "Enabled", generator
