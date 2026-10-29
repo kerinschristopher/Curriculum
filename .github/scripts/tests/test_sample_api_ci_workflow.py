@@ -105,6 +105,27 @@ def test_kustomize_job_renders_every_entry_point():
     assert missed == []
 
 
+def kustomize_step(name):
+    """The `kustomize` job's step called `name`."""
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["kustomize"]["steps"]
+    names = [s.get("name") for s in steps]
+    assert name in names, names
+    return steps[names.index(name)]
+
+
+def test_kustomize_job_validates_schemas():
+    # D7: kubeconform checks what the render step wrote against Kubernetes', Flux's and the
+    # Operator's schemas. Each download is pinned by version and checksum, as Conftest is.
+    step = kustomize_step("Validate manifests against their schemas")
+    env = step.get("env", {})
+    for tool in ("KUBECONFORM", "FLUX", "OPERATOR"):
+        assert re.fullmatch(r"\d+\.\d+\.\d+", str(env.get(f"{tool}_VERSION", ""))), env
+        assert re.fullmatch(r"[0-9a-f]{64}", str(env.get(f"{tool}_SHA256", ""))), env
+    assert step["run"].count("sha256sum -c") == 3, step["run"]
+    # -strict rejects fields a schema doesn't define, such as a misspelt `intervall`.
+    assert "-strict" in step["run"], step["run"]
+
+
 def build_options():
     """The `with:` of build-scan's docker/build-push-action step."""
     steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["build-scan"]["steps"]
