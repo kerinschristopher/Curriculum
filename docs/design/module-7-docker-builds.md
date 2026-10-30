@@ -621,7 +621,6 @@ All phases are commits on their PR's branch, each at a green point, so one `git 
 - `docs/ci.md`: required checks (`:48-74`), the `sample-api-ci.yml` jobs table (`:76-107`), Run times (`:259-280`)
 - `docs/ci-timings.csv` (new): every timing sample
 - `docs/design/module-6-ci-cd.md`: the Module 6 design; the multi-arch deferral (`:383`, `:874`)
-- `docs/design/module-7-handoff.md`: decisions 1-4a, findings G1-G3, carry-overs C1-C8
 - `journal/lessonslearned.md:25`: pattern 5, "a check whose job never started proves nothing"
 - `.github/scripts/tests/`: the structural and script tests (pattern: `test_terraform_apply_workflow.py`)
 - PR #9 review (bgblackmore): https://github.com/kerinschristopher/Curriculum/pull/9

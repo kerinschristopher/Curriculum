@@ -1,0 +1,569 @@
+# Module 8: GitOps with Flux
+## Design Document
+
+| Field | Value |
+|---|---|
+| **Author** | CK |
+| **Date** | October 2026 |
+| **Status** | Approved |
+| **Affected Repo** | `kerinschristopher/Curriculum` (public). Branches `mod8` (PR 1) and `mod8-image-automation` (PR 2) (D8 = B). New: `Acme/infra/bootstrap/` (the `FluxInstance`, the Operator's `ResourceSet` and Helm values, and the cluster's Flux objects), `Acme/platform/apps/overlays/{dev,stage,prod}/`, `.github/scripts/tests/test_flux_layout.py`, `docs/bootstrap.md`. Changed: `.github/workflows/sample-api-ci.yml` (`changes`, `kustomize`), `.github/scripts/tests/test_sample_api_ci_workflow.py`, `Acme/platform/apps/sample-api/overlays/{dev,stage,prod}/kustomization.yaml` (digest pins), `docs/ci.md`, `docs/iam.md`, `docs/ci-timings.csv`, `docs/design/module-7-docker-builds.md`. `docs/curriculum.md` is never edited (CK, 2026-10-28) |
+| **Scope** | CK (sole maintainer and admin); the local kind cluster `sample-api`; anyone opening a PR into `main` (the required `kustomize` check validates more, D7); bgblackmore (reviewer and collaborator). No AWS and no ruleset changes |
+
+---
+
+## Introduction / Purpose
+
+This document designs the Module 8 deliverable (`docs/curriculum.md:362-401`). The Flux Operator installs Flux into the kind cluster from `Acme/infra/bootstrap/`, and Flux watches `platform/` for dev, stage and prod, which all run in the one cluster (D1). Flux then manages the Operator too (D2b). Drift gets reverted, the cluster is rebuilt from Git, and `sample-api`'s dev image updates itself. All of it is written up in `docs/bootstrap.md` (`:399`). It is CK's plan for one week, aiming at the curriculum's 8-12 hours (`:13`; see the budget warning under Phases).
+
+The first attempt was retired on 2026-10-27 and isn't used here. This doc was rebuilt from the curriculum and the repo. **Decision numbers start again at D1; the retired doc's D-numbers don't carry over.** All decisions are made: D2 on 2026-10-27, and D1, D2b and D3-D8 on 2026-10-28 (CK). Q9 was decided on 2026-10-29 (Open Questions).
+
+## Backlog Story Number / Incident Number
+
+**Curriculum Module 8, week 9** (no tracker ID). `mod8` is at `9b91d4f` (the kind node image pin), one commit over `origin/main` `73f217b` (the PR #15 merge), and isn't pushed. Carry-overs from bgblackmore's reviews of PRs #5, #6, #9 and #15, and the Module 7 follow-ups CK folded into this module, are tracked in Findings.
+
+## What Problem Are We Trying to Solve?
+
+| Today | So |
+|---|---|
+| Every manifest reaches the cluster by hand: `kubectl apply -k` of the infrastructure overlay and three app overlays (`sample-api-cluster.yaml:4`; the dev Deployment's field manager is `kubectl-client-side-apply`, checked 2026-10-27) | Nothing notices or reverts drift. Git and the cluster can disagree silently |
+| A release needs a hand-edited overlay PR, then a hand apply (`docs/ci.md:148-152`: "Nothing deploys automatically yet") | The delay from commit to running includes a person remembering |
+| A rebuild is remembered commands. The 2026-10-26 rebuild lost all three Ingresses to a webhook race (`journal/lessonslearned.md`, 2026-10-26 row 1) | "The cluster is no longer special" (`:379`) isn't true yet |
+
+## Background
+
+Short primers, only for what this design uses.
+
+- **Push vs pull (`:366`).** Push: something outside the cluster (a person, a CI job) holds cluster credentials and runs `kubectl apply`. Pull: an agent inside the cluster fetches the desired state from Git and applies it. Pull keeps the credentials inside the cluster, and each cluster serves itself, so it scales to many clusters.
+- **Reconciliation and drift (`:369-370`).** A controller repeats: read the desired state, read the actual state, close the gap. That's Module 4's loop (`:231`). Drift is any gap. The **interval** is how often the loop runs, so it caps both how long drift lasts and how long a merged change waits.
+- **Flux's controllers (`:367`)**, each a Deployment in namespace `flux-system`. *source-controller* fetches a Git repository (a `GitRepository` object) and stores each revision as an **artifact**. *kustomize-controller* builds a path in that artifact with Kustomize and applies the result, again every interval. *helm-controller* does the same for Helm releases (Module 9, `:429`). *notification-controller* sends and receives events (alerts, webhooks). *image-reflector-controller* lists a registry's tags (`ImageRepository`) and picks the newest allowed one (`ImagePolicy`). *image-automation-controller* writes that pick into YAML in Git and pushes a commit (`ImageUpdateAutomation`).
+- **Two meanings of "Kustomization".** `kustomization.yaml` (`kustomize.config.k8s.io`) is Kustomize's file: what to build. A Flux `Kustomization` (`kustomize.toolkit.fluxcd.io/v1`) is an object in the cluster: "build this path from this source every N minutes and apply it". A Flux Kustomization points at a directory that holds a `kustomization.yaml`.
+- **Server-side apply and the inventory.** The API server records which *manager* set each field. Flux applies as `kustomize-controller` and reverts edits to the fields it manages (F9). It keeps an **inventory** of what it applied. Objects it never applied aren't in it, so Flux neither reverts nor deletes them (`:370`).
+- **Bootstrap (`:368`).** Flux can't pull itself into an empty cluster, so the first install is always a hand step from outside Git. Here it's two commands: `helm install` the Operator, then `kubectl apply` one `FluxInstance`. Git supplies everything after that, including later changes to Flux and to the Operator. To survive a wipe you repeat those two commands.
+- **Flux Operator (D2 = D).** A separate controller, by ControlPlane, that installs, configures and upgrades Flux. You describe the Flux you want in one object, a `FluxInstance`: the version, the registry, which controllers, and optionally which repo and path to sync. The Operator builds Flux's manifests from copies inside its own image, with every controller image pinned by digest (F19), and applies them. Change the `FluxInstance` and it upgrades or reconfigures Flux; delete it and it uninstalls Flux but leaves the workloads Flux deployed (F20). There's one per cluster, named `flux`, in the Operator's namespace (F7).
+- **Helm (only what D2 = D uses).** A **chart** is a package of templated Kubernetes manifests plus default settings. **Values** are the settings you pass in (`--values file.yaml`) to fill the templates. A **release** is one installed copy of a chart: it has a name and a namespace, and Helm keeps its history in a Secret there. `helm install` creates a release, `helm upgrade` changes it, and `helm template` prints what would be applied without touching the cluster. Charts can be stored in a container registry and addressed as `oci://…`. Module 9 uses charts through Flux (`:410`, `:429`); this week uses the `helm` command once per cluster, and after that Flux takes over (next bullet).
+- **HelmRelease and ResourceSet (D2b = (c)).** A `HelmRelease` is Flux's object for "keep this chart installed, at this version, with these values". helm-controller acts on it, and an `OCIRepository` fetches the chart. A `ResourceSet` is the Operator's templating object. It holds a list of `inputs` (here one: `version: "0.62.1"`) and a list of `resources` with `<< inputs.version >>` placeholders, which the Operator fills in and applies (F22). Here it generates the chart's `OCIRepository` and the Operator's own `HelmRelease`.
+- **CRDs.** A CustomResourceDefinition adds an object kind, such as `Kustomization`. Objects of that kind can't be created until the CRD is ready, which matters on a first apply (U1).
+- **Tags and digests.** A tag (`0.1.3`) is a label that can be moved. A digest (`sha256:…`) names exact bytes. With `image: name:tag@sha256:…` the runtime pulls by digest, so a moved tag can't change what runs.
+- **Semver ranges.** `>=0.1.0` means any version from 0.1.0 up; `2.10.x` means any 2.10 patch; `2.10.0` alone means exactly that version. A tool given a range picks the highest version that fits.
+- **Deploy key.** An SSH key registered on one repository, read-only or with write access. It isn't a user, so rulesets apply to it: only the admin role can bypass (`test_branch_rulesets.py:61-69`).
+
+## Design Goals / Requirements
+
+### What Is It?
+
+```
+CK, once per cluster (§2): helm install flux-operator ─► kubectl apply flux-instance.yaml
+flux-operator ── FluxInstance flux ─► Flux 2.10.0 controllers (digest-pinned) + GitRepository and Kustomization flux-system
+
+GitHub main (public; PRs only, 9 required checks)
+  │ anonymous HTTPS, polled every 1m (D3)
+  ▼
+source-controller: GitRepository flux-system ──► artifact
+  ▼
+kustomize-controller (applies with cluster-admin)
+  ├─ Kustomization flux-system    → Acme/infra/bootstrap: the FluxInstance itself, the ResourceSet flux-operator
+  │                                   and its values ConfigMap, plus the four below
+  │      ResourceSet flux-operator ─(Operator)─► OCIRepository (chart 0.62.1) + HelmRelease flux-operator
+  │                                              └─ helm-controller adopts and upgrades the helm-installed release (D2b)
+  ├─ Kustomization infrastructure → Acme/platform/infrastructure/overlays/kind (wait: true)
+  ├─ Kustomization apps-dev       → Acme/platform/apps/overlays/dev   (dependsOn: infrastructure)
+  │                                   ├─ sample-api dev overlay
+  │                                   └─ image-automation objects (PR 2)
+  ├─ Kustomization apps-stage     → Acme/platform/apps/overlays/stage (dependsOn: infrastructure)
+  └─ Kustomization apps-prod      → Acme/platform/apps/overlays/prod  (dependsOn: infrastructure)
+
+GHCR sample-api (public) ─► ImageRepository (5m) ─► ImagePolicy (semver >=0.1.0)
+                                                        ▼
+image-automation-controller ── GitRepository flux-image-updates (ssh, write deploy key, D6)
+  └─ pushes branch flux/image-updates ─► CK opens a PR into main (D5) ─► CI ─► merge ─► back to the top
+```
+
+| ID | Requirement |
+|---|---|
+| FR1 | Flux 2.10.0 runs in the kind cluster, installed by the Flux Operator from `Acme/infra/bootstrap/` (`:392`, `:399`). CK prefers that Flux's generated manifests stay out of the repo (D2: they come from inside the Operator image). After the first install, Flux manages the Operator through a `HelmRelease` (D2b = (c)) |
+| FR2 | Flux watches one infrastructure entry point and three apps entry points, `apps/overlays/{dev,stage,prod}`, all in the one kind cluster (`:399`, D1 = F) |
+| FR3 | Infrastructure is Ready before any app object is applied (journal 2026-10-26 row 1) |
+| FR4 | A merged overlay change reaches the cluster with no hand apply (`:393`) |
+| FR5 | A `kubectl edit` of a field Flux manages is reverted within one interval (`:394`) |
+| FR6 | A new semver release in GHCR produces a commit on `flux/image-updates` that bumps dev's image; once it reaches `main`, dev runs it (`:395`, D5 = A). Stage and prod move only by a hand PR (D4 = D) |
+| FR7 | Following `docs/bootstrap.md` rebuilds the cluster from nothing (`:399`) and recovers a deleted `flux-system` (`:524`), and both have been done for real |
+| FR8 | The required `kustomize` check renders every new entry point and schema-validates it with kubeconform, with no new required check (D7 = B) |
+| NFR1 | The merge gate on `main` stays whole: no ruleset or bypass change, and `test_branch_rulesets.py` and `test_merge_gate_ruleset.py` pass unmodified |
+| NFR2 | No credential in Git. Reading needs none (D3); the one write credential is scoped to this repo and can't push `main` or `mod*` (D6) |
+| NFR3 | Every image this design deploys is pinned by digest (D4 = D). The Operator's is in its Helm values, and Flux's come from the Operator (F19). `sample-api` is pinned as `newTag` + `digest` in all three env overlays: dev's is written by the automation, and stage's and prod's by hand |
+| NFR4 | TDD with the order visible, one behaviour per commit, and artifacts (run IDs, Flux revisions, event times) rather than prose (C1, C4) |
+| NFR5 | Target: 8-12 hours (`:13`). ⚠️ **Budget warning:** the Phases total about 13.5 h. This is a warning, not a block; what drives it and what could be deferred are under Phases |
+
+**Curriculum mapping and deviations**
+
+| Curriculum line | How this design delivers it | Deviation, and why |
+|---|---|---|
+| `:366` pull vs push | Primer; the cluster pulls from `main` | — |
+| `:367` the controllers | Primer. The Operator's four default controllers run from P4 (F7); P8 adds the two image controllers by editing the `FluxInstance`'s `components` | — |
+| `:368` bootstrap, surviving a wipe | `helm install` plus one `FluxInstance` apply, then Flux manages `Acme/infra/bootstrap/`, the `FluxInstance` included; P6 deletes the cluster and rebuilds it | Shown one step removed: the Operator does the installing (an accepted cost of D2 = D) |
+| `:369` interval and change latency | Defaults table; latency measured in P5, P10 and P11 | — |
+| `:370`, `:394` drift; `kubectl edit`, watch the revert | P5: a `kubectl edit` is reverted; an object Flux didn't create is left alone | — |
+| `:371`, `:395` image automation | Components §4; P8-P11 | The last step into `main` is a PR CK opens: `main` takes changes only through PRs (`main-merge-gate-ruleset.json:15-27`) |
+| `:375-381` the lens | "Why Do We Have It?"; Quality Attributes | — |
+| `:392` bootstrap into kind, pointing at `platform/` | P4 | "Bootstrap" here is the process (`:368`). The `flux bootstrap` command isn't used (D2 = D) |
+| `:393` change an overlay, push, watch | P7 and P10: a dev overlay change merged in PR 2 | "Push" means merging a PR: `main` refuses direct pushes, even an admin's (`docs/iam.md:370`) |
+| `:399` `infra/bootstrap/` with the Flux install manifests | `Acme/infra/bootstrap/` holds the `FluxInstance` (version, components, sync) and the Operator's Helm values | The install manifests are referenced, not stored: the ~8,600 generated lines come from inside the Operator image (CK's preference) |
+| `:399` `platform/…/overlays/${env}` | `Acme/platform/apps/overlays/{dev,stage,prod}` (new, one Flux Kustomization each) and `Acme/platform/infrastructure/overlays/kind` (exists) | (1) **One cluster plays three environments**, where `:399` says "the cluster's environment": the three namespaces `sample-api-{dev,stage,prod}` already share it. (2) Infrastructure's `${env}` is `kind`: the dev, stage and prod infrastructure overlays are for EKS (`overlays/kind/kustomization.yaml:4`), and PR #5's fix keeps kind-only settings out of them (D1 = F) |
+| `:399` `docs/bootstrap.md` | Written from P6's real rebuild, shipped in PR 2 (P10) | — |
+| `:410`, `:429` Helm (Module 9, week 10) | The `helm` CLI installs the Operator in P4 and on every rebuild; then a `HelmRelease`, generated by a `ResourceSet`, takes the release over | Helm, and Flux's `HelmRelease` (`:429`), arrive a week early. CK accepted this with D2 = D and D2b = (c) |
+| `:9` minikube; `:50-51` layout | kind; `Acme/infra/bootstrap/`, `Acme/platform/` | Repo conventions: kind since Module 4 (`:250` and `:392` say kind themselves); everything under `Acme/` since Module 1 |
+| `:67` "`infra/` is what Terraform owns" | `Acme/infra/bootstrap/` is installed by CK once (Helm and one apply), then applied by Flux | Terraform owns AWS, not the local cluster. Flux owns its own `FluxInstance` and the Operator's `ResourceSet` |
+| `:50` `bootstrap/` holds "initial secrets" | No secret in Git: the one secret (the deploy key, PR 2) is created by hand (D6 = A) | SOPS-encrypted secrets would go here; deliberately left for Module 10 (D6) |
+
+### If It Is an Existing Design, How Does It Work Before New Design?
+
+- **Cluster** (read-only checks, 2026-10-27): kind v0.33.0 with node v1.35.8 (`sample-api-cluster.yaml:11`), up since 2026-10-26 17:46 UTC. ingress-nginx runs `controller:v1.15.1@sha256:594c…`. sample-api dev, stage and prod run 1/1, 2/2 and 3/3 pods, all `0.1.3@sha256:d3427a1e…` (re-checked 2026-10-28), the same digest as GHCR's `0.1.3` (F24). There are three Ingresses at `localhost`, no `flux-system` namespace and no Flux CRDs. `flux check --pre` passes.
+- **Overlays.** The dev, stage and prod infrastructure overlays use the AWS ingress component; the `kind` overlay uses the kind one. Both components are remote URLs (`components/ingress-nginx*/kustomization.yaml:8`). Apps have only per-app overlays (`Acme/platform/apps/sample-api/overlays/*`). `Acme/platform/apps/{base,overlays}/` exist locally but are empty, so git doesn't track them.
+- **CI.** The `kustomize` job renders the sample-api base and overlays and the infrastructure overlays (`sample-api-ci.yml:204-224`). The `app` filter covers `Acme/platform/` but not `Acme/infra/bootstrap/` (`:80`).
+- **Releases.** A `v*` git tag makes `release-tag` add `X.Y.Z` to the `sha-*` image `main` already built (`.github/scripts/release-tag.sh`). Each overlay pins `newTag: 0.1.3` (`overlays/dev/kustomization.yaml:10-12`).
+- **Gate.** `main-merge-gate` (`24832716`): PRs only, 9 required checks, admin bypass on PRs only. `main-protect` (`25760562`) and `trusted-branches` (`24627971`, `mod*` only). No ruleset covers any other branch or any tag.
+
+### Why Do We Have It? / Why Should We Have It?
+
+- **A balancing loop for deployment (`:375`).** The desired state (Git) is the goal, the cluster is the stock, and Flux is the flow that closes the gap. Merges change the goal; drift and wipes drain the stock; each reconcile refills it.
+- **Delays you can name.** Poll interval plus apply time for a merge; the Kustomization interval for drift; tag → scan → bump → PR → merge for a release. The human PR step is the longest delay, and it's there on purpose: it's the review.
+- **An audit log and an undo (`:377-378`).** Every change is a commit, and a revert commit rolls back.
+- **Leverage (`:381`).** A rebuild becomes "create the cluster, install one chart, apply one file". That's a change to the system's structure rather than a tweak to one of its numbers.
+
+## Assumptions / Prerequisites
+
+| # | Assumption / prerequisite | Basis | Affects |
+|---|---|---|---|
+| A1 | The repo and the GHCR package stay public | `gh api repos/kerinschristopher/Curriculum` gives `private: false`; the package is `visibility: public` (2026-10-27) | D3, R8 |
+| A2 | One kind cluster | `kind get clusters` → `sample-api` | D1 |
+| A3 | Flux 2.10.0, CK's choice. The node image was pinned for it | `sample-api-cluster.yaml:10` | Other Designs |
+| A4 | WSL has kind v0.33.0, kubectl v1.36.0 (with kustomize v5.8.1), flux v2.10.0, docker 29.8.1, gh, jq and the pytest venv `~/.venvs/iam-tests`. It has no helm, kubeconform, yq or standalone kustomize. **Helm is now a prerequisite** (D2 = D): v4.3.1, installed once in P2 into `~/.local/bin` (on `PATH`, where `conftest` already lives), checksum checked (§2) | `which` and `--version` (2026-10-27); `echo $PATH` | P2, P4, P6. kubeconform runs in CI (D7); a local copy is optional (one-time install) |
+| A5 | The node container keeps etcd on a Docker volume mounted at `/var`, with restart policy `on-failure`, so a reboot should keep the cluster | `docker inspect sample-api-control-plane` | Not yet seen after a reboot (U6) |
+| A6 | No bootstrap until this doc is approved | CK | P4 |
+
+## Findings
+
+| # | Finding | Evidence | Implication |
+|---|---|---|---|
+| F1 | Flux v2.10.0 was published 2026-10-26 15:37 UTC. It supports Kubernetes 1.35 (≥1.35.2), 1.36 (≥1.36.1) and 1.37 (≥1.37.0). Breaking changes: notification `Alert`/`Provider` move to `v1`, and controller RBAC is hardened | `gh release view v2.10.0 -R fluxcd/flux2` | The cluster (1.35.8) qualifies |
+| F2 | 2.10.0 ships source-controller v1.10.1, kustomize-controller v1.10.1, helm-controller v1.7.1, notification-controller v1.10.0, image-reflector v1.3.0, image-automation v1.3.0 and source-watcher v2.3.1. Flux's own manifests reference every image **by tag only** | `flux install --export`; the release's `install.yaml` | D2 B, C and F need digests added by hand; E can't have them |
+| F3 | `flux install --export` prints 6,657 lines (11 CRDs, 4 Deployments); with the two image controllers, 7,966 lines (14 CRDs), 87% of them CRD schemas | Local run, stdout only | D2 B's footprint |
+| F4 | The `flux-operator` chart is at `oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator`; latest **0.62.1** (appVersion `v0.62.1`; OCI manifest `sha256:1135514a…`). It needs Helm 3.8+ and Kubernetes 1.30+. It installs into the release's namespace (`.Release.Namespace`; the docs use `flux-system`), installs and upgrades its 4 CRDs from `templates/crds.yaml` (`installCRDs: true`) and keeps them on uninstall (`helm.sh/resource-policy: keep`). `rbac.create: true` binds cluster-admin to its service account | `controlplaneio-fluxcd/charts` `charts/flux-operator/` at `5be89be` (2026-10-27): `Chart.yaml:2-4`, `README.md:15-29`, `values.yaml:66-81`, `:129-131`; GHCR registry API (tags list, manifest HEAD) | D2 D; §2 |
+| F5 | **The tag trick works on paper.** `templates/deployment.yaml:121` is `image: "{{ .Values.image.repository }}:{{ .Values.image.tag \| default .Chart.AppVersion }}"`, and `values.schema.json` types `tag` as a plain string with no pattern, so `tag: v0.62.1@sha256:1d09a3f9…` renders `ghcr.io/controlplaneio-fluxcd/flux-operator:v0.62.1@sha256:1d09a3f9…`, a valid `name:tag@digest`. `1d09a3f9…` is the `v0.62.1` image index digest. Kustomize's `images:` with `newTag` + `digest` also renders `name:tag@sha256:…` (used by D4 = D) | Template and schema source (F4's commit); GHCR manifest HEAD and `docker buildx imagetools inspect`; scratch `kubectl kustomize` render (2026-10-27). A real `helm template` is P2's | D4; §2 |
+| F6 | Flux's OCI manifests artifact `ghcr.io/fluxcd/flux-manifests:v2.10.0` is `sha256:d5f5922b…`: one layer holding only `gotk-components.yaml` (8,662 lines, 7 Deployments, images by tag), no `kustomization.yaml`. An `OCIRepository`'s `ref.digest` "takes precedence over all other fields"; a Flux Kustomization's `spec.images` can set digests; with no `kustomization.yaml`, Flux generates one, and then every YAML file under the path must be a Kubernetes manifest. GitHub releases are mutable (`immutable: false` for Flux v2.10.0 and Operator v0.62.1) | Registry API GETs of the manifest and layer; [OCIRepository `#digest-example`](https://fluxcd.io/flux/components/source/ocirepositories/#digest-example); [Kustomization `#images`, `#generating-a-kustomizationyaml-file`](https://fluxcd.io/flux/components/kustomize/kustomizations/); `gh release view --json isImmutable` | D2 F; §1's explicit `kustomization.yaml` |
+| F7 | Operator **v0.62.1** (2026-10-27) is the latest; v0.62.0 (2026-10-26) "Add Flux 2.10 compatibility" (#1082), and v0.62.1 embeds Flux 2.10.0. `FluxInstance` (`fluxcd.controlplane.io/v1`) must be named `flux`, in the Operator's namespace. `distribution.version` is "a valid semver range or an exact version", so `2.10.0` pins exactly; `registry` is required too. `components` default to source, kustomize, helm and notification; the image controllers are added by listing them. `sync` needs `kind`, `url`, `ref` and `path`; `pullSecret` is optional. The `cluster` defaults (`kubernetes`, network policy on, `cluster.local`) need nothing for kind. Downgrading a **minor** version is refused ("reinstall needed"). `spec` rejects unknown fields. AGPL-3.0 | `gh release list/view`; operator repo at `v0.62.1`: `config/data/flux-images/VERSION`, `docs/api/v1/fluxinstance.md:11-13`, `:174-217`, `:316-337`, `:498-506`, `:819-845`, `internal/builder/semver.go:18-41`, `:90-153`; `crd-schemas.tar.gz` (`fluxinstance-fluxcd-v1.json`: `additionalProperties: false`) | D2 D; §1, §2; R2 |
+| F8 | The community Helm chart `flux2-2.19.1` (latest) ships Flux 2.9.5 | Its `Chart.yaml` at that tag | Other Designs |
+| F9 | kustomize-controller corrects drift on every reconcile with a server-side apply; `kubectl edit` changes to fields it manages are reverted. `prune` deletes only what's in its inventory. `deletionPolicy` is `MirrorPrune` (default), `Delete`, `WaitForTermination` or `Orphan`; `Orphan` "leave[s] the managed resources when the Kustomization is deleted" and has nothing to do with `prune`. `--no-remote-bases` defaults to `false` (`main.go:126`, v1.10.1) | fluxcd.io Kustomization docs (`#deletion-policy`); source | Defaults; R4 |
+| F10 | kstatus (Flux's health check) counts a `LoadBalancer` Service healthy once it has a cluster IP. The kind ingress Service is `LoadBalancer` with `EXTERNAL-IP <pending>` | `cli-utils` `core.go` `serviceConditions`; `kubectl get svc -n ingress-nginx` | `wait: true` won't hang on kind |
+| F11 | ingress-nginx's two admission Jobs have `ttlSecondsAfterFinished: 0`: they delete themselves once done, and none are live | Render of `overlays/kind`; `kubectl get jobs -n ingress-nginx` | U3, R7 |
+| F12 | ingress-nginx is archived (best-effort maintenance ended March 2026). controller-v1.15.1 (2026-03-19) supports Kubernetes 1.31-1.35 | `gh api repos/kubernetes/ingress-nginx` gives `archived: true`; the README's support table | R1 |
+| F13 | kind v0.33.0 (2026-08-26) lists `kindest/node:v1.35.8@sha256:07b2536e…`, the pin in `sample-api-cluster.yaml:11`. Its default is v1.37.0 | Release notes | — |
+| F14 | `main` refuses direct pushes, even an admin's; `mod*` is admin-only; no ruleset covers any other branch or any tag | `docs/iam.md:370`; live rulesets (GET 2026-10-27) | D5, D6, R3 |
+| F15 | `ImageUpdateAutomation` (`image.toolkit.fluxcd.io/v1`) requires `git.commit.author.email`. A `push.branch` that differs from the checkout branch is created from it and overwritten on each run. Setters `:tag` and `:digest` exist; `:digest` needs `digestReflectionPolicy` `IfNotPresent` or `Always`. The semver policy skips tags that don't parse (`internal/policy/semver.go`, v1.3.0), so `sha-*` tags are ignored | fluxcd.io image docs; source | D4, D5; no bump loop (§4) |
+| F16 | A PR opened by a workflow with `GITHUB_TOKEN` starts its `pull_request` runs in an "approval-required state": someone with write access must click "Approve workflows to run". A PAT or App token avoids that | GitHub docs, "Triggering a workflow" | D5 B |
+| F17 | `require_extra_approval_for_unattributed_changes` applies only "when Copilot opens a pull request without a human collaborator", and only when a non-zero approval count is required | GitHub REST docs (repository rules) | K3; no effect on PRs CK opens |
+| F18 | Validation tools: kubeconform v0.8.0 (2026-06-04, Apache-2.0, `CHECKSUMS`), whose default schema repo has Kubernetes 1.35.0 strict schemas. Flux and the Operator publish `crd-schemas.tar.gz`: Flux's Kustomization schema sets `spec.additionalProperties: false`, and the Operator's bundle (sha256 `4b6093d2…`, listed in `flux-operator_0.62.1_checksums.txt`) holds `fluxinstance-fluxcd-v1.json`. flux-schema v0.17.0 (2026-10-23, weekly releases) is what the curriculum's example repo (`:387`) now uses | `gh release view`; `gh release download`; `jq` on the schemas | D7 |
+| F19 | **Flux's Deployments, as the Operator renders them, are pinned by digest.** Its `build` step reads `flux-images/v2.10.0/upstream-alpine.yaml` (the variant for registry `ghcr.io/fluxcd`), which lists all 7 images as `newTag` + `digest`, and writes them into the generated `kustomization.yaml`. The 7 digests equal GHCR's today. On an error it falls back to tags only and logs "falling back to extracting images from manifests". The digests show in `status.components`, never in a PR | Operator `v0.62.1`: `internal/controller/fluxinstance_controller.go:440-451`; `internal/builder/images.go:129-190` (registry → variant at `:135-148`); `internal/builder/templates.go:45-54`; `config/data/flux-images/v2.10.0/upstream-alpine.yaml`; `docker buildx imagetools inspect ghcr.io/fluxcd/<name>:<tag>` for all 7 | NFR3, D4; P2(a) checks `registry`; P4 checks live |
+| F20 | **Sync, self-management and deletion.** `sync` generates `GitRepository flux-system` (interval = `sync.interval`, default `1m`; no `secretRef` without `pullSecret`) and `Kustomization flux-system` with `interval: 10m0s`, `prune: true` and no `deletionPolicy`. The docs say to "optionally, place the FluxInstance YAML manifest" in the synced directory, and recommend upgrading the Operator "using GitOps" through a `HelmRelease`, their example wrapped in a `ResourceSet`. Deleting the `FluxInstance` deletes the controllers, strips the finalizers from every Flux object, then deletes Flux's objects and CRDs; workloads stay, and so does the namespace (annotated `fluxcd.controlplane.io/prune: disabled`). The Operator fetches, builds, then applies, so a build error changes nothing | Operator `v0.62.1`: `internal/builder/templates.go:398-408`, `:425-479`; `docs/guides/operator/operator-migration.md:129-180`; `docs/guides/operator/operator-install.md:209-215`; `internal/controller/fluxinstance_uninstaller.go:24-112`; `fluxinstance_controller.go:157`, `:187`, `:232` | §1-§3; D2b; Defaults; R6, R10 |
+| F21 | Helm **v4.3.1** (2026-10-15) is the latest. v3.22.1 shipped the same day, but Helm 3's security fixes end 2026-11-11. The Linux amd64 sha256 is `0403a88a…`; the release notes and `get.helm.sh`'s `.sha256sum` file agree. Helm 4.3.1's `install` defaults to `--server-side`; `--wait` alone means the "watcher" strategy; `--take-ownership` adopts existing objects; a chart can be addressed by digest (`oci://…@sha256:…`) | `gh release list/view -R helm/helm`; `curl https://get.helm.sh/helm-v4.3.1-linux-amd64.tar.gz.sha256sum`; [Helm 4 released](https://helm.sh/blog/helm-4-released); [helm install](https://helm.sh/docs/helm/helm_install/); [registries](https://helm.sh/docs/topics/registries/) | A4; §2 |
+| F22 | **`ResourceSet` (`fluxcd.controlplane.io/v1`).** `spec.inputs` is a list of key-value sets, used in `spec.resources` as `<< inputs.name >>` (Go templates with `<< >>` delimiters; `quote` recommended for strings). Every input set also has `inputs.provider.name`/`.namespace`, the `ResourceSet`'s own. The Operator applies the results with its own service account unless `spec.serviceAccountName` is set, and re-applies every `reconcileEvery` (default `1h`). Deleting the `ResourceSet`, or dropping an object from it, deletes the generated objects. The Operator docs' "Automating Flux Operator upgrades" example generates an `OCIRepository` (`ref.semver: << inputs.version \| quote >>`, input `version: "*"`) and a `HelmRelease` (`releaseName`, `serviceAccountName: << inputs.provider.name >>`, `chartRef`, **no values**). The Operator's schema keeps `spec.resources` items as `x-kubernetes-preserve-unknown-fields`, so a schema check can't see inside them. An `OCIRepository` `ref` takes `tag`, `semver` (a Masterminds range, which an exact `0.62.1` satisfies) or `digest` (which beats both) | Operator `v0.62.1`: `docs/guides/operator/operator-migration.md:138-180`, `operator-install.md:209-215`, `docs/api/v1/resourceset.md:128-146`, `:304-364`, `:694-716`, `:1009-1020`, `:1044-1053`, `:1073-1089`; `resourceset-fluxcd-v1.json` in `crd-schemas.tar.gz` (sha256 `4b6093d2…`, matches the checksums file); source-controller v1.10.1 `docs/spec/v1/ocirepositories.md:478-566` | D2b; §2; D7's gap |
+| F23 | **How a `HelmRelease` adopts a CLI release.** helm-controller v1.7.1 looks up `releaseName` in `storageNamespace` (default: the `HelmRelease`'s namespace; `targetNamespace` defaults the same way). If it finds a release but the `HelmRelease` has no history, the state is `Unmanaged` ("found existing release in storage"), and the action is an **upgrade**: that's the adoption. A later hand `helm upgrade` also reads as `Unmanaged` and gets upgraded back. Upgrades default to server-side apply `auto` (following the release's previous method; Helm 4.3.1's CLI installs server-side, F21), which forces conflicts. Without `serviceAccountName`, a `HelmRelease` runs as helm-controller, which Flux 2.10.0 binds to `cluster-admin` (`cluster-reconciler`). Deleting a `HelmRelease` **uninstalls the release** unless it's suspended. The chart names the Operator's service account `flux-operator` (the release's full name) and binds it to `cluster-admin` | helm-controller `v1.7.1`: `internal/reconcile/state.go:110-143`, `atomic_release.go:436-442`, `internal/controller/helmrelease_controller.go:465-471`, `docs/spec/v2/helmreleases.md:383-428`, `:538-560`, `:765-768`, `:1502-1508`; flux2 `v2.10.0` `manifests/rbac/reconciler.yaml`; chart `templates/serviceaccount.yaml`, `_helpers.tpl:56-58`, `admin-clusterrole.yaml:18-22` (F4's commit) | D2b; §2; U9; R5, R10 |
+| F24 | GHCR's `sample-api:0.1.3` is `sha256:d3427a1e427955c9605d44cdb9b7dfe2744f4a639b243048ccda66806e1b4b17`, the `imageID` of every running dev, stage and prod pod | `docker buildx imagetools inspect ghcr.io/kerinschristopher/sample-api:0.1.3 --format '{{.Manifest.Digest}}'`; `kubectl get pods` in each `sample-api-*` namespace, `imageID` by jsonpath (2026-10-28) | D4 = D; P2's fix |
+
+**Carry-overs from bgblackmore's reviews**
+
+| # | Item | Source | Status in Module 8 |
+|---|---|---|---|
+| C1, C4 | One behaviour per commit, so the history is the TDD evidence; leave artifacts, not prose | PR #9 | Applied: one behaviour per phase step (P0's doc follow-ups in one `docs` commit, K5 in its own); every claim quotes a run ID, a Flux revision or an event time |
+| C2, C3 | Record the orchestration (tool, instruction, input, result); a review by the tool that wrote the code is a filter, not a gate | PR #9 | Applied: the Review and Orchestration Log (L1-L3). Planned: a separate hostile reviewer before each PR opens (P3, P10), told to break FR3, FR5, FR7 and NFR1-NFR3 |
+| C5 | Ask which path has never executed | PR #9 | Applied: the first bootstrap (P4), the rebuild and the namespace drill (P6), the first automation PR into `main` (P11) |
+| C6 | Label characterisation (tests-after) tests | PR #9 | Applied: tests that pass on arrival are labelled and shown red by a recorded mutation |
+| C7 | Prove that a PR with a failing required check is blocked | PR #9 | Planned (P3, needs OK): a throwaway PR turns `kustomize` red. `mergeStateStatus` is predicted to read `BLOCKED` (Module 7's open Q3); if it doesn't, the evidence is the **Required** label plus `GET rules/branches/main`. That proves it for anyone without the bypass; the admin still sees an override (`docs/iam.md:354`) |
+| C8 | Open a PR only when it's ready: the review request is the contract | PR #9 | Applied: each PR opens after its phases and C3 |
+| C9, C10 | "The trigger and the trust policy move together" (no wildcards); don't loosen rules to unblock yourself | PR #5 | Applied: the sync branch (`main`) and the push branch are fixed values, tested against the ruleset files (P2, P8); NFR1, with relaxing the gate only under Other Designs |
+| C11 | Tests assert behaviour and cross-file invariants, "not string-presence theater" | PR #15 | Applied: `test_flux_layout.py` checks that paths exist, the ordering, the pins, that markers name a real policy, and the sync and push branches against the rulesets |
+| C12 | "A check you have never seen fail is not a check" | PR #5 | Applied: every new check gets a red (P1-P3, P8) |
+| C13 | Docs describe what exists, written last | PR #6 | Applied: `docs/bootstrap.md` is written from P6's real rebuild |
+| C14 | `amd64` hard-coded in three coupled places (finding 2) | PR #15 | Not Module 8: stays with Module 7's M4 (postponed) |
+
+**Module 7 follow-ups (CK folded them into PR 1)**
+
+| # | Item | Where (stale as of 2026-10-27) | Plan |
+|---|---|---|---|
+| K1 | "Pending the live apply" and "Not yet created" → live: `main-protect` is ruleset `25760562` (created 2026-10-23 23:23 UTC) and `trusted-branches` covers `mod*` only | `docs/ci.md:81-83`; `docs/iam.md:106-109`, `:324-327`, `:334`; `module-7-docker-builds.md:8`, `:206` | P0 |
+| K2 | Verification row: PR #15 went `BLOCKED` → `CLEAN`; its merge's rule suite `4695546538` is `pass`, where the earlier merges the rule-suites API lists for the past month are `bypass` | `docs/iam.md:368` | P0 |
+| K3 | Module 7's Q8 answered: the setting only affects PRs that Copilot opens (F17). PR #15 was blocked by the old `update` rule | `module-7-docker-builds.md:680` | P0 |
+| K4 | Cold sample, run `40039625472` (`73f217b`): `build-scan` 79 s, `Build image` 27 s, 0 `CACHED` lines, Go cache "not found" | `docs/ci.md:326-334`; `docs/ci-timings.csv` (no row yet) | P0 |
+| K5 | `style(test)`: move `APP_PATHS` (`:55-64`) up next to `GUARDED` (`:22-34`), a pure move | `.github/scripts/tests/test_sample_api_ci_workflow.py` | P0, own commit |
+| K6 | "First CI apply … Not yet run" is stale: run `38492865526` attempt 1 failed, attempt 2 succeeded. Also "PR #15, open" in the Module 7 doc's status. The same words in `docs/curriculum.md:357` stay: CK keeps the curriculum untouched (2026-10-28) | `docs/iam.md:372`; `module-7-docker-builds.md:8` | P0 |
+
+**Unverified (each with the part that's unknown)**
+
+| # | Unknown | Settled by |
+|---|---|---|
+| U1 | Whether `kubectl apply -f flux-instance.yaml` straight after `helm install --wait` finds the `FluxInstance` CRD ready, and whether `--version 0.62.1` and the values file behave as F4-F5 read | P4 (`helm template` in P2 first). If the CRD isn't ready, `docs/bootstrap.md` adds a `kubectl wait --for=condition=Established` |
+| U2 | Whether Flux adopts the hand-applied dev, stage, prod and ingress objects, and the hand-applied `FluxInstance`, without a conflict or a pod restart | P4: field managers and pod ages in all three `sample-api-*` namespaces |
+| U3 | Whether Flux re-creates the TTL-0 admission Jobs (F11) on every infrastructure reconcile, and whether `wait: true` races their deletion | P4: observe, then CK picks a response (Q9) |
+| U4 | What happens to a field Git doesn't set (an annotation added with `kubectl annotate`) at the next reconcile | P5 prediction question |
+| U5 | `kubectl delete namespace flux-system` also deletes the Operator, Helm's release record, the `ResourceSet` and the `HelmRelease` `flux-operator`. Unknown: which finalizers run before their controllers stop (the namespace may stick in Terminating; the `HelmRelease`'s finalizer tries to uninstall the Operator release, F23), and whether `helm install` adopts the chart's leftover cluster-scoped objects (expected: same release name and namespace; else `--take-ownership`, F21) | P6 drill |
+| U6 | Whether the cluster survives a reboot (A5) | After CK's next reboot: `docker ps`, `kubectl get nodes` |
+| U7 | Whether GitHub throttles an anonymous Git fetch every minute | `GitRepository` Ready conditions, P4-P11 |
+| U8 | Whether the in-cluster kustomize-controller v1.10.1 fetches the ingress components' remote URLs (`components/ingress-nginx*/kustomization.yaml:8`) the way local `kubectl kustomize` (kustomize v5.8.1) does (journal patterns 1-2) | P4: `infrastructure` Ready. If it fails, the fallback is a `GitRepository` on ingress-nginx's repo at tag `controller-v1.15.1`, whose `deploy/static/provider/kind/` has a `kustomization.yaml` |
+| U9 | **The takeover is untried.** It's read from source, never run: helm-controller should find release `flux-operator` in `flux-system`, read it as `Unmanaged` and upgrade it (F23), with no field-manager conflict and with the same values. Unknown: whether it does so cleanly, and whether the Operator pod restarts (helm-controller adds its own labels). This happens at P4 and again after every rebuild (P6) | P4: `HelmRelease` `flux-operator` Ready; `helm history -n flux-system flux-operator` shows revision 2, made by Flux. **Fallback (checked against the source, untried):** `helm uninstall flux-operator -n flux-system` (**OK**). Its CRDs stay (`helm.sh/resource-policy: keep`, F4), so the `FluxInstance` and `ResourceSet` objects stay, and the Flux controllers aren't part of the release, so they keep running. helm-controller then finds no release ("Absent") and installs a fresh one; if the `HelmRelease` is stuck failed, run `flux reconcile helmrelease flux-operator -n flux-system --reset`. **Correction to the earlier walk-through:** this works only because the `HelmRelease` runs as helm-controller (Defaults). The docs' example impersonates the `flux-operator` service account, and the uninstall deletes that account, so helm-controller couldn't install the release |
+| U10 | Whether Kustomize builds the `flux-operator-values` ConfigMap under exactly that name, with key `values.yaml`, and whether the `HelmRelease` reads the same `tag@digest` that `helm install` used (the hash suffix is turned off because Kustomize is expected not to rewrite a name inside a `ResourceSet`'s templates: its name references cover known fields only. Unverified) | P2: a render shows the ConfigMap name; P4: `helm get values -n flux-system flux-operator` shows `v0.62.1@sha256:1d09a3f9…` |
+
+## Quality Attributes
+
+| Quality Attribute | Source | Stimulus | Artifact | Env | Response | Measure |
+|---|---|---|---|---|---|---|
+| Change latency | Engineer | Merges an overlay change | `GitRepository`, `apps-dev` | kind, `main` | Applied with no hand apply | Merge time → `lastAppliedRevision` equals the merge SHA. Expected ≤ 2 min with a 1 min poll (P10) |
+| Drift correction | Anyone with cluster access | `kubectl edit`s a field Flux manages | `apps-dev` | kind | Reverted | Edit → revert event: ≤ 10 min (one interval), about 0 after `flux reconcile` (P5) |
+| Recoverability | Operator | Deletes the cluster, or `flux-system` | `docs/bootstrap.md`, `Acme/infra/bootstrap/`, the Operator chart | New kind cluster; WSL with Helm; GHCR reachable | Every Kustomization Ready; dev serves `/health` | Wall clock from `kind create` to Ready, well under the 30 minutes of `:484`. Three commands after `kind create` (§2). No credential needed, except the automation key from PR 2 on (P6) |
+| Image automation | CI | Publishes `0.1.4` | `ImagePolicy`, `ImageUpdateAutomation` | GHCR, `main` | A bump commit on `flux/image-updates`; after its PR merges, dev runs `0.1.4` | The pod's `imageID` digest equals GHCR's `0.1.4` digest; time of each hop (P11) |
+| Integrity: merge gate | Engineer | Opens a PR with a red required check | `main-merge-gate` | PR into `main` | Blocked, except through the logged admin bypass | `mergeStateStatus` `BLOCKED` (predicted: Module 7's Q3), or else the **Required** label plus `GET rules/branches/main` (P3, C7) |
+| Least privilege | Holder of the write key | Pushes to `main` or `mod*` | Rulesets | GitHub | Refused | The GH013 text for both (P9) |
+| Supply chain | Upstream, or anyone who can push a tag | Moves an Operator, Flux or `sample-api` tag | `flux-operator-values.yaml`; the digests inside the Operator image; the three env overlays | kind | The runtime keeps the pinned bytes | Every `flux-system` image and every `sample-api` pod's image carries `@sha256:` (P4). The Operator's and `sample-api`'s digests are reviewed in a PR and tested (P2); a promotion PR shows stage or prod getting dev's exact digest. Flux's digests are read from `status.components` and checked against F19 (P4), never seen in a PR |
+
+## Architecture
+
+### Overview
+
+The diagram under "What Is It?" is the overview. In short: CK installs the Operator with Helm and applies one `FluxInstance`; the Operator installs Flux; Flux then pulls `main` and applies `Acme/infra/bootstrap/` (the `FluxInstance` and the Operator's `ResourceSet` included), then infrastructure, then the three app environments, and re-applies them every interval. helm-controller takes over the Operator's Helm release. In PR 2, image automation proposes dev image bumps through the normal gate.
+
+### Context
+
+| Boundary | Who changes it | What enforces it |
+|---|---|---|
+| `Acme/infra/bootstrap/` | A merged PR; CK by hand for the first install and for recovery | The merge gate. After the first apply, Flux applies what's merged |
+| The Operator (Helm release `flux-operator`) | CK's `helm install`, for the first install and each rebuild; after that, a merged PR (the `ResourceSet` input and the values file) | helm-controller, through the `HelmRelease`: a hand `helm upgrade` is upgraded back (F23). P2 tests the pins |
+| `Acme/platform/` | A merged PR (CK, a collaborator, or an automation bump) | The merge gate; Flux applies it |
+| The cluster | kustomize-controller and the Operator (both cluster-admin); CK's kubeconfig | Drift is reverted every interval |
+| GHCR `sample-api` | CI's `push` and `release-tag` jobs (`packages: write`) | Unchanged (`docs/iam.md`) |
+| `flux/image-updates` | The write key, and anyone with write access | Nothing. It only matters through a PR into `main` |
+
+**Credentials.** Reading needs none. Writing uses one deploy key: Secret `flux-image-updates` in `flux-system`, created by hand, with the private key kept in WSL (`~/.ssh/flux-image-updates`, mode 600) for recovery (D6). The Operator runs as cluster-admin (`rbac.create: true`, F4), as kustomize-controller and helm-controller do (F23). It applies the `ResourceSet` with its own service account, and the `HelmRelease` runs as helm-controller (Defaults). CI's credentials don't change (`docs/ci.md`, `docs/iam.md`).
+
+### Components
+
+#### 1. Layout and entry points (D1)
+
+```
+Acme/infra/bootstrap/
+  kustomization.yaml         resources: flux-instance.yaml, flux-operator.yaml, platform.yaml. An explicit list, so the values
+                             file isn't applied as a manifest (F6). configMapGenerator: flux-operator-values from
+                             values.yaml=flux-operator-values.yaml, no hash suffix, label reconcile.fluxcd.io/watch: Enabled (U10)
+  flux-instance.yaml         FluxInstance flux: version 2.10.0 (exact), registry ghcr.io/fluxcd, the 4 default components
+                             (+ the 2 image controllers in PR 2); sync: GitRepository, https://github.com/kerinschristopher/Curriculum.git,
+                             refs/heads/main, path ./Acme/infra/bootstrap (its own directory, so Flux manages it); no pullSecret (D3)
+  flux-operator.yaml         ResourceSet flux-operator (the docs' example, F22): input version "0.62.1" (exact, not "*");
+                             OCIRepository ref.semver << inputs.version >>; HelmRelease releaseName flux-operator, valuesFrom
+                             ConfigMap flux-operator-values, no serviceAccountName (Defaults)
+  platform.yaml              Kustomization infrastructure → ./Acme/platform/infrastructure/overlays/kind
+                             Kustomizations apps-dev, apps-stage, apps-prod → ./Acme/platform/apps/overlays/<env>
+                             (each dependsOn infrastructure)
+  flux-operator-values.yaml  Helm values for the Operator: image.tag v0.62.1@sha256:1d09a3f9…, read by `helm install`
+                             and, through the ConfigMap, by the HelmRelease: one source for both
+Acme/platform/apps/overlays/{dev,stage,prod}/
+  kustomization.yaml         ~5 lines each: resources: ../../sample-api/overlays/<env> (dev also lists image-automation.yaml in PR 2)
+Acme/platform/apps/sample-api/overlays/{dev,stage,prod}/kustomization.yaml
+                             images: newTag 0.1.3 + digest sha256:d3427a1e… (F24); dev's gain the automation markers in PR 2
+```
+
+Nothing is deleted before P4. The stage and prod objects keep running, and Flux adopts them along with dev's (U2).
+
+#### 2. Installing Flux (D2 = D, D2b, D4)
+
+**One-time: Helm in WSL** (P2). It's pinned to v4.3.1 with the checksum from Helm's release notes (F21), and installed into `~/.local/bin`, so no `sudo` is needed. If the checksum line doesn't print `OK`, the chain stops:
+
+```bash
+cd "$(mktemp -d)" && curl -fsSLO https://get.helm.sh/helm-v4.3.1-linux-amd64.tar.gz \
+  && echo "0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b  helm-v4.3.1-linux-amd64.tar.gz" | sha256sum -c - \
+  && tar -xzf helm-v4.3.1-linux-amd64.tar.gz linux-amd64/helm && install -m 0755 linux-amd64/helm ~/.local/bin/helm \
+  && helm version --short
+```
+
+**First install (P4) and every rebuild** (cluster writes, **OK**):
+
+```bash
+cd /mnt/c/Work/GitHub/Curriculum && helm install flux-operator oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator \
+  --version 0.62.1 --namespace flux-system --create-namespace --values Acme/infra/bootstrap/flux-operator-values.yaml --wait \
+  && kubectl apply -f Acme/infra/bootstrap/flux-instance.yaml \
+  && kubectl -n flux-system wait fluxinstance/flux --for=condition=Ready --timeout=10m
+```
+
+- **What happens next.** The Operator builds Flux 2.10.0 from its embedded copy, with each controller pinned by digest (F19; they show in `kubectl -n flux-system get fluxinstance flux -o jsonpath='{.status.components}'`, never in a PR). It applies that build and generates `GitRepository` and `Kustomization` `flux-system` (F20). That Kustomization applies `Acme/infra/bootstrap/`, which includes the `FluxInstance`, so from then on a change to Flux (version, components) is a PR.
+- **The takeover (D2b = (c)).** The same apply creates the `ResourceSet` and the values ConfigMap. The Operator fills in the `ResourceSet` and applies an `OCIRepository` for chart 0.62.1 and the `HelmRelease` `flux-operator`. helm-controller finds the release `helm install` made, with the same name in the same namespace, reads it as `Unmanaged` and upgrades it with the same chart and values: that's the adoption (F23, U9). `helm history -n flux-system flux-operator` then shows revision 2. Every rebuild repeats this.
+- **Upgrades.** Flux: change `distribution.version` in a PR, once an Operator release embeds that version; a patch revert works, a minor downgrade is refused (F7, R2). The Operator: **one PR**, with no hand `helm upgrade`. It changes the `ResourceSet`'s `version` input and the values file's `tag@digest` (P2's test keeps them in step), plus `--version` in `docs/bootstrap.md` for rebuilds. helm-controller then upgrades the release. The digest comes from `docker buildx imagetools inspect ghcr.io/controlplaneio-fluxcd/flux-operator:v0.62.1 --format '{{.Manifest.Digest}}'`. A bad Operator release is undone by reverting the PR: helm-controller is a Flux controller, so it keeps working even when the Operator doesn't.
+
+#### 3. Order, drift and recovery
+
+- `infrastructure` has `wait: true`, and each of `apps-dev`, `apps-stage` and `apps-prod` has `dependsOn: infrastructure`, so no Ingress is applied before the ingress webhook runs (FR3). The three apps Kustomizations don't depend on each other; one environment failing doesn't hold the others back. Drift (P5): a `kubectl edit` of `replicas` is reverted; a `ConfigMap` applied by hand stays (not in the inventory); U4 is a prediction question.
+- **Rebuild:** `kind create cluster --config Acme/platform/kind/sample-api-cluster.yaml`, then §2's command block, then `flux get kustomizations --watch` until all are Ready. From PR 2 on, also re-create Secret `flux-image-updates` (D6).
+- **Deleted `flux-system` (`:524`):** this deletes the Operator and Helm's release record too. The workloads stay, because `infrastructure` and the three `apps-*` have `deletionPolicy: Orphan` (Defaults), and because the Operator strips Flux's finalizers before deleting if it gets there first (F20). Recovery is §2's command block again, once the namespace is gone (U5, R6). A deleted `FluxInstance` alone uninstalls Flux but keeps the workloads and the namespace (F20); re-applying `flux-instance.yaml` recovers.
+
+#### 4. Image automation (D4, D5, D6)
+
+- `Acme/platform/apps/overlays/dev/image-automation.yaml`, all in `flux-system`: `ImageRepository` `sample-api` (the public GHCR image, no secret); `ImagePolicy` `sample-api` (semver `>=0.1.0`, with `digestReflectionPolicy: IfNotPresent`, D4 = D); `GitRepository` `flux-image-updates` (`ssh://git@github.com/kerinschristopher/Curriculum.git` with that Secret); `ImageUpdateAutomation` (checks out `main`, pushes `flux/image-updates`, updates `./Acme/platform/apps/sample-api/overlays/dev` with the `Setters` strategy).
+- Dev's overlay gets the markers: `newTag: 0.1.3 # {"$imagepolicy": "flux-system:sample-api:tag"}`, and its `digest:` line (added in P2) gets `# {"$imagepolicy": "flux-system:sample-api:digest"}`. Stage and prod have no markers. **Promotion** is a PR that copies dev's `newTag` and `digest` lines into the stage (or prod) overlay; `apps-stage` applies it once merged.
+- **`flux/image-updates` is overwritten on every automation run** (F15), so nobody should push to it by hand. `docs/bootstrap.md` says so.
+- **No loop:** a merged bump changes `Acme/platform/`, so CI on `main` builds and pushes a new `sha-<merge>` image, but the semver policy ignores `sha-*` tags (F15).
+
+#### 5. CI validation (D7)
+
+- The `changes` job's `app` filter gains `Acme/infra/bootstrap/`. The `scripts` filter gains the paths `test_flux_layout.py` reads (the rule in `test_sample_api_ci_workflow.py:3-5`).
+- **P2(a) reads the pins straight from the files: no render, no network** (the old URL render is gone). The digests that matter are either in the repo (the Operator's) or inside the Operator image (Flux's, F19), where no CI render can see them. So the test checks the pins themselves (P2), P4 checks them live, and a recorded `helm template` in P2 proves the chart's `image:` line once (F5).
+- The `kustomize` job also renders `Acme/infra/bootstrap` and `Acme/platform/apps/overlays/*`, then runs a new step, **"Validate manifests against their schemas"**: kubeconform v0.8.0 (sha256 checked against `CHECKSUMS`), `-strict -kubernetes-version 1.35.0`, with Flux 2.10.0's and the Operator v0.62.1's `crd-schemas.tar.gz` (the latter covers `FluxInstance` and `ResourceSet`), each checked against its release's checksums (F18).
+- **Known gap (D7):** kubeconform validates the `ResourceSet` itself, but not the `OCIRepository` and `HelmRelease` it generates, because their templates sit in a free-form field (F22). So `test_flux_layout.py` checks the `ResourceSet`'s inputs and values (P2), and P4 checks the generated objects are Ready.
+- No new job and no renamed required check. A rename would change the workflow, the ruleset JSON and the live ruleset together, timed just before a merge (Module 7's R7), and isn't worth it.
+
+#### 6. Decisions (all decided by CK)
+
+Each decision keeps its full pros/cons table and has an Open Questions row. Numbering restarts at D1: the retired doc's D-numbers don't carry over.
+
+**D1. Which environment is the kind cluster, and which paths does Flux watch?** The infrastructure overlays differ by *cluster type* (kind vs EKS), and the app overlays by *environment*.
+
+| Option | Pros | Cons |
+|---|---|---|
+| A. Apps `dev`; infrastructure the existing `kind` overlay | One new 5-line file; the dev, stage and prod infrastructure overlays stay correct for EKS (PR #5's fix); apps use the curriculum's exact path | The infrastructure path ends in `kind`, not `dev` (a listed deviation); the stage and prod app objects leave the cluster |
+| B. `dev` for both; dev's infrastructure overlay switched to the kind component | Exactly `${env}` = `dev` in both paths | Undoes PR #5's fix for dev: it would render `hostPort`, `--publish-status-address=localhost` and a 0 s grace period; a future EKS dev needs a new overlay |
+| C. `dev` for both; the env overlays drop the ingress component and the cluster's Flux `Kustomization` adds it (`spec.components`, F9) | Exact paths; keeps cluster type and environment apart | `kubectl kustomize overlays/dev` no longer shows the controller the cluster runs; three overlay edits; the choice hides inside a Flux object; more to learn this week |
+| D. A `kind` environment: a new `apps/overlays/kind` that pulls in dev, stage and prod | Keeps all three environments running, as today | Invents a fourth environment (`:31` names three); CK called the `kind` env name off-curriculum; the automation still has to pick one overlay |
+| E. Three kind clusters, one per environment | The most literal reading of "the cluster's environment" | Three installs, three sets of host ports (only one cluster can bind 80/443), and the infrastructure overlays are still EKS; several extra hours (⚠️ well over the budget) |
+| **F. Three apps entry points, `apps/overlays/{dev,stage,prod}`, in the one cluster; one Flux Kustomization each (`apps-dev`, `apps-stage`, `apps-prod`, each `dependsOn: infrastructure`); infrastructure keeps `overlays/kind`** (**chosen**) | Stage and prod keep running, now managed by Flux; builds every `apps/overlays/${env}` that `:399` describes; no invented `kind` environment; no delete at P4; promotion to stage or prod becomes a PR that Flux applies; three ~5-line files; the environments already have separate namespaces | One cluster plays three environments (a listed deviation from `:399`'s "the cluster's environment"); the infrastructure path still ends in `kind`; a change to the shared `base` reaches all three at once (R11); three Kustomizations to watch instead of one; adopting stage and prod is part of U2 |
+
+**Decided (CK, 2026-10-28): F**, because it keeps stage and prod running under Flux, invents no environment, and makes promotion a PR. Image automation stays dev-only.
+
+**D2. How is Flux installed (and so upgraded and recovered)?** **Decided (CK, 2026-10-27): D**, the Flux Operator from its own Helm chart (`flux-operator`, F4), plus a `FluxInstance` in `Acme/infra/bootstrap/`. Not the community `flux2` chart, which ships Flux 2.9.5 (F8).
+
+| Option | Pros | Cons |
+|---|---|---|
+| A. `flux bootstrap github` (or its Terraform twin, `flux_bootstrap_git`) | Flux's documented path and the curriculum's word; one command; commits Flux's manifests (`:399` taken literally) | Every rebuild or recovery needs an admin PAT and creates a new deploy key (CK's recorded rejection), including `:524`'s recovery drill and `:484`'s quickstart. It pushes to its branch, so on `main` it works only if identical files were merged first (it skips the commit when nothing changed, `bootstrap_plain_git.go:179-183`); ~6,700 generated lines; images by tag (F2) |
+| B. Commit `flux install --export` plus the sync files | Everything Flux runs is reviewed in a PR; meets `:399` literally; nothing is fetched at runtime | 6,657-7,966 generated lines (F3); an upgrade means regenerating and reviewing a huge diff. CK "much preferred" the Operator to this |
+| C. Flux's `install.yaml` by URL from a ~25-line `kustomization.yaml` that pins the images by digest | ~25 lines; every privileged image digest is visible in a PR; the same pattern as the ingress components (`components/ingress-nginx-kind/kustomization.yaml:8`); no extra component; shows "how Flux installs itself" (`:368`) directly | Everything apart from the images (CRDs, RBAC) is whatever the mutable URL serves (F6); it's fetched again on each self-reconcile, so it depends on GitHub; it always ships all 7 controllers, so `:395`'s "add" becomes "use"; an upgrade touches the URL and seven digests |
+| **D. Flux Operator (Helm chart) plus a `FluxInstance`** (**chosen**) | ~40 lines; a Flux upgrade is one version line, an Operator upgrade one `tag@digest`; Flux's controllers come pinned by digest from inside the Operator image (F19); adding the image controllers is two lines (`:395` exactly); Helm is the Operator's documented production path; uninstalling or deleting `flux-system` keeps the workloads (F20) | Helm is new this week (Module 9's tool, `:429`); the Operator isn't managed from Git after `helm install` unless D2b says so; the chart has `image.tag` but no `image.digest`, so the pin is `tag@sha256` (F5); Flux's digests never appear in a PR; one more component (4 CRDs), running as cluster-admin; AGPL-3.0; releases 0-1 days old; every rebuild repeats the Helm step; `:368` is shown one step removed |
+| E. `flux install` from the CLI, committing only the sync files | The smallest footprint; no extra component | Images by tag, so CK's digest pins are impossible; Flux can't manage itself from Git (upgrades and recovery re-run the CLI, outside review); `:399`'s install manifests aren't there |
+| F. Flux reconciles itself from its OCI manifests artifact, `ghcr.io/fluxcd/flux-manifests:v2.10.0` (`sha256:d5f5922b…`, F6): an `OCIRepository` pinned by `ref.digest`, plus a Flux Kustomization whose `spec.images` holds the seven digest pins | ~30 lines; no Helm, no Operator, Apache-2.0 only; pinned end to end: the artifact digest fixes the CRDs and RBAC, and every image digest is visible in a PR; nothing is fetched from a mutable URL; Flux's own primitives, so `:368` is shown directly | The first install, and every rebuild, still comes from the URL or the CLI before the `OCIRepository` takes over, so two install paths must agree; always all 7 controllers (`:395`'s "add" becomes "use"); an upgrade touches the tag, the artifact digest and seven image digests; OCI artifacts are another new idea this week; assembled from documented pieces rather than a documented install path, and the hand-over from the first install is untried here |
+
+CK chose **D** with its costs explained, so every con in D's row is recorded as an **accepted cost**, not an open problem: Helm a week early (`:410`, `:429`), the Operator outside Git after `helm install` (since closed by D2b = (c)), the `tag@sha256` pin (F5), Flux's digests out of PR view (F19), one more component with 4 CRDs (F4), AGPL-3.0, new releases (F7), and the Helm step on every rebuild (§2).
+
+**D2b. Who manages the Operator after `helm install`?** (Part of D2.)
+
+| Option | Pros | Cons |
+|---|---|---|
+| (a) CK by hand: `helm upgrade` with the values file from Git when a new Operator is wanted | Nothing new to learn; the version and digest still live in Git (`flux-operator-values.yaml`, tested in P2), and every rebuild installs exactly that; no extra hours | The running release isn't reconciled: a hand `helm upgrade` or rollback is neither reverted nor reviewed, and Git and the cluster can disagree until the next rebuild |
+| (b) Flux manages it: an `OCIRepository` for the chart (pinned by `ref.digest`) plus a `HelmRelease` in `Acme/infra/bootstrap/`, taking over the release `helm install` created | Operator upgrades go by PR, like Flux's own (`:377`); the Operator docs' recommended upgrade path (F20); a hand change to the release is reverted | Module 9's main topic (`HelmRelease`, `:429`) pulled into week 9; the values live twice (the file for `helm install`, the `HelmRelease` for Flux) unless a `configMapGenerator` feeds its `valuesFrom`; Flux's helm-controller then upgrades the Operator that installs Flux, so a bad Operator release is applied as soon as its PR merges (reverting the PR undoes it, R5); the takeover is untried (U9); about +1 h |
+| **(c) The docs' own pattern: a `ResourceSet` (the Operator's templating object) that generates (b)'s two objects (`operator-migration.md:138-180`, F22)** (**chosen**) | The docs recommend a `HelmRelease` for upgrades (`operator-install.md:209-215`), and this `ResourceSet` is their worked example; Operator upgrades go by PR; a hand `helm upgrade` is reverted (F23); the `ResourceSet` pattern is the one used for fleets (`:381`) | All of (b)'s cons, plus a new concept (`ResourceSet`, with `<< inputs >>` templating) for one release; the example's pins must change (below); its generated objects escape the schema check (D7's gap); the takeover is untried (U9); about +1.25 h (⚠️ budget) |
+
+**Decided (CK, 2026-10-28): (c)**, because it's the Operator docs' recommended upgrade path in their own worked form, and the Operator's upgrades then go by PR. Accepted costs: the `ResourceSet` concept this week, pins changed from the example, an untried takeover, Module 9's `HelmRelease` a week early, and the extra time. Changes from the example, as Defaults:
+- the input `version: "*"` becomes the exact `"0.62.1"`;
+- the chart pin stays `ref.semver: << inputs.version | quote >>`: an exact version is a valid range (F22), so it's still one line to change, and it matches `helm install --version 0.62.1`. `ref.digest` is the alternative (both are documented);
+- the values reach the `HelmRelease` by `valuesFrom` a ConfigMap that Kustomize generates from `flux-operator-values.yaml`, so that file stays the single source for `helm install` and Flux. Inline `values:` would put the `tag@digest` in two files;
+- `serviceAccountName` is left out, so the `HelmRelease` runs as helm-controller (cluster-admin either way, F23). The example's `flux-operator` account is deleted by a `helm uninstall`, which would break U9's fallback. **This fourth change wasn't in CK's walk-through; CK confirmed it at the final read (2026-10-28).**
+
+**D3. How does Flux read the repo?**
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Anonymous HTTPS** (**chosen**) | No secret to create, leak or re-create; a rebuild needs no credential; the `FluxInstance`'s `pullSecret` is optional (F7) | Breaks if the repo goes private (A1, R8); possible throttling (U7) |
+| B. Read-only deploy key (SSH) | Keeps working if the repo goes private | Protects nothing on a public repo; another Secret to re-create on every rebuild and a key to rotate |
+| C. GitHub App or fine-grained PAT over HTTPS | Fleet-grade, and works on a private repo | Setup. A PAT acts as CK, an admin; nothing needs protecting today |
+
+**Decided (CK, 2026-10-28): A**, because a read credential protects nothing on a public repo (going private is R8).
+
+**D4. Which images are pinned by digest?** Flux's seven come pinned by the Operator whatever is chosen here (F19).
+
+| Option | Pros | Cons |
+|---|---|---|
+| A. Everything `Acme/infra/bootstrap/` installs: the Operator image as `tag@digest` in its Helm values (F5) | The cluster-admin Operator fails closed if its tag moves | One digest to update per Operator upgrade |
+| B. A, plus dev's `sample-api` written as `tag@digest` by the automation | Also closes the moved-tag gap the write key opens (R3); each bump PR shows the exact bytes; Module 7 planned it (`module-7-docker-builds.md:613`) | One more marker plus `digestReflectionPolicy: IfNotPresent`; stage and prod stay tag-only |
+| C. Tags as shipped: the Operator by its chart's default tag | The least work | A moved Operator tag changes what runs with cluster-admin |
+| **D. B, plus the stage and prod overlays pinned as `tag@digest` by hand** (**chosen**) | Every image Flux runs fails closed on a moved tag; a promotion PR shows the exact bytes stage or prod will get; promotion is copying dev's two lines | Two more lines to copy on each promotion; a hand-copied digest can be mistyped (P2's test checks the format, not that it matches GHCR) |
+
+**Decided (CK, 2026-10-28): D**, because with D1 = F, stage and prod are managed by Flux too, so CK's reason for digest pins (a moved tag fails closed) now applies to every image Flux runs. The current pin for all three is GHCR's `0.1.3` digest (F24).
+
+**D5. How do image updates reach `main`?** `main` refuses direct pushes (F14).
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Flux pushes `flux/image-updates`; CK opens the PR** (**chosen**) | No new workflow or secret; the PR is the review point; CI runs as normal | A manual step, so a delay in the loop |
+| B. As A, plus a workflow that opens the PR (Flux's documented "auto PR") | Automatic up to the review | Its checks wait for an "Approve workflows to run" click unless it uses a PAT or App token (F16); a new workflow joins the merge gate's tests (`test_merge_gate_ruleset.py`, `GUARDED`), the kind of gate machinery CK called off-curriculum |
+| C. Dev deploys straight from `flux/image-updates` | No PR wait for dev | Dev runs commits that aren't on `main`, which splits the audit log (`:377`); anyone with write access, the key included, can put anything in dev unreviewed |
+
+**Decided (CK, 2026-10-28): A**, because `:395`'s "automatically" holds up to the PR, and the PR is the gate this repo already relies on.
+
+**D6. Which credential does the automation push with?**
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. A deploy key with write access, kept in WSL for rebuilds** (**chosen**) | Scoped to this repo; not a user, so the rulesets hold and it can't push `main` or `mod*`; no expiry; about 10 minutes to set up; a rebuild needs no GitHub step | It can push any other branch and any tag, and a `v*` tag runs `release-tag` (R3); the private key lives in the cluster and in WSL (`~/.ssh/flux-image-updates`, mode 600) |
+| A′. As A, but a fresh key per rebuild: generated, registered and loaded each time, with no copy on disk | No long-lived private key in WSL; each rebuild retires the old key | Each rebuild needs an admin step on GitHub (add the new key, delete the old one: outward actions, CK's OK), so `:484`'s quickstart needs repo admin; CK rejected D2 A partly for creating a deploy key per rebuild |
+| B. A fine-grained PAT (contents: write) | Familiar | It acts as CK, an admin who bypasses `trusted-branches`, so a leaked PAT could push `mod*`, which the AWS plan role trusts (`docs/iam.md:104-106`); it expires |
+| C. A GitHub App | Short-lived tokens, narrow permissions, fleet-grade | The most setup (about 45 minutes, all outward actions); Flux documents App credentials for fetching, but pushing with them is unverified here |
+| A + SOPS: the key's Secret committed encrypted with SOPS and age, decrypted by Flux (a Kustomization's `decryption`) | The Secret lives in Git (`:50`'s "initial secrets"); a rebuild re-creates it from Git | With one secret it only swaps which key is hand-loaded on a rebuild (the age key instead of the deploy key); two new tools (sops, age) |
+
+**Decided (CK, 2026-10-28): A**, because it's the narrowest credential that works, and the rulesets already stop it at `main` and `mod*`. Private key in WSL at `~/.ssh/flux-image-updates`, mode 600. CK's note: "SOPS (with age, via Flux's Kustomization `decryption`) was considered and deliberately not used at this scale. With one secret, it only swaps which key is hand-loaded on a rebuild (the age key instead of the deploy key) and adds two tools. SOPS is likely to be integrated in Module 10 (`:433-460`), alongside Sealed Secrets and External Secrets. `:50` describes `bootstrap/` as holding 'initial secrets'; that's where SOPS-encrypted secrets would go." (Module 10 names External Secrets and Sealed Secrets, `:438`, `:440`; SOPS isn't named there, so "likely" is CK's plan.)
+
+**D7. How does CI validate the new manifests?** Every option runs inside the required `kustomize` job.
+
+| Option | Pros | Cons |
+|---|---|---|
+| A. Render only (extend the loop) | No new tool | A misspelled Flux or `FluxInstance` field renders fine and fails only in the cluster |
+| **B. Render, then kubeconform with Flux's and the Operator's schemas** (**chosen**; CK's step name) | Catches unknown fields in Flux objects, the `FluxInstance` and the `ResourceSet` before merge; a stable tool | A new pinned download in CI, plus two schema bundles (seconds); the Kubernetes core schemas are fetched from GitHub |
+| C. Render, then flux-schema | What the curriculum's example repo uses now (F18) | v0.x with weekly releases; its schema catalogue is fetched at runtime; `FluxInstance` coverage unchecked |
+| D. Server-side dry-run against a throwaway kind cluster in CI | The most real check (CRDs, admission) | 2-3 more minutes a run, against Module 6's target of feedback in under 5 minutes, and the most machinery (Helm and the Operator in CI too) |
+
+**Decided (CK, 2026-10-28): B**, because it's the cheapest check that catches the typical mistake, and its red doubles as C7's proof (P3). Known gap: the objects the `ResourceSet` generates aren't validated before merge (§5, R12).
+
+**D8. How many PRs?**
+
+| Option | Pros | Cons |
+|---|---|---|
+| A. One PR | The fewest PRs | The write credential arrives with everything else, in one big review |
+| **B. Two, split at the write credential** (**chosen**) | Each is readable, and the riskier half is reviewed on its own | Two reviews |
+| C. Three, with the follow-up docs first | Tidy history | A docs-only PR, which CK said isn't worth it |
+| D. Three, with the `ResourceSet` takeover in its own PR between the install and image automation | The untried takeover (U9) lands and is reviewed alone; PR 1 merges without it | A third review and merge; another fix-forward cycle through the gate |
+
+**Decided (CK, 2026-10-28): B.** PR 1 = K1-K6, CI, the layout (three apps entry points), the Operator install and the `ResourceSet`; PR 2 = image automation, the deploy key and the docs. D was offered and not chosen: the takeover is a few lines, and its fallback leaves Flux and the workloads running (U9), so a fix-forward on PR 1 is cheap.
+
+#### 7. Defaults
+
+Cheap to change later (one line, no rebuild). None of them weakens the gate, adds a credential, or changes the repo footprint or the deliverable. The D2b rows are the architect's picks for details CK left open; CK kept them at the final read (2026-10-28). CK can override any in review.
+
+| Choice | Default | Alternatives | Why |
+|---|---|---|---|
+| Source poll (`sync.interval`, the `GitRepository` interval) | `1m` (the Operator's default) | `30s`; `5m` | Caps the merge → apply delay (`:369`) |
+| `infrastructure` / `apps-*` interval | `10m` | `1m`; `1h` | Caps how long drift lasts (`:370`), yet long enough to watch it before the revert |
+| `flux-system` (self) interval | `10m`, fixed by the Operator's sync template (F20) | A `spec.kustomize.patches` entry (untried) | Caps drift in `Acme/infra/bootstrap/`; nothing remote is fetched any more |
+| `FluxInstance` and `ResourceSet` prune guard | Annotation `kustomize.toolkit.fluxcd.io/prune: disabled` on both | None | If either file left Git, Flux would prune it: the Operator would uninstall Flux (F20), or garbage-collect the `HelmRelease`, which uninstalls the Operator (F22, F23; R10) |
+| Chart reference | `helm install --version 0.62.1`; the chart `OCIRepository`'s `ref.semver: "0.62.1"` (exact, from the input) | The chart digest: `…/flux-operator@sha256:1135514a…` for Helm (F21) and `ref.digest` for the `OCIRepository` (F22); untried here | Readable and one input line; the image that runs is pinned by digest either way (F5) |
+| Values into the `HelmRelease` (D2b) | `valuesFrom` ConfigMap `flux-operator-values`, generated from `flux-operator-values.yaml` (key `values.yaml`, no hash suffix, watch label) | Inline `values:` in the `ResourceSet`, from a second input | One source for `helm install` and Flux; the watch label makes a values change reconcile at once (helm-controller v1.7.1 `docs/spec/v2/helmreleases.md:1362-1412`, "Recommended settings") |
+| `HelmRelease` service account (D2b) | None: runs as helm-controller (cluster-admin, F23) | The example's `flux-operator` | Same rights either way; keeps U9's fallback working. Confirmed by CK (2026-10-28) |
+| `ResourceSet` / chart `OCIRepository` / `HelmRelease` intervals | `1h` (the default `reconcileEvery`) / `30m` / `30m` (the example's) | Shorter | The Operator changes rarely; the PR, not the interval, is the trigger |
+| `retryInterval` / `timeout` | `2m` / `5m` | Flux's defaults | As in the curriculum's example repo (`clusters/staging/apps.yaml`) |
+| `prune` | `true` | `false` | Deleting from Git deletes from the cluster: Git is the whole desired state (`:375`) |
+| `deletionPolicy` | `Orphan` on `infrastructure` and the three `apps-*` | `MirrorPrune` (the default) | Deleting Flux's own objects (P6, `:524`) mustn't delete the workloads. `Orphan` does **not** stop `prune`: it applies only when the Flux Kustomization object itself is deleted (F9) |
+| Ordering | `infrastructure`: `wait: true`; each `apps-*`: `dependsOn: infrastructure` | An explicit `healthChecks` list | The ingress webhook must be running before any Ingress is applied (journal 2026-10-26) |
+| `ImageRepository` interval | `5m` | `1m`; `1h` | One hop of the release → deploy delay |
+| `ImagePolicy` range | `>=0.1.0` | `0.1.x` | Every release; `sha-*` tags never parse (F15) |
+| `ImageUpdateAutomation` interval | `10m` | `30m` | It also runs whenever the policy changes |
+| Automation commit | Author `Flux image automation <flux@localhost.invalid>`; message `chore(sample-api): deploy <tag> to dev` | Flux's `fluxcdbot` example | Conventional Commits (CK's rule); an address no GitHub account owns |
+| `:393`'s change | Dev `replicas` 1 → 2, the first commit of PR 2 | Its own one-commit PR right after P4; a `LOG_LEVEL` change | Fewer PRs (CK's preference); a pod count is easy to watch |
+
+#### 8. Phases
+
+CK makes every edit and runs every command; Claude coaches. Conventional Commits, one behaviour per commit; new versions are SemVer with the repo's `v` tag prefix. **OK** marks an outward action that needs CK's explicit OK, and every push for a CI run ID ("a pushed run") is one too. Rows follow CK's decisions (D1-D8).
+
+| # | PR | Delivers (traces to) | Test written first | Expected red, and why | Fix | Green evidence | h |
+|---|---|---|---|---|---|---|---|
+| P0 | 1 | Module 7 follow-ups K1-K4 and K6 (one `docs` commit); K5 (`style(test)`, its own commit) | None: K5 is a refactor | None: a pure move stays green | Move the `APP_PATHS` block | Same pass/skip counts before and after; `git diff --color-moved` shows only the move; each doc line cites its artifact | 0.5 |
+| P1 | 1 | CI sees the new paths (FR8) | (a) `APP_PATHS` gains `Acme/infra/bootstrap/kustomization.yaml`. **(b) moved into P2 as P2(g)** (CK, 2026-10-28, L6): its fix adds paths that don't exist until P2, and the render loop fails on a missing path, so the required `kustomize` check would be red from P1 until P2 | (a) `missed == ['Acme/infra/bootstrap/kustomization.yaml']`: the filter at `:80` lacks the prefix | Widen the `app` regex | Local red, then green (done: `bcd09d2`, with K5's move); a pushed run's `scripts-test` green (run ID) | 0.5 |
+| P2 | 1 | Layout and install (FR1-FR3, NFR3; D1-D4, D2b) | `test_flux_layout.py`, one behaviour per commit, no network (§5): (a) the pins: `image.tag` is `vX.Y.Z@sha256:<64 hex>`; `distribution.version` is an exact `X.Y.Z`; `registry` is `ghcr.io/fluxcd` (F19); (b) the sync: `GitRepository`, `https://`, no `pullSecret`, `ref` `refs/heads/main`, which `main-merge-gate` `applies_to` (`test_branch_rulesets.py:30`, C9), and a `path` whose `kustomization.yaml` lists `flux-instance.yaml`; (c) every Flux `Kustomization` path exists; `apps-dev`, `apps-stage` and `apps-prod` each depend on `infrastructure`; `infrastructure` has `wait: true`; each `apps/overlays/<env>` lists `../../sample-api/overlays/<env>` for the same env (C11); (d) the `ResourceSet`: its `version` input is an exact `X.Y.Z` and equals the values file's tag without the `v` (cross-file); the chart `OCIRepository` template uses `ref.semver` from that input and has no `tag` or `digest` that would override it; the `HelmRelease` template has `releaseName: flux-operator`, no `targetNamespace` or `storageNamespace` (so both stay `flux-system`, F23) and `valuesFrom` the ConfigMap that `kustomization.yaml`'s generator builds from `flux-operator-values.yaml` (key `values.yaml`, no hash suffix) (cross-file); (e) every env overlay's `sample-api` image has a `digest` (`sha256:<64 hex>`) as well as `newTag` (D4 = D); (f) `GUARDED` gains the files these tests read; (g) from P1(b), in the first commit that creates the entry points: a test in `test_sample_api_ci_workflow.py` that each entry point (`Acme/infra/bootstrap` and `Acme/platform/apps/overlays/{dev,stage,prod}`) matches a path or glob in the `kustomize` job's render step | (g) all four unmatched (the render loop at `sample-api-ci.yml:217-223`); (a)-(d) first the missing files; then mutations each go red and name the value (read the message, not just the exit code): a range (`2.10.x`), a bare tag (`v0.62.1`), the example's `version: "*"`, and an input that disagrees with the values file; (e) red on today's overlays, naming dev, stage and prod (no `digest` yet); (f) `test_scripts_filter_covers_guarded_files` lists them (`:85` lacks the prefixes) | One-time: install Helm (§2). Write the files (§1), add `digest: sha256:d3427a1e427955c9605d44cdb9b7dfe2744f4a639b243048ccda66806e1b4b17` to the three overlays (F24), widen the `scripts` regex. Then record a `helm template` of the chart with the values file, showing `flux-operator:v0.62.1@sha256:1d09…` (F5), and a `kubectl kustomize Acme/infra/bootstrap` showing ConfigMap `flux-operator-values` (U10). (g): add the entry points to the render loop in the same commit as their directories | Each red then green locally; a pushed run green, `kustomize` included; each entry point renders; the `helm template` and ConfigMap lines | 3.0 |
+| P3 | 1 | Schema check in the required `kustomize` job (D7; C7, C12, C3, C8) | `test_kustomize_job_validates_schemas` in `test_sample_api_ci_workflow.py`: the `kustomize` job has a step "Validate manifests against their schemas" after the render step; it pins kubeconform v0.8.0 and checks its sha256 against `CHECKSUMS`; it runs `-strict`; it loads Flux's and the Operator's `crd-schemas.tar.gz` (the Operator's holds the `FluxInstance` and `ResourceSet` schemas), each checked against its release's checksums; and their versions equal `flux-instance.yaml`'s `distribution.version` and the values file's tag (a cross-file check, C11) | No step with that name (the assert lists the job's step names): it doesn't exist yet | Add the step. Then the behaviour proof (C7, C12), **OK**: throwaway branch `mod8-c7` with `intervall: 10m` in `platform.yaml`, PR into `main`. Expected: `kustomize` red at the step with kubeconform's unknown-field error. Prediction: `gh pr view --json mergeStateStatus` reads `BLOCKED` for CK, an admin viewer (Module 7's still-open Q3, `module-7-docker-builds.md:675`); if it doesn't, the evidence is the PR page's **Required** label plus `GET rules/branches/main`. **OK**: close the PR and delete the branch | Local red, then green; a pushed run green; the throwaway PR's red run URL and its `mergeStateStatus` (or the fallback); the C3 review; **OK**: open PR 1 when it's ready; **OK**: merge | 1.25 |
+| P4 | — | Bootstrap and the Operator takeover (`:368`, `:392`; D2b) | Predictions written first: U1, U2, U3, U8, U9, U10 | — | **OK** (cluster writes): §2's command block. Nothing is deleted first | `helm list -n flux-system` shows `flux-operator-0.62.1`; `FluxInstance` Ready at `v2.10.0@sha256:…`; every `flux-system` image has `@sha256:`, and `status.components` matches F19; `ResourceSet` and `HelmRelease` `flux-operator` Ready (`flux get helmreleases -n flux-system`); `helm history -n flux-system flux-operator` shows a new revision made by Flux; `helm get values -n flux-system flux-operator` shows the `tag@digest`; `flux get kustomizations` shows all five Ready at PR 1's merge SHA; field manager `kustomize-controller` in all three `sample-api-*` namespaces; every `sample-api` pod's image carries `@sha256:d3427a1e…`; `curl -H 'Host: sample-api.dev.local' localhost/health` returns 200 | 1.75 |
+| P5 | — | Drift and latency (`:369-370`, `:394`) | Predictions: the revert time (one 10 m interval), the hand-applied ConfigMap, U4 | — | **OK** (cluster writes): `kubectl edit` dev's `replicas`; `kubectl apply` a ConfigMap; then `flux reconcile kustomization apps-dev` | Event times of the edit and the revert; the ConfigMap still there after a reconcile | 0.75 |
+| P6 | — | Rebuild and recovery (`:368`, `:379`, `:399`, `:484`, `:524`) | Draft `docs/bootstrap.md` first: following it word for word is the test | Any step that doesn't work as written | **OK**: `kind delete cluster --name sample-api`, then rebuild from the doc (kind, Helm, one apply, §3), with the takeover happening again (U9); **OK**: `kubectl delete namespace flux-system` (U5), then recover the same way; fix the doc | Wall-clock times; `flux get all -A` Ready, the `HelmRelease` included; workloads' pod ages unchanged by the drill; the doc's diff | 1.5 |
+| P7 | 2 | `:393`'s change: dev `replicas` 1 → 2, the first commit of PR 2 (branch `mod8-image-automation`, from `main`) | None new: the `kustomize` job renders and validates it | — | — | Seen when PR 2 merges (P10): revision time vs. the new pod's start | 0.25 |
+| P8 | 2 | Image automation (`:371`, `:395`; D4-D6) | In `test_flux_layout.py`: (a) dev's `newTag` and `digest` markers name an `ImagePolicy` that exists; (b) the push branch differs from the checkout branch `main`, and no ruleset file includes it (`applies_to`, `test_branch_rulesets.py:30`); (c) the update path exists; (d) the write source is `ssh://` with a `secretRef`, and no `kind: Secret` exists under `Acme/`; (e) the `FluxInstance`'s `components` include both image controllers | (a)-(c), (e) fail on the missing objects or entries; (d)'s "no Secret" half is green on arrival, so it's labelled characterisation and shown red by a recorded mutation (C6) | Add the two `components` (§4); write `image-automation.yaml` and the markers. On merge, `apps-dev` may fail once with "no matches for kind" until the Operator has installed the image CRDs; it retries every 2 m | Each red then green; a pushed run green | 1.5 |
+| P9 | — | Write credential (D6), before PR 2 merges | Prediction: pushes with the key to `main` and to a `mod8-…` branch are refused | — | `ssh-keygen` in WSL; **OK**: add it as a deploy key with write access (web UI); **OK**: create the Secret | The Secret exists (not in Git); **OK**: two refused test pushes, with the GH013 text | 0.5 |
+| P10 | 2 | Docs and PR 2 (`:399`; C3, C8, C13) | — | — | `docs/bootstrap.md` (from P6 and P9, with "don't push to `flux/image-updates`", §4, and the Operator upgrade PR, §2); `docs/ci.md` (releasing step 4, with promotion as a PR copying dev's `newTag` and `digest` lines to stage or prod; rolling back; the `kustomize` row); `docs/iam.md` (a deploy-key row) | The C3 review; **OK**: open PR 2; **OK**: merge; P7's change applied, with its latency | 1 |
+| P11 | — | The first real image update (`:395`, C5) | Predictions: the time of each hop | — | **OK**: tag `v0.1.4` on PR 2's merge commit (PATCH: no app change); **OK**: open the PR from `flux/image-updates`; **OK**: merge | The running `imageID` equals GHCR's `0.1.4` digest; the hop times | 1 |
+
+Total: about 13.5 hours.
+
+⚠️ **Budget warning: about 13.5 h, over the curriculum's 8-12 h (`:13`).** This is a warning, not a failure. Since the 11.75 h draft, the drivers are:
+- the `ResourceSet` takeover (D2b = (c)): +1.25 h (P2 tests +0.5, P4 takeover +0.5, P6 again +0.25);
+- three apps entry points (D1 = F): +0.25 h in P2 (adopting stage and prod replaces deleting them in P4);
+- digest pins in every overlay (D4 = D): +0.25 h in P2.
+
+If time runs short, defer in this order: P9's negative test pushes (~0.25 h), P6's namespace drill (~0.5 h), then P3's throwaway C7 PR (~0.5 h, a carry-over, so it would move to Module 9). That brings it to about 12.25 h.
+
+**Phase status (2026-10-30):** P0-P5 done. Step 6 and P3 merged in PR #17; the live takeover passed (L12). P6: the namespace drill passed on `flux-test` (L10); `docs/bootstrap.md` and the rebuild are still to do. P7-P11 (PR 2) not started. A third PR, `mod8-review-followups`, comes before PR 2 (L11).
+
+## Risks / Constraints
+
+Failure modes are included: what breaks, what happens, and the response.
+
+| # | Risk | Mitigation |
+|---|---|---|
+| R1 | ingress-nginx is archived and gets no more CVE fixes (F12). It stops at Kubernetes 1.35, and Flux needs ≥1.35.2, so 1.35 is the only minor version both support | Stay on 1.35.8; replace ingress-nginx before any Kubernetes upgrade (Future Use Cases) |
+| R2 | New releases: Flux 2.10.0 is a day old and Operator v0.62.1 is brand new. The Operator refuses a minor downgrade (F7), so a 2.11 upgrade can't be undone by a revert | Exact pins; watch for 2.10.1 and 0.62.2; a patch revert works; a minor rollback means deleting the `FluxInstance` and re-applying the old one (F20: workloads stay) |
+| R3 | The write key (D6 A) can push any branch except `main` and `mod*`, and any tag. A `v*` tag runs `release-tag` (`packages: write`), which can move a GHCR release tag | The key lives only in the cluster and in WSL; D4 = D pins every env overlay by digest; every change to `main` still needs a PR; a tag ruleset is a Future Use Case |
+| R4 | The ingress components' remote URLs are fetched at reconcile time (U8): in a GitHub outage those builds fail while workloads keep running, and `--no-remote-bases` stays `false` (F9), against Flux's hardening advice | It heals at the next interval; vendoring the ingress manifests later |
+| R5 | **Reduced by D2b = (c)** to the first install and each rebuild: `helm install` runs by hand, outside Flux's loop, until the takeover (U9). After that, a hand `helm upgrade` is upgraded back (F23). New with (c): helm-controller upgrades the Operator that installs Flux, so a bad Operator release is applied automatically once its PR merges | The values file and the `ResourceSet` input are tested together (P2); `helm history -n flux-system flux-operator` shows who made each revision; revert the PR, and helm-controller, which doesn't depend on the Operator, upgrades back |
+| R6 | Deleting `flux-system` also deletes the Operator, Helm's release record and the `HelmRelease`; finalizers may outlive their controllers and leave it stuck in Terminating (U5) | P6 finds out; `Orphan` and the Operator's finalizer stripping keep the workloads (F20); removing a stuck finalizer by hand is the documented last resort; `--take-ownership` if Helm refuses leftover objects (F21) |
+| R7 | The TTL-0 admission Jobs may run again on every infrastructure reconcile (U3): noise, and a loop fighting another controller | Observe in P4, then CK picks (Q9): accept it, or patch the TTL out in `components/ingress-nginx-kind`, test first |
+| R8 | D3 A depends on the repo staying public (A1) | Going private would also cost Actions minutes, need a paid plan for rulesets, and need GHCR pull secrets |
+| R9 | The admin bypass on PRs remains (`docs/iam.md:354`), so C7 proves the gate only for everyone else | Recorded, as in Module 7 |
+| R10 | Self-management: a bad merged `FluxInstance` (say, a version the Operator doesn't embed) fails at the Operator's build step, so the running Flux stays (F20). A `FluxInstance` removed from Git would be pruned, and Flux uninstalled. A `ResourceSet` removed from Git would be pruned too; its garbage collection deletes the `HelmRelease`, and that uninstalls the Operator (F22, F23) | Revert the PR; the prune guards on both (Defaults) stop the pruning; if Flux can't apply the revert, `kubectl apply -f` the previous `flux-instance.yaml` by hand (`docs/bootstrap.md`) |
+| R11 | A bad merge to `main` reaches its environment within about a minute. With D1 = F, one cluster plays all three environments, so a change to the shared `sample-api/base` reaches dev, stage and prod **at the same time**: environments are separated only by which overlay a change touches. An unhealthy `infrastructure` holds all three `apps-*` back; a missing Secret `flux-image-updates` leaves the automation not Ready, and so `apps-dev` too | Put env-by-env changes in the overlays, and keep stage's and prod's images moving only by hand PRs (D4 = D). Revert the PR (`:378`); `flux get kustomizations`, then fix forward; create the Secret before PR 2 merges (P9) |
+| R12 | **No branch flip.** Flux first runs `Acme/infra/bootstrap/` against `main`, after PR 1 merges, so a bootstrap bug costs a fix-forward PR through the gate (a CI run and a merge per try). The pre-merge checks cover rendering, schemas (kubeconform `-strict`, the `FluxInstance` and `ResourceSet` included), the pins and cross-file invariants (`test_flux_layout.py`) and one `helm template`. They don't cover the CRD timing (U1), adoption (U2), the Jobs (U3), the in-cluster fetch (U8), the objects the `ResourceSet` generates (their schemas, F22) or the takeover (U9, U10), or Flux's own status conditions (paths resolved inside the artifact, `dependsOn` names, health checks) | Pointing Flux at `mod8` first is the alternative, and CK called it off-curriculum. Until a fix merges, `flux suspend kustomization --all` (a cluster write) stops Flux acting; the workloads keep running, and `Orphan` deletes nothing |
+
+## Ongoing / Recurring Support / Maintenance / License Costs
+
+- **Money: $0.** A local kind cluster, a public repo (free Actions minutes), public GHCR packages.
+- **Upkeep.** Each Flux release, once an Operator release embeds it: one `distribution.version` line plus the CI schema version. Each Operator release: one PR changing the `ResourceSet`'s `version` input, the values file's `tag@digest`, `--version` in `docs/bootstrap.md` and the CI Operator-schema version; Flux applies it, with no hand `helm upgrade` (D2b = (c)). Together about 15 minutes. Each promotion to stage or prod: a PR copying two lines (D4 = D). ingress-nginx needs replacing (R1). Rotate the deploy key on any suspicion and remove it when the automation retires. Bump kubeconform and Helm with their releases.
+- **Licences.** Flux, Helm and kubeconform are Apache-2.0; the Flux Operator and its chart are AGPL-3.0 (an accepted cost of D2).
+
+## Other Designs Considered
+
+Only options that fail a hard requirement are listed here. Every workable option is in a decision table.
+
+| Design | Fails |
+|---|---|
+| A bypass on `main` for a deploy key or app, so that bootstrap or the automation can push to `main` | NFR1 (CK rejected relaxing the gate; PR #5: don't loosen rules to unblock yourself) |
+| Image automation pushing straight to `main` | Refused (F14); NFR1 |
+| The community Helm chart `flux2` | It ships Flux 2.9.5 (F8): A3 |
+| An `ImagePolicy` over `sha-*` tags | "Flux does not support selecting the latest image by build time" ([sortable tags](https://fluxcd.io/flux/guides/sortable-image-tags/)), and `sha-*` tags can't be ordered |
+| Argo CD | The module is Flux (`:362`); the Flux-or-Argo argument is Module 11's ADR (`:475`) |
+
+**D2's C and F were weighed and not chosen; both still work.** C (Flux's `install.yaml` by URL with digest-pinned images) puts every image digest in a PR and adds no component. But it re-fetches a mutable URL on every self-reconcile and always ships all seven controllers. F (Flux's OCI manifests artifact, pinned by digest) fixes both of C's weaknesses and is the tightest supply chain on offer. But it still needs a separate first install from the URL or the CLI, and an upgrade touches nine pins. CK preferred D's one-line upgrades and the Operator pattern, with the costs listed under D2.
+
+## Dependencies
+
+Flux v2.10.0 (controller versions in F2), installed by the Flux Operator v0.62.1 (`ghcr.io/controlplaneio-fluxcd/flux-operator:v0.62.1@sha256:1d09a3f9…`) from its chart `flux-operator` 0.62.1, which helm-controller v1.7.1 then manages; Helm v4.3.1 in WSL; kind v0.33.0 with `kindest/node:v1.35.8@sha256:07b2536e…`; ingress-nginx controller-v1.15.1 (archived); kubeconform v0.8.0 in CI. On GitHub: the public repo, with rulesets `24832716`, `25760562` and `24627971` unchanged, and the public `sample-api` GHCR package, whose release tags come from `release-tag`.
+
+## Future Use Cases for This Design
+
+- **Supply chain:** replace ingress-nginx (R1), for example with a Gateway API controller, before Kubernetes moves past 1.35. Add a `v*` tag ruleset (R3; off-curriculum this week). Pin the Operator chart by digest (Defaults). Vendor the ingress manifests, then set `--no-remote-bases` (R4).
+- **More clusters:** separate stage and prod clusters (D1 E), each with its own `FluxInstance` and its own `apps/overlays/<env>`; the `ResourceSet` pattern from D2b, scaled to fleets (`:381`).
+- **Less waiting:** a notification-controller `Receiver` for push-triggered reconciles (needs an endpoint GitHub can reach); an auto-PR workflow with an App token (D5 B).
+- **Later modules:** Module 9's `HelmRelease`s (`:429`) reuse the helm-controller and the takeover pattern P4 proves on the Operator. **Module 10 (`:433-460`), SOPS:** CK's note (D6): "SOPS (with age, via Flux's Kustomization `decryption`) was considered and deliberately not used at this scale. With one secret, it only swaps which key is hand-loaded on a rebuild (the age key instead of the deploy key) and adds two tools. SOPS is likely to be integrated in Module 10 (`:433-460`), alongside Sealed Secrets and External Secrets. `:50` describes `bootstrap/` as holding 'initial secrets'; that's where SOPS-encrypted secrets would go." Module 10 can also move the deploy key into a proper secrets store.
+
+## Internal Documentation
+
+- `docs/curriculum.md:362-401` (Module 8), `:1-67` (layout and trust boundaries; `:50` "initial secrets"), `:410`, `:429` (Helm in Module 9), `:433-460` (Module 10, secrets), `:517-527` (assessment)
+- `docs/ci.md`, `docs/iam.md`, `docs/design/module-7-docker-builds.md` (follow-ups, conventions), `journal/lessonslearned.md` (patterns 1-6; 2026-10-26 row 1; 2026-10-27 D2 rows)
+- bgblackmore's reviews: PRs [#5](https://github.com/kerinschristopher/Curriculum/pull/5), [#6](https://github.com/kerinschristopher/Curriculum/pull/6), [#9](https://github.com/kerinschristopher/Curriculum/pull/9), [#15](https://github.com/kerinschristopher/Curriculum/pull/15)
+- External: [Flux 2.10.0 release](https://github.com/fluxcd/flux2/releases/tag/v2.10.0), [Kustomization API](https://fluxcd.io/flux/components/kustomize/kustomizations/), [OCIRepository](https://fluxcd.io/flux/components/source/ocirepositories/), [image update guide](https://fluxcd.io/flux/guides/image-update/), [ImageUpdateAutomation](https://fluxcd.io/flux/components/image/imageupdateautomations/), [ImagePolicy](https://fluxcd.io/flux/components/image/imagepolicies/), [GitRepository](https://fluxcd.io/flux/components/source/gitrepositories/), [FluxInstance](https://fluxoperator.dev/docs/crd/fluxinstance/), [Operator install](https://fluxoperator.dev/docs/guides/install/), [Operator source v0.62.1](https://github.com/controlplaneio-fluxcd/flux-operator/tree/v0.62.1), [ResourceSet](https://github.com/controlplaneio-fluxcd/flux-operator/blob/v0.62.1/docs/api/v1/resourceset.md), [Automating Operator upgrades](https://github.com/controlplaneio-fluxcd/flux-operator/blob/v0.62.1/docs/guides/operator/operator-migration.md#automating-flux-operator-upgrades), [HelmRelease (helm-controller v1.7.1)](https://github.com/fluxcd/helm-controller/blob/v1.7.1/docs/spec/v2/helmreleases.md), [flux-operator chart](https://github.com/controlplaneio-fluxcd/charts/tree/main/charts/flux-operator), [Helm v4.3.1](https://github.com/helm/helm/releases/tag/v4.3.1), [helm install](https://helm.sh/docs/helm/helm_install/), [Helm registries](https://helm.sh/docs/topics/registries/), [flux2-kustomize-helm-example](https://github.com/fluxcd/flux2-kustomize-helm-example), [GitHub: triggering a workflow](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow), [GitHub: repository rules API](https://docs.github.com/en/rest/repos/rules), [ingress-nginx](https://github.com/kubernetes/ingress-nginx), [kubeconform](https://github.com/yannh/kubeconform)
+
+### Review and Orchestration Log
+
+| # | Date | Who / tool | Instruction | Given | Result |
+|---|---|---|---|---|---|
+| L1 | 2026-10-27 | Architect agent (Claude), run from the main session; read-only except this doc and `module-8-handoff.md`; no git, cluster, install or GitHub writes | Write a new Module 8 design and handoff from the curriculum and the repo, not the retired design: complete option sets, about 300-400 lines, at most 8 decisions (a cap CK removed on 2026-10-28; the size and hour budgets are now warnings) plus a Defaults table, a curriculum mapping, generated Flux code kept out, hours per phase; read the retired doc last and only as an evidence index | `docs/curriculum.md`; `Acme/**`; the CI workflow and tests; `docs/ci.md`, `docs/iam.md`; the Module 7 doc; the journal; PRs #5, #6, #9 and #15 (`gh api` GETs); the memory files. Ran read-only `kubectl`/`kind`/`docker`/`flux check --pre`; `flux install --export` to stdout; scratch `kubectl kustomize` renders; `gh release`/`gh api` GETs; upstream source reads; web docs | 8 decisions with recommendations; facts F1-F18; U1-U7; K1-K6 confirmed still stale; carry-overs C1-C14 |
+| L2 | 2026-10-27 | Claude (main session), read-only review of L1's draft; the fixes made by the architect agent in the same round, writing only these two files | Check the template, size, decision rules, curriculum mapping and carry-overs; spot-check claims | This doc and the handoff (L1); the repo; GitHub's docs | Checks passed; spot checks held. Findings 1-5 fixed by the architect: P3 test-first; P3's `BLOCKED` as a prediction with fallback evidence; P2(a) rendering inside the test; U8, the in-cluster fetch; R12, the cost of having no branch flip |
+| L3 | 2026-10-27 | Architect agent (Claude), run from the main session; wrote only this doc and the handoff; otherwise read-only (no git, cluster, Helm or GitHub writes; Helm not installed) | Rework for CK's D2 = D: record D2 as decided with its accepted costs; add option F, D2b and D6's fresh-key variant; verify the chart, the tag trick, the `FluxInstance` spec, the digests, self-management, recovery and Helm; ripple through; apply CK's seven review fixes; don't grow the doc | CK's decision and review fixes; Operator source and docs at `v0.62.1` and the charts repo at `5be89be` (`gh api` GETs); GHCR registry API GETs; `docker buildx imagetools inspect`; Operator and Flux release assets (`gh release download`, listed only); Helm's releases and docs; Flux docs | F4-F7 replaced, F19-F21 added; D2 decided; D2b added (recommends (a)); D6 A′; P2's test reads pins, no network; no D1, D3-D8 recommendation changed (D4 and D7 option text updated for D); U1, U5, U8 reworded; R4, R5 rewritten |
+| L4 | 2026-10-28 | Architect agent (Claude), run from the main session; wrote only this doc and the handoff; otherwise read-only (no git, cluster, Helm or GitHub writes; nothing installed) | Record CK's 2026-10-28 decisions as decided (D1 = F, D2b = (c), D3 = A, D4 = D, D5 = A, D6 = A with the SOPS note, D7 = B with its gap, D8 = B with option D added), keep every option table, verify the `ResourceSet` and `HelmRelease` takeover and the `0.1.3` digest; remove the decision cap and treat the line and hour budgets as warnings; status stays Draft | CK's decisions and review fixes; Operator docs at `v0.62.1` (`operator-migration.md`, `operator-install.md`, `resourceset.md`), helm-controller `v1.7.1` source and spec, source-controller `v1.10.1` `OCIRepository` spec, the chart at `5be89be`, flux2 `v2.10.0` RBAC and release notes (`gh api` GETs); the Operator's `crd-schemas.tar.gz` (`gh release download`, checksum checked, listed and read with `jq`); `docker buildx imagetools inspect`; read-only `kubectl get pods` | D1 F and D4 D added and chosen; D8 D added; D6 "A + SOPS" row; F22-F24, U9-U10 added, U2 and U5 widened; R5 reduced, R10-R12 updated; P1, P2, P4, P6, P10 reworked; four Defaults rows for D2b. **Correction:** the takeover fallback needs the `HelmRelease` to run as helm-controller, so a fourth change from the docs' example (no `serviceAccountName`) waits on CK's confirmation. ⚠️ 13.5 h, over budget (a warning) |
+| L5 | 2026-10-28 | CK's final read, walked through by Claude (main session); Claude made the doc edits at CK's request | Confirm or override the open points from L4, then approve | This doc; the handoff's final-read list | The `HelmRelease` with no `serviceAccountName` confirmed; the three D2b Defaults (`ref.semver`, `valuesFrom` ConfigMap, prune guard) kept; R11 accepted as written; budget deferrals decided on the day (the order under Phases, none now); a review fix: P5's `flux reconcile kustomization apps` → `apps-dev` (left over from D1 = F). Status → **Approved** |
+| L6 | 2026-10-28 | Claude (main session) while coaching P1; CK decided; Claude made the doc edit at CK's request | Trace P1(b)'s fix against the repo before writing it | The Phases table; `sample-api-ci.yml:217-223`; the repo tree | **Finding:** P1(b) adds render-loop paths that P2 creates, so every pushed run between them would fail the required `kustomize` check, and P1's green evidence (only `scripts-test`) wouldn't show it. Options: A fold into P2, B guard the loop (hides a deleted path), C accept red until P2, D stub directories. **CK chose A:** P1(b) becomes P2(g); P1 0.5 h, P2 3.0 h, total unchanged. Journal 2026-10-28 row 1, pattern 7 |
+| L7 | 2026-10-28 | CK decided; Claude (main session) coached; CK ran the install | CK asked for Flux within the hour, which changed the approved plan | Approved plan; PR #16 | **Fast path B + C:** the install ran right after PR #16's merge (`90fd3a3`), and PR 1 held P2 steps 3-5 only. Step 6, P3 and the docs moved to `mod8-followups`, so D8 was in effect three PRs (option D, which CK hadn't chosen at the walk-through). Also: `ENTRY_POINTS` gained `infrastructure/overlays/kind`, which caught a `;` ending the render loop's list early; the (b) test checks `ref == refs/heads/main`, not the ruleset's `applies_to`. **U1 answered:** the CRD was ready straight after `helm --wait`, so no `kubectl wait` is needed. **U8 answered:** `infrastructure` went Ready, so the in-cluster fetch of the remote URLs works |
+| L8 | 2026-10-29 | CK ran; Claude coached and read the results | Finish P4's observations and run P5 | Live cluster `sample-api` | **Q9 = A, accept:** the admission Jobs re-create on every `infrastructure` reconcile (about 10 m), harmless: Secret `ingress-nginx-admission` unchanged since 2026-10-26, controller not restarted (U3, R7). **P5 done:** a `kubectl edit` was reverted in about 8 minutes, within the 10 m interval; `flux reconcile` after `kubectl scale` reverted in about 2 s; a hand-made ConfigMap survived. **U4 answered:** an annotation Git doesn't set was removed |
+| L9 | 2026-10-29 to 2026-10-30 | CK ran; Claude coached. Claude edited `988cb89`, `b381529` and the CSV fix after misreading "do the optionals"; CK kept them and reviewed them line by line | Build step 6 and P3 on `mod8-followups`, with additions to the plan | Commits `076463d`, `6e9d264`, `a28ca8b`, `6213456`, `988cb89`, `b381529`, `ea6836c` | D2b built; kubeconform in the `kustomize` job; 39 passed, 6 skipped. **Added to the plan:** the P3 cross-file version test `6213456` (design required it; missed in `a28ca8b`), the bootstrap guard test and its `scripts` filter fix (`988cb89`, `b381529`), the `ci-timings.csv` comma fix. **C7 shown locally only (CK):** Flux's own schema rejects `intervall`, with and without `-strict`, so Module 7's Q3 moves to Module 9. **Deviation found later (L11):** `a28ca8b` left out §5's `-kubernetes-version` |
+| L10 | 2026-10-29 to 2026-10-30 | CK ran; Claude coached and read the results | Rehearsal A, a plan change: a throwaway branch `mod8-flux-test` and cluster `flux-test`, both deleted afterwards. Rejected: a second source on the live cluster, repointing the live cluster, preview only | Throwaway cluster `flux-test` | **U9, U10 answered:** the takeover works, about 40 s after the install. The chart becomes `0.62.1+1135514a01cc` and the Operator pod is replaced, because only the `helm.sh/chart` label differs. **U5 answered:** the namespace sticks in Terminating; recovery needs the finalizers patched to `null`, then `helm upgrade --install --force-conflicts`. A plain `helm install` fails on server-side apply conflicts, so **`--take-ownership` (F21, R6, U5) was the wrong fallback.** Tests passed: P4's owed checks; a hand `helm upgrade` fails or is reverted; the prune guard keeps both objects; deleting the `FluxInstance` is safe, and a stale-Ready `ResourceSet` needs a nudge to recover |
+| L11 | 2026-10-30 | bgblackmore's review of PR #17 at `ea6836c`; Claude checked each item against the merged code and upstream source | Review before merge | PR #17 comments `6526903063`, `4425510572`, `4425529715` | **Approved, nothing blocking.** Four items, all open, for PR 3 (`mod8-review-followups`): **A** expand the `ResourceSet` with the Operator CLI and validate the result (closes the known gap, §5, R12); **B** dangling references to this doc; **C** `--retry` on the `curl` downloads (kubeconform already retries its own schema fetch); **D** the unpinned default schemas. **Found by Claude under D:** no `-kubernetes-version`, so CI validates against `master`, not 1.35.8 |
+| L12 | 2026-10-30 | CK merged and ran the checks; Claude read the results, read-only | Merge PR #17 and run the post-merge checks | Merge `77e8846`; live cluster `sample-api`; run `41100401258` | **Takeover worked live** at 19:53:45 UTC with no manual step: Helm revision 2 by helm-controller, chart `0.62.1+1135514a01cc`, ReplicaSet `849fb678c4`, new Operator pod, five Kustomizations Ready at `77e88465`, workloads not replaced, dev `/health` 200. **U2 answered:** only `kustomize-controller` and `kube-controller-manager` manage the Deployments; `status.components` matches each Deployment's `tag@digest` (F19). **CI:** the first post-merge run was cancelled by a 5 m timeout though `kustomize` finished in 9 s (looks like a GitHub delay, not confirmed), skipping `push` and `build-scan`; a re-run of the failed jobs went green and published `sha-77e8846`. **Unexplained:** the 2 h 15 m between the merge and Flux fetching it; the node restarted at 19:52:20 and the restarts replaced the earlier logs |
+
+## Open Questions
+
+| # | Question | Owner | Status |
+|---|---|---|---|
+| Q1 | D1: which environment the kind cluster is, and which paths Flux watches | CK | **Decided (CK, 2026-10-28): F**, three apps entry points in the one cluster: stage and prod keep running under Flux, and promotion becomes a PR |
+| Q2 | D2: how Flux is installed | CK | **Decided (CK, 2026-10-27): D**, the Flux Operator via its own Helm chart plus a `FluxInstance`; costs accepted as listed under D2 |
+| Q2b | D2b: who manages the Operator after `helm install` | CK | **Decided (CK, 2026-10-28): (c)**, the docs' `ResourceSet`: their recommended upgrade path, and Operator upgrades go by PR. The no-`serviceAccountName` Default was confirmed by CK at the final read (2026-10-28) |
+| Q3 | D3: how Flux reads the repo | CK | **Decided (CK, 2026-10-28): A**, anonymous HTTPS: a read credential protects nothing on a public repo |
+| Q4 | D4: which images are pinned by digest | CK | **Decided (CK, 2026-10-28): D**, every env overlay too: stage and prod are Flux-managed now, so "a moved tag fails closed" applies to them |
+| Q5 | D5: how image updates reach `main` | CK | **Decided (CK, 2026-10-28): A**: the PR CK opens is the review gate |
+| Q6 | D6: which credential the automation pushes with | CK | **Decided (CK, 2026-10-28): A**, a write deploy key kept in WSL: the narrowest credential that works; SOPS left for Module 10 |
+| Q7 | D7: how CI validates the new manifests | CK | **Decided (CK, 2026-10-28): B**, kubeconform: the cheapest check that catches unknown fields; the `ResourceSet`'s generated objects are a known gap |
+| Q8 | D8: how many PRs | CK | **Decided (CK, 2026-10-28): B**, two: the takeover's fallback keeps Flux running, so it doesn't need its own PR |
+| Q9 | R7/U3: if the admission Jobs re-run on every reconcile, accept it or patch the TTL out | CK | **Decided (CK, 2026-10-29): A, accept**: the Jobs re-run about every 10 m but change nothing (L8) |
