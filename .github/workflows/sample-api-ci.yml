@@ -240,6 +240,7 @@ jobs:
           FLUX_SHA256: a1d64309d0965ef681f161ce2d28a1a58aa78239d6f5e94ea6e556b5674cfefb
           OPERATOR_VERSION: "0.62.1"
           OPERATOR_SHA256: 4b6093d247918c74e21a2fb271daee47dd08eabfd515a69dd0c73e62f33f2bf1
+          OPERATOR_CLI_SHA256: 7bb9e54d370039d8701d4271b38aed57d6c89668432b7caddce69f4e26e24c1b
           KUBERNETES_VERSION: "1.35.8"
           KUBERNETES_SCHEMAS_COMMIT: 47163ead3738a996c3e30be9691bb37b8071d9d3
         run: |
@@ -250,12 +251,18 @@ jobs:
           echo "${FLUX_SHA256}  flux-schemas.tar.gz" | sha256sum -c -
           curl --retry 3 --retry-all-errors -fsSLo operator-schemas.tar.gz "https://github.com/controlplaneio-fluxcd/flux-operator/releases/download/v${OPERATOR_VERSION}/crd-schemas.tar.gz"
           echo "${OPERATOR_SHA256}  operator-schemas.tar.gz" | sha256sum -c -
+          curl --retry 3 --retry-all-errors -fsSLo flux-operator.tar.gz "https://github.com/controlplaneio-fluxcd/flux-operator/releases/download/v${OPERATOR_VERSION}/flux-operator_${OPERATOR_VERSION}_linux_amd64.tar.gz"
+          echo "${OPERATOR_CLI_SHA256}  flux-operator.tar.gz" | sha256sum -c -
           tar -xzf kubeconform.tar.gz kubeconform
           install -m 0755 kubeconform /usr/local/bin/kubeconform
           kubeconform -v
           mkdir -p schemas/flux schemas/operator
           tar -xzf flux-schemas.tar.gz -C schemas/flux
           tar -xzf operator-schemas.tar.gz -C schemas/operator
+          tar -xzf flux-operator.tar.gz flux-operator
+          install -m 0755 flux-operator /usr/local/bin/flux-operator
+          # kubectl kustomize leaves the ResourceSet's templates unexpanded; a misspelt placeholder fails here.
+          flux-operator build resourceset -f "$GITHUB_WORKSPACE/Acme/infra/bootstrap/flux-operator.yaml" > rendered/flux-operator-resourceset.yaml
           kubeconform -strict -summary \
             -kubernetes-version "$KUBERNETES_VERSION" \
             -schema-location "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${KUBERNETES_SCHEMAS_COMMIT}/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json" \

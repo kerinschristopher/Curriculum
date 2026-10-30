@@ -125,7 +125,7 @@ def test_kustomize_job_validates_schemas():
     for tool in ("KUBECONFORM", "FLUX", "OPERATOR"):
         assert re.fullmatch(r"\d+\.\d+\.\d+", str(env.get(f"{tool}_VERSION", ""))), env
         assert re.fullmatch(r"[0-9a-f]{64}", str(env.get(f"{tool}_SHA256", ""))), env
-    assert step["run"].count("sha256sum -c") == 3, step["run"]
+    assert step["run"].count("sha256sum -c") == 4, step["run"]
     # -strict rejects unknown fields in Kubernetes' own kinds, and repeated keys.
     assert "-strict" in step["run"], step["run"]
 
@@ -156,6 +156,22 @@ def test_kustomize_job_validates_against_the_cluster_kubernetes_version():
     assert re.fullmatch(r"[0-9a-f]{40}", str(env.get("KUBERNETES_SCHEMAS_COMMIT", ""))), env
     assert "/${KUBERNETES_SCHEMAS_COMMIT}/" in step["run"], step["run"]
     assert "-schema-location default" not in step["run"], step["run"]
+
+
+def test_kustomize_job_expands_every_resourceset():
+    # kubectl kustomize leaves a ResourceSet's templates unexpanded, so kubeconform never sees the
+    # objects it generates. Output outside rendered/ would be skipped without an error.
+    step = kustomize_step("Validate manifests against their schemas")
+    assert re.fullmatch(r"[0-9a-f]{64}", str(step.get("env", {}).get("OPERATOR_CLI_SHA256", ""))), step.get("env")
+    bootstrap = REPO / "Acme" / "infra" / "bootstrap"
+    resourcesets = [
+        path.relative_to(REPO).as_posix()
+        for path in sorted(bootstrap.rglob("*.yaml"))
+        if any(doc and doc.get("kind") == "ResourceSet" for doc in yaml.safe_load_all(path.read_text()))
+    ]
+    assert resourcesets, bootstrap
+    built = re.findall(r'build resourceset -f "\$GITHUB_WORKSPACE/(\S+)" > rendered/\S+\.yaml', step["run"])
+    assert built == resourcesets
 
 
 def build_options():
