@@ -45,6 +45,8 @@ GUARDED = [
     "Acme/infra/bootstrap/platform.yaml",
     # test_flux_layout.py's guard reads subfolders too: this is where `flux bootstrap` writes.
     "Acme/infra/bootstrap/flux-system/gotk-components.yaml",
+     # test_kustomize_job_validates_against_the_cluster_kubernetes_version reads the node image.
+    "Acme/platform/kind/sample-api-cluster.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
@@ -137,6 +139,23 @@ def test_kustomize_job_validates_against_the_versions_the_cluster_runs():
     tag = yaml.safe_load((bootstrap / "flux-operator-values.yaml").read_text())["image"]["tag"]
     operator = tag.removeprefix("v").split("@")[0]
     assert (str(env.get("FLUX_VERSION")), str(env.get("OPERATOR_VERSION"))) == (flux, operator)
+
+
+def test_kustomize_job_validates_against_the_cluster_kubernetes_version():
+    # Without -kubernetes-version, kubeconform uses the schemas for Kubernetes master, not what
+    # the cluster runs. A node image upgrade must move this too, as a Flux upgrade does above.
+    step = kustomize_step("Validate manifests against their schemas")
+    env = step.get("env", {})
+    cluster = yaml.safe_load((REPO / "Acme" / "platform" / "kind" / "sample-api-cluster.yaml").read_text())
+    image = cluster["nodes"][0]["image"]
+    node = re.fullmatch(r"kindest/node:v(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}", image)
+    assert node, image
+    assert str(env.get("KUBERNETES_VERSION")) == node.group(1), env
+    assert '-kubernetes-version "$KUBERNETES_VERSION"' in step["run"], step["run"]
+    # "default" reads the schema repo's moving master, so a required check could turn red with no commit here.
+    assert re.fullmatch(r"[0-9a-f]{40}", str(env.get("KUBERNETES_SCHEMAS_COMMIT", ""))), env
+    assert "/${KUBERNETES_SCHEMAS_COMMIT}/" in step["run"], step["run"]
+    assert "-schema-location default" not in step["run"], step["run"]
 
 
 def build_options():

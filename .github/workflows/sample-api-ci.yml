@@ -82,7 +82,7 @@ jobs:
           else
             echo "app=false" >> "$GITHUB_OUTPUT"
           fi
-          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/[^/]+-ruleset\.json$|Acme/infra/bootstrap/.+\.yaml$|Acme/platform/apps/(sample-api/)?overlays/[^/]+/kustomization\.yaml$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
+          if grep -qE '^(\.github/scripts/|\.github/workflows/[^/]+\.yml$|Acme/infra/github/[^/]+-ruleset\.json$|Acme/infra/bootstrap/.+\.yaml$|Acme/platform/kind/[^/]+\.yaml$|Acme/platform/apps/(sample-api/)?overlays/[^/]+/kustomization\.yaml$|Acme/apps/sample-api/Dockerfile(\.test)?$)' <<<"$changed"; then
             echo "scripts=true" >> "$GITHUB_OUTPUT"
           else
             echo "scripts=false" >> "$GITHUB_OUTPUT"
@@ -229,8 +229,8 @@ jobs:
 
       # D7 (Module 8): Flux's and the Operator's schemas reject fields they don't define, such as a
       # misspelt `intervall`; -strict does the same for Kubernetes' own kinds and rejects repeated keys.
-      # Kubernetes' kinds use kubeconform's default schemas; Flux's and the Operator's come from their
-      # releases. Pinned by version and checksum, as Conftest is.
+      # Kubernetes' kinds use yannh/kubernetes-json-schema at a fixed commit, for the version the kind
+      # cluster runs; Flux's and the Operator's come from their releases. Each is pinned, as Conftest is.
       - name: Validate manifests against their schemas
         working-directory: ${{ runner.temp }}
         env:
@@ -240,6 +240,8 @@ jobs:
           FLUX_SHA256: a1d64309d0965ef681f161ce2d28a1a58aa78239d6f5e94ea6e556b5674cfefb
           OPERATOR_VERSION: "0.62.1"
           OPERATOR_SHA256: 4b6093d247918c74e21a2fb271daee47dd08eabfd515a69dd0c73e62f33f2bf1
+          KUBERNETES_VERSION: "1.35.8"
+          KUBERNETES_SCHEMAS_COMMIT: 47163ead3738a996c3e30be9691bb37b8071d9d3
         run: |
           set -euo pipefail
           curl --retry 3 --retry-all-errors -fsSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
@@ -255,7 +257,8 @@ jobs:
           tar -xzf flux-schemas.tar.gz -C schemas/flux
           tar -xzf operator-schemas.tar.gz -C schemas/operator
           kubeconform -strict -summary \
-            -schema-location default \
+            -kubernetes-version "$KUBERNETES_VERSION" \
+            -schema-location "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${KUBERNETES_SCHEMAS_COMMIT}/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json" \
             -schema-location 'schemas/flux/{{ .ResourceKind }}{{ .KindSuffix }}.json' \
             -schema-location 'schemas/operator/{{ .ResourceKind }}{{ .KindSuffix }}.json' \
             rendered/*.yaml
