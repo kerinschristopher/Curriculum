@@ -43,6 +43,8 @@ GUARDED = [
     "Acme/infra/bootstrap/flux-instance.yaml",
     "Acme/infra/bootstrap/kustomization.yaml",
     "Acme/infra/bootstrap/platform.yaml",
+    # test_flux_layout.py's guard reads subfolders too: this is where `flux bootstrap` writes.
+    "Acme/infra/bootstrap/flux-system/gotk-components.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
