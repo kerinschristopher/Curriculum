@@ -179,3 +179,15 @@ def test_operator_resourceset_is_applied_and_never_pruned():
     # Pruned, it would delete the HelmRelease, and deleting a HelmRelease uninstalls the Operator (R10).
     annotations = resourceset["metadata"].get("annotations", {})
     assert annotations.get("kustomize.toolkit.fluxcd.io/prune") == "disabled", annotations
+
+
+def test_bootstrap_holds_no_generated_flux_manifests():
+    # The Operator carries Flux's ~8,600 generated lines (CRDs included) in its image, so the repo
+    # doesn't. `flux install --export` or `flux bootstrap` would write them here, in a subfolder too.
+    generated = []
+    for path in sorted(BOOTSTRAP.rglob("*.yaml")):
+        text = path.read_text()
+        kinds = {doc.get("kind") for doc in yaml.safe_load_all(text) if doc}
+        if "CustomResourceDefinition" in kinds or len(text.splitlines()) > 200:
+            generated.append(path.relative_to(BOOTSTRAP).as_posix())
+    assert generated == []
