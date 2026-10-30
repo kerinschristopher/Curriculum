@@ -54,7 +54,7 @@ only accepts changes to `main` through a pull request whose required checks pass
 |---|---|---|
 | `lint` | sample-api-ci | gofmt, `go vet` and golangci-lint are clean (or the app didn't change) |
 | `test-result` | sample-api-ci | every `test (<go version>)` leg passed (or the app didn't change) |
-| `kustomize` | sample-api-ci | every Kustomize base and overlay renders (or nothing it covers changed) |
+| `kustomize` | sample-api-ci | every Kustomize base and overlay renders, and the rendered manifests are valid against Kubernetes', Flux's and the Operator's schemas (or nothing it covers changed) |
 | `build-scan` | sample-api-ci | the image builds and Trivy finds no fixable HIGH/CRITICAL vulnerability (or the app didn't change) |
 | `scripts-test` | sample-api-ci | shellcheck and the pytest tests for `.github/scripts/` pass, against a throwaway registry (or no file those tests read changed) |
 | `fmt` | terraform-plan | `terraform fmt -check -recursive` is clean (or no Terraform changed) |
@@ -76,11 +76,11 @@ the ruleset after editing its JSON with
 **Until Module 7 the required checks never decided a merge.** Direct pushes to `main` were refused, as intended. But the older
 `trusted-branches` ruleset also covered `main`, and its `update` rule refuses every update to `main` by anyone without its bypass.
 A merge is an update, so every PR, however green, was refused, and each one merged into `main` (#9, #11-#14) went in with the admin
-bypass, which skips the required checks too. Module 7 splits it (`test_branch_rulesets.py` guards the files): `trusted-branches`
-keeps its four rules on `mod*` only, and a new `main-protect` ruleset keeps `creation`, `deletion` and `non_fast_forward` on `main`,
-with no `update` rule. **Pending the live apply:** the JSON files describe the split, but GitHub changes only with `gh api` (create
-`main-protect`, then PUT `trusted-branches`), done just before PR #15 merges. From then on the checks above decide merges. What that
-allows, and the gaps left open, are in `docs/iam.md` ("GitHub-side controls").
+bypass, which skips the required checks too. Module 7 split it (`test_branch_rulesets.py` guards the files): `trusted-branches`
+keeps its four rules on `mod*` only, and a new `main-protect` ruleset (`25760562`) keeps `creation`, `deletion` and
+`non_fast_forward` on `main`, with no `update` rule. **Live since 2026-10-23 23:23 UTC**, two minutes before PR #15 merged. Since then
+the checks above decide merges: PR #15's own merge (`73f217b`) was the first to pass them without the bypass (`docs/iam.md`, "How it's
+verified"). What that allows, and the gaps left open, are in `docs/iam.md` ("GitHub-side controls").
 
 ## `sample-api-ci.yml`
 
@@ -90,8 +90,8 @@ allows, and the gaps left open, are in `docs/iam.md` ("GitHub-side controls").
 | `lint` | app changed | `contents: read` | gofmt, `go vet ./...`, golangci-lint v2.14.0, on the Go version in `go.mod`. Restores the Go build cache first (see "Caching") |
 | `test` (matrix `go: ["1.26", "1.27"]`) | app changed | `contents: read` | `go test -race -count=1 -v ./...` on both supported Go releases, with a Go build cache per version |
 | `test-result` | always (not on tags) | `contents: read` | Fails unless `changes` succeeded and every `test` leg passed or was skipped |
-| `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays, the infrastructure overlays and the apps entry points (`Acme/platform/apps/overlays/*`, Module 8) |
-| `scripts-test` | `.github/scripts/`, any workflow file in `.github/workflows/`, a ruleset JSON in `Acme/infra/github/` or a sample-api `Dockerfile` changed: every file a test there reads, so a change to one alone can't skip the test that would catch it | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`, with a throwaway `registry:3` service container (pinned by digest) for the release-tag tests. `REQUIRE_REGISTRY=1` makes a missing registry a failure, not a skip. Runs every branch of `pick-rescan-images.sh` and `release-tag.sh`, including ones the daily rescan and the once-per-release job have never hit. Not a `build-scan` dependency |
+| `kustomize` | app changed | `contents: read` | `kubectl kustomize` over the sample-api base, its overlays, the apps entry points (`Acme/platform/apps/overlays/*`), the infrastructure overlays (`kind` included, the one Flux applies) and Flux's bootstrap folder (`Acme/infra/bootstrap/`) (Module 8), saving each render. Then kubeconform v0.8.0 (`-strict`) checks the renders against kubeconform's default Kubernetes schemas and the `crd-schemas.tar.gz` of Flux 2.10.0 and the Operator 0.62.1, each download pinned by version and sha256. A test keeps those two versions equal to the ones in `Acme/infra/bootstrap/`. Gaps: the Kubernetes schemas aren't pinned, and the objects the `ResourceSet` generates in the cluster are never checked before merge |
+| `scripts-test` | `.github/scripts/`, any workflow file in `.github/workflows/`, a ruleset JSON in `Acme/infra/github/`, any YAML file under `Acme/infra/bootstrap/` (subfolders too, where `flux bootstrap` would write), an environment overlay's `kustomization.yaml` (sample-api's or the apps entry points') or a sample-api `Dockerfile` changed: every file a test there reads, so a change to one alone can't skip the test that would catch it | `contents: read` | shellcheck over `.github/scripts/*.sh`, then pytest 9.1.1 (in a venv) over `.github/scripts/tests`, with a throwaway `registry:3` service container (pinned by digest) for the release-tag tests. `REQUIRE_REGISTRY=1` makes a missing registry a failure, not a skip. Runs every branch of `pick-rescan-images.sh` and `release-tag.sh`, including ones the daily rescan and the once-per-release job have never hit. Not a `build-scan` dependency |
 | `build-scan` | app changed; needs changes, lint, test-result, kustomize | `contents: read` only: no secrets, no OIDC | Builds the image once (`VERSION=sha-<short>` via `-ldflags`) to a tarball and scans the tarball with Trivy v0.75.0 (`HIGH,CRITICAL`, `ignore-unfixed`, exit code 1). Caches the image layers and the Go build cache inside the build, but not Trivy (see "Caching"). On `push` to `main` only, uploads the tarball (1 day) |
 | `push` | `push` to `main`, after build-scan | `contents: read`, `packages: write` | Downloads the scanned tarball, `docker load`, logs in to GHCR with the run's `GITHUB_TOKEN`, pushes `ghcr.io/kerinschristopher/sample-api:sha-<short>`. Never checks out code, so what's pushed is what was scanned |
 | `release-tag` | `push` of a `v<major>.<minor>.<patch>` tag | `contents: read`, `packages: write` | Runs `.github/scripts/release-tag.sh`: adds the `<major>.<minor>.<patch>` tag to the existing `sha-<short>` image of the tagged commit with `imagetools create --prefer-index=false`, which copies the manifest as-is (the default wraps it in a new index with a new digest), then checks both tags have the same digest. Nothing is rebuilt. Checks out only `.github/scripts`. Tested by `scripts-test`; the job itself first runs on a real `v*` tag |
@@ -332,6 +332,7 @@ commit; a "new commit" changes the source or the Dockerfile.
 | + cache-dance, new commit, nothing to restore (n=1) | `39893262563` / 1 | 50 s | 19 s |
 | + cache-dance, one-line `main.go` change (n=1) | `39897448709` / 1 | 58 s | 15 s |
 | + cache-dance, source unchanged (exact hit, n=1) | `39902968713` / 1 | 40 s | 8 s |
+| No cache, first run on `main` after the merge (n=1) | `40039625472` / 1 | 79 s | 27 s |
 
 - **The layer cache pays only on a re-run of the same commit** (`Build image` 2-3 s instead of 14-18 s). A new commit always
   recompiles, because the version is a build argument of the compile step. An empty cache is about 10 s *slower* than no cache:
@@ -343,6 +344,9 @@ commit; a "new commit" changes the source or the Dockerfile.
   standard-library app that's about what it saves. It pays when the source didn't change (an exact hit skips the copy out and
   the save), as in a workflow-only commit. A larger Go codebase should gain more; that isn't measured here (an experiment on a
   generated codebase was planned, then dropped).
+- **`main` starts cold after a merge.** The first run on `main` (`73f217b`) restored nothing: 0 `CACHED` lines, and "Cache not
+  found" for the Go cache. A branch's caches can't be read from `main`, and `main` had none yet. At 79 s it's slower than every
+  branch sample, the empty-cache ones (55-67 s) included.
 - **The Trivy DB cache gains nothing.** In run `39902968713`, attempt 1 downloaded the DB from `mirror.gcr.io` in about 5 s;
   attempt 2 restored it from the cache in about 4 s (job 40 s, then 41 s). The DB is the same file for every Trivy user, so
   caching it saves no work of ours. It also costs: about 4 s to save the DB on each branch's first run of the day, 95.6 MB per

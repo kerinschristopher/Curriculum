@@ -39,9 +39,12 @@ GUARDED = [
     "Acme/platform/apps/overlays/stage/kustomization.yaml",
     "Acme/platform/apps/overlays/prod/kustomization.yaml",
     "Acme/infra/bootstrap/flux-operator-values.yaml",
+    "Acme/infra/bootstrap/flux-operator.yaml",
     "Acme/infra/bootstrap/flux-instance.yaml",
     "Acme/infra/bootstrap/kustomization.yaml",
     "Acme/infra/bootstrap/platform.yaml",
+    # test_flux_layout.py's guard reads subfolders too: this is where `flux bootstrap` writes.
+    "Acme/infra/bootstrap/flux-system/gotk-components.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
@@ -102,6 +105,38 @@ def test_kustomize_job_renders_every_entry_point():
     rendered = {path.relative_to(REPO).as_posix() for entry in entries for path in REPO.glob(entry)}
     missed = [path for path in ENTRY_POINTS if path not in rendered]
     assert missed == []
+
+
+def kustomize_step(name):
+    """The `kustomize` job's step called `name`."""
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["kustomize"]["steps"]
+    names = [s.get("name") for s in steps]
+    assert name in names, names
+    return steps[names.index(name)]
+
+
+def test_kustomize_job_validates_schemas():
+    # D7: kubeconform checks what the render step wrote against Kubernetes', Flux's and the
+    # Operator's schemas. Each download is pinned by version and checksum, as Conftest is.
+    step = kustomize_step("Validate manifests against their schemas")
+    env = step.get("env", {})
+    for tool in ("KUBECONFORM", "FLUX", "OPERATOR"):
+        assert re.fullmatch(r"\d+\.\d+\.\d+", str(env.get(f"{tool}_VERSION", ""))), env
+        assert re.fullmatch(r"[0-9a-f]{64}", str(env.get(f"{tool}_SHA256", ""))), env
+    assert step["run"].count("sha256sum -c") == 3, step["run"]
+    # -strict rejects unknown fields in Kubernetes' own kinds, and repeated keys.
+    assert "-strict" in step["run"], step["run"]
+
+
+def test_kustomize_job_validates_against_the_versions_the_cluster_runs():
+    # A Flux or Operator upgrade in Acme/infra/bootstrap must move these pins too, or CI keeps
+    # validating against the old schemas. Both pairs in one assert, so one mismatch can't hide the other.
+    env = kustomize_step("Validate manifests against their schemas").get("env", {})
+    bootstrap = REPO / "Acme" / "infra" / "bootstrap"
+    flux = yaml.safe_load((bootstrap / "flux-instance.yaml").read_text())["spec"]["distribution"]["version"]
+    tag = yaml.safe_load((bootstrap / "flux-operator-values.yaml").read_text())["image"]["tag"]
+    operator = tag.removeprefix("v").split("@")[0]
+    assert (str(env.get("FLUX_VERSION")), str(env.get("OPERATOR_VERSION"))) == (flux, operator)
 
 
 def build_options():

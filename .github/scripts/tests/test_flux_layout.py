@@ -107,3 +107,87 @@ def test_flux_instance_is_never_pruned():
     # If flux-instance.yaml left Git, prune would make Flux uninstall itself.
     annotations = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["metadata"].get("annotations", {})
     assert annotations.get("kustomize.toolkit.fluxcd.io/prune") == "disabled", annotations
+
+
+def test_operator_values_reach_flux_as_one_configmap():
+    # helm install and Flux's HelmRelease read the same file, so the tag@digest lives in one place (D2b).
+    kustomization = yaml.safe_load((BOOTSTRAP / "kustomization.yaml").read_text())
+    generators = {g["name"]: g for g in kustomization.get("configMapGenerator", [])}
+    assert "flux-operator-values" in generators, kustomization
+    generator = generators["flux-operator-values"]
+    # valuesFrom reads a ConfigMap in the HelmRelease's own namespace.
+    assert generator.get("namespace") == "flux-system", generator
+    assert generator.get("files") == ["values.yaml=flux-operator-values.yaml"], generator
+    options = generator.get("options", {})
+    # The HelmRelease names the ConfigMap inside a ResourceSet template, which kustomize doesn't rewrite.
+    assert options.get("disableNameSuffixHash") is True, generator
+    # helm-controller acts on a values change at once instead of at its 30m interval.
+    assert options.get("labels", {}).get("reconcile.fluxcd.io/watch") == "Enabled", generator
+
+
+
+def operator_resourceset():
+    """The ResourceSet in flux-operator.yaml, and its templates by kind, placeholders filled in as the Operator does."""
+    resourceset = yaml.safe_load((BOOTSTRAP / "flux-operator.yaml").read_text())
+    meta = resourceset["metadata"]
+    text = yaml.safe_dump(resourceset["spec"]["resources"])
+    text = text.replace("<< inputs.provider.name >>", meta["name"])
+    text = text.replace("<< inputs.provider.namespace >>", meta["namespace"])
+    return resourceset, {t["kind"]: t for t in yaml.safe_load(text)}
+
+
+def test_operator_resourceset_pins_the_version_helm_install_used():
+    resourceset, templates = operator_resourceset()
+    assert resourceset["kind"] == "ResourceSet", resourceset["kind"]
+    # More than one input set would generate one HelmRelease each, all fighting over the same release.
+    inputs = resourceset["spec"]["inputs"]
+    assert len(inputs) == 1, inputs
+    version = inputs[0]["version"]
+    # The docs' "*" would let the Operator upgrade itself without a PR.
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version), version
+    # The chart and its image move together, in the same PR.
+    tag = yaml.safe_load((BOOTSTRAP / "flux-operator-values.yaml").read_text())["image"]["tag"]
+    assert tag.split("@")[0] == f"v{version}", (version, tag)
+    source = templates["OCIRepository"]["spec"]
+    assert source["url"] == "oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator", source["url"]
+    # A tag or digest beside semver wins over it, and the input would then change nothing.
+    assert source["ref"] == {"semver": "<< inputs.version | quote >>"}, source["ref"]
+
+
+def test_operator_helmrelease_takes_over_the_helm_install_release():
+    _, templates = operator_resourceset()
+    release = templates["HelmRelease"]
+    spec = release["spec"]
+    # helm-controller adopts the release helm install made only if its name and namespace match (U9).
+    assert spec["releaseName"] == "flux-operator", spec["releaseName"]
+    assert release["metadata"]["namespace"] == "flux-system", release["metadata"]
+    for key in ("targetNamespace", "storageNamespace"):
+        assert key not in spec, key
+    # Runs as helm-controller: a helm uninstall deletes the chart's own service account, which breaks the fallback (U9).
+    assert "serviceAccountName" not in spec, spec
+    assert spec["chartRef"] == {"kind": "OCIRepository", "name": templates["OCIRepository"]["metadata"]["name"]}, spec
+    # The ConfigMap kustomization.yaml generates from flux-operator-values.yaml: the same tag@digest as helm install.
+    assert spec.get("valuesFrom") == [
+        {"kind": "ConfigMap", "name": "flux-operator-values", "valuesKey": "values.yaml"}
+    ], spec.get("valuesFrom")
+
+
+def test_operator_resourceset_is_applied_and_never_pruned():
+    resources = yaml.safe_load((BOOTSTRAP / "kustomization.yaml").read_text())["resources"]
+    assert "flux-operator.yaml" in resources, resources
+    resourceset, _ = operator_resourceset()
+    # Pruned, it would delete the HelmRelease, and deleting a HelmRelease uninstalls the Operator (R10).
+    annotations = resourceset["metadata"].get("annotations", {})
+    assert annotations.get("kustomize.toolkit.fluxcd.io/prune") == "disabled", annotations
+
+
+def test_bootstrap_holds_no_generated_flux_manifests():
+    # The Operator carries Flux's ~8,600 generated lines (CRDs included) in its image, so the repo
+    # doesn't. `flux install --export` or `flux bootstrap` would write them here, in a subfolder too.
+    generated = []
+    for path in sorted(BOOTSTRAP.rglob("*.yaml")):
+        text = path.read_text()
+        kinds = {doc.get("kind") for doc in yaml.safe_load_all(text) if doc}
+        if "CustomResourceDefinition" in kinds or len(text.splitlines()) > 200:
+            generated.append(path.relative_to(BOOTSTRAP).as_posix())
+    assert generated == []
