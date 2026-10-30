@@ -242,11 +242,11 @@ jobs:
           OPERATOR_SHA256: 4b6093d247918c74e21a2fb271daee47dd08eabfd515a69dd0c73e62f33f2bf1
         run: |
           set -euo pipefail
-          curl -fsSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl --retry 3 --retry-all-errors -fsSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
           echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
-          curl -fsSLo flux-schemas.tar.gz "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/crd-schemas.tar.gz"
+          curl --retry 3 --retry-all-errors -fsSLo flux-schemas.tar.gz "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/crd-schemas.tar.gz"
           echo "${FLUX_SHA256}  flux-schemas.tar.gz" | sha256sum -c -
-          curl -fsSLo operator-schemas.tar.gz "https://github.com/controlplaneio-fluxcd/flux-operator/releases/download/v${OPERATOR_VERSION}/crd-schemas.tar.gz"
+          curl --retry 3 --retry-all-errors -fsSLo operator-schemas.tar.gz "https://github.com/controlplaneio-fluxcd/flux-operator/releases/download/v${OPERATOR_VERSION}/crd-schemas.tar.gz"
           echo "${OPERATOR_SHA256}  operator-schemas.tar.gz" | sha256sum -c -
           tar -xzf kubeconform.tar.gz kubeconform
           install -m 0755 kubeconform /usr/local/bin/kubeconform
