@@ -103,10 +103,10 @@ This condition does three jobs:
 
 A branch pattern in the trust list is only as narrow as the set of people who can create a branch matching it. That half lives in GitHub,
 in the `trusted-branches` ruleset ([`Acme/infra/github/trusted-branches-ruleset.json`](../Acme/infra/github/trusted-branches-ruleset.json)).
-It covers `main`, `mod*` and `mod*/**/*`, and only repository admins can create, push to, delete or force-push those branches.
-**Module 7 splits `main` out (pending the live apply, just before PR #15 merges):** the `update` rule refuses every PR merge too, so
-`trusted-branches` will cover `mod*` and `mod*/**/*` only, and `main` will be covered by two others (see "GitHub-side controls"): it
-changes only through a PR whose required checks pass, and only admins can delete or force-push it.
+It covers `mod*` and `mod*/**/*`, and only repository admins can create, push to, delete or force-push those branches.
+Until Module 7 it covered `main` too, and its `update` rule refused every PR merge, so Module 7 split `main` out (live 2026-10-23).
+`main` is now covered by two other rulesets (see "GitHub-side controls"): it changes only through a PR whose required checks pass,
+and only admins can delete or force-push it.
 The two systems read `*` differently. IAM's `*` matches `/`, so trust `mod*` accepts `mod/anything`. GitHub matches ruleset patterns
 with `fnmatch` in pathname mode, where `*` stops at `/`, and so does `**` unless it's written as `**/`. A ruleset on `mod*` alone, or on `mod**`
 (tried, and confirmed with the `rules/branches` API), leaves `mod/anything` open to collaborators while AWS still trusts it.
@@ -321,18 +321,18 @@ approved apply create the NAT gateway and then fail on the IAM and EKS creates, 
 
 IAM is half of each control; GitHub holds the other half. All of these are captured as JSON in [`Acme/infra/github/`](../Acme/infra/github/).
 
-| Control | What it does | Live state (checked 2026-10-10) |
+| Control | What it does | Live state (checked 2026-10-10; `trusted-branches` and `main-protect` re-checked 2026-10-28) |
 |---|---|---|
-| Ruleset `trusted-branches` (`24627971`) | Only admins can create, update, delete or force-push `main`, `mod*` and `mod*/**/*`. Backs the plan role's branch patterns. **The file now lists `mod*` only; live still includes `main` until the Module 7 PUT (see below)** | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
-| Ruleset `main-protect` (Module 7) | Only admins can create, delete or force-push `main`. No `update` rule, so it doesn't refuse merges | **Not yet created** (pending the live apply). File: `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
+| Ruleset `trusted-branches` (`24627971`) | Only admins can create, update, delete or force-push `mod*` and `mod*/**/*`. Backs the plan role's branch patterns. `main` was removed in Module 7 (2026-10-23) | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
+| Ruleset `main-protect` (`25760562`, Module 7) | Only admins can create, delete or force-push `main`. No `update` rule, so it doesn't refuse merges | Created 2026-10-23 23:23 UTC; applies to `~DEFAULT_BRANCH`. `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
 | Ruleset `main-merge-gate` (`24832716`) | `main` changes only through a PR whose 9 required checks pass (listed in [`docs/ci.md`](ci.md)) | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: pull_request}]`: an admin can merge a PR over a failing check, explicitly, but can't push to `main` directly |
 | Environment `dev-apply` | Required reviewer `kerinschristopher`, `prevent_self_review: false`, deployment branch `main` only. Backs the apply role's trust | `can_admins_bypass: true`. The only admin is also the only reviewer, so this changes nothing today; set it to `false` when someone else joins |
 
 The bypass actor list can't be seen by people without admin access to the repo, so it's recorded here. Re-check it with
 `gh api repos/kerinschristopher/Curriculum/rulesets/<id> --jq .bypass_actors` and update this table when it changes.
 
-**The merge gate split (Module 7, pending the live apply just before PR #15 merges).** `trusted-branches` covers `main` as well,
-and its `update` rule refuses any update to `main` by someone without its bypass. A merge is an update, so every PR was refused
+**The merge gate split (Module 7, live 2026-10-23 23:23 UTC, just before PR #15 merged).** `trusted-branches` covered `main` as well,
+and its `update` rule refused any update to `main` by someone without its bypass. A merge is an update, so every PR was refused
 however green its checks, and every one merged into `main` (#9, #11-#14) went in through the admin bypass, which skips the required
 checks as well. `main-merge-gate`'s PR-only rule worked (direct pushes were refused), but its required checks never decided a merge.
 After the split, `trusted-branches` covers `mod*` only, and `main-protect` keeps the rest of `main`'s protection.
@@ -365,11 +365,11 @@ What that allows, accepted on purpose (2026-10-23):
 | Real manual plan on `mod6` (run `38032295497`) | The real branch trust match and condition values with `-lock=false` | Passed |
 | Negative trust test, dispatch from throwaway branch `trust-check` (run `37571573254`) | A branch outside `main`/`mod*` gets `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Passed, branch deleted |
 | Ruleset coverage: `gh api repos/kerinschristopher/Curriculum/rules/branches/<name>` (encode `/` as `%2F`) | `main`, `mod5`, `modern`, `mod/evil` and `mod/a/b` get the `trusted-branches` rules, and `trust-check` and `feature/mod5` get none | Passed (before the Module 7 split, when `trusted-branches` still covered `main`) |
-| Ruleset coverage after the split (Module 7) | `main` gets `main-protect` and `main-merge-gate` rules and no `update` rule; `mod7-caching` still gets all four `trusted-branches` rules; a PR with green checks reads `CLEAN`, not `BLOCKED` | **Not yet run** (with the live ruleset change) |
+| Ruleset coverage after the split (Module 7) | `main` gets `main-protect` and `main-merge-gate` rules and no `update` rule; `mod7-caching` still gets all four `trusted-branches` rules; a PR with green checks reads `CLEAN`, not `BLOCKED` | Passed (2026-10-23): `main` gets `pull_request` and `required_status_checks` (`24832716`) plus `creation`, `deletion` and `non_fast_forward` (`25760562`), and no `update`; `mod7-caching` gets all four `trusted-branches` rules (re-checked 2026-10-28). PR #15 went `BLOCKED` → `CLEAN`, and its merge (`73f217b`) is rule suite `4695546538`, result `pass`. Every earlier merge into `main` the rule-suites API lists for the past month is `bypass` |
 | Ruleset enforcement: push `HEAD:mod/evil` with the `trusted-branches` bypass temporarily set to "pull requests only" (Module 5) | A push that doesn't bypass is rejected | Passed: `GH013 ... Cannot create ref due to creations being restricted`; bypass restored to Always |
 | Direct push to `main` (2026-10-10) | `main-merge-gate` refuses it even for an admin | Passed: `GH013 ... Changes must be made through a pull request` |
 | Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM read statements against real resources | Passed in Module 5: 58 resources refreshed with no AccessDenied (`eb34972`) |
-| First CI apply after the Module 6 merge | The apply role against real AWS, including actions that authorize against two resources (for example `AssociateRouteTable` on the subnet and the route table), and the environment gate | **Not yet run** |
+| First CI apply after the Module 6 merge | The apply role against real AWS, including actions that authorize against two resources (for example `AssociateRouteTable` on the subnet and the route table), and the environment gate | Passed on attempt 2: run `38492865526` (`e094c93`, 2026-10-14). Attempt 1 failed with 403s on `CreateSubnet` (4) and `CreateRouteTable` (2), which AWS also authorizes against the parent VPC (`docs/design/module-6-ci-cd.md`, "First apply after merge"); attempt 2 succeeded after the fix |
 
 Run the simulator tests from WSL with AWS credentials that can call `iam:SimulatePrincipalPolicy`
 (and `iam:SimulateCustomPolicy` for planned policies). **They can't run in CI, and that is deliberate:** neither CI role has
