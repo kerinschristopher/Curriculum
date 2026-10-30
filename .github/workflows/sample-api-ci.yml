@@ -227,9 +227,10 @@ jobs:
             kubectl kustomize "$dir" > "$RUNNER_TEMP/rendered/${dir//\//_}.yaml"
           done
 
-      # D7 (Module 8): -strict rejects any field a schema doesn't define, such as a misspelt
-      # `intervall`. Kubernetes' own kinds use kubeconform's default schemas; Flux's and the
-      # Operator's come from their releases. Pinned by version and checksum, as Conftest is.
+      # D7 (Module 8): Flux's and the Operator's schemas reject fields they don't define, such as a
+      # misspelt `intervall`; -strict does the same for Kubernetes' own kinds and rejects repeated keys.
+      # Kubernetes' kinds use kubeconform's default schemas; Flux's and the Operator's come from their
+      # releases. Pinned by version and checksum, as Conftest is.
       - name: Validate manifests against their schemas
         working-directory: ${{ runner.temp }}
         env:

@@ -122,8 +122,19 @@ def test_kustomize_job_validates_schemas():
         assert re.fullmatch(r"\d+\.\d+\.\d+", str(env.get(f"{tool}_VERSION", ""))), env
         assert re.fullmatch(r"[0-9a-f]{64}", str(env.get(f"{tool}_SHA256", ""))), env
     assert step["run"].count("sha256sum -c") == 3, step["run"]
-    # -strict rejects fields a schema doesn't define, such as a misspelt `intervall`.
+    # -strict rejects unknown fields in Kubernetes' own kinds, and repeated keys.
     assert "-strict" in step["run"], step["run"]
+
+
+def test_kustomize_job_validates_against_the_versions_the_cluster_runs():
+    # A Flux or Operator upgrade in Acme/infra/bootstrap must move these pins too, or CI keeps
+    # validating against the old schemas. Both pairs in one assert, so one mismatch can't hide the other.
+    env = kustomize_step("Validate manifests against their schemas").get("env", {})
+    bootstrap = REPO / "Acme" / "infra" / "bootstrap"
+    flux = yaml.safe_load((bootstrap / "flux-instance.yaml").read_text())["spec"]["distribution"]["version"]
+    tag = yaml.safe_load((bootstrap / "flux-operator-values.yaml").read_text())["image"]["tag"]
+    operator = tag.removeprefix("v").split("@")[0]
+    assert (str(env.get("FLUX_VERSION")), str(env.get("OPERATOR_VERSION"))) == (flux, operator)
 
 
 def build_options():
