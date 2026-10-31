@@ -38,6 +38,7 @@ GUARDED = [
     "Acme/platform/apps/overlays/dev/kustomization.yaml",
     "Acme/platform/apps/overlays/stage/kustomization.yaml",
     "Acme/platform/apps/overlays/prod/kustomization.yaml",
+    "Acme/platform/apps/overlays/dev/image-automation.yaml",
     "Acme/infra/bootstrap/flux-operator-values.yaml",
     "Acme/infra/bootstrap/flux-operator.yaml",
     "Acme/infra/bootstrap/flux-instance.yaml",
