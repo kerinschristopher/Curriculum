@@ -154,6 +154,14 @@ def test_operator_resourceset_pins_the_version_helm_install_used():
     assert source["ref"] == {"semver": "<< inputs.version | quote >>"}, source["ref"]
 
 
+def test_bootstrap_doc_installs_the_operator_version_git_pins():
+    # A rebuild's helm commands run by hand, outside Flux: an Operator upgrade must move them too.
+    resourceset, _ = operator_resourceset()
+    pinned = resourceset["spec"]["inputs"][0]["version"]
+    versions = re.findall(r"--version (\S+)", (REPO / "docs" / "bootstrap.md").read_text())
+    assert versions and set(versions) == {pinned}, versions
+
+
 def test_operator_helmrelease_takes_over_the_helm_install_release():
     _, templates = operator_resourceset()
     release = templates["HelmRelease"]
