@@ -96,6 +96,14 @@ def test_image_automation_writes_with_a_key_that_stays_out_of_git():
     assert committed == []
 
 
+def test_image_automation_commits_are_conventional_and_credit_no_account():
+    commit = image_automation()["ImageUpdateAutomation"]["spec"]["git"]["commit"]
+    # Flux's default message isn't a Conventional Commit, and merging the PR brings it into main.
+    assert commit.get("messageTemplate", "").startswith("chore(sample-api): deploy "), commit
+    # .invalid is a reserved domain: no GitHub account can be credited with these commits.
+    assert commit["author"]["email"].endswith(".invalid"), commit
+
+
 def test_operator_image_is_pinned_by_tag_and_digest():
     # The Operator runs as cluster-admin: a moved tag must not change what runs.
     values = yaml.safe_load((BOOTSTRAP / "flux-operator-values.yaml").read_text())

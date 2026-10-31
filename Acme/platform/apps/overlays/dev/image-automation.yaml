@@ -50,8 +50,12 @@ spec:
         branch: main
     commit:
       author:
-        name: fluxcdbot
-        email: fluxcdbot@users.noreply.github.com
+        name: Flux image automation
+        email: flux@localhost.invalid
+      messageTemplate: |
+        chore(sample-api): deploy {{ range .Changed.Changes }}{{ if hasSuffix ":tag" .Setter }}{{ .NewValue }}{{ end }}{{ end }} to dev
+
+        {{ .Changed.Summary }}
     push:
       branch: flux/image-updates
   update:
