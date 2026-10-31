@@ -1,0 +1,22 @@
+# Flux's image automation for dev: docs/design/module-8-gitops-flux.md §4.
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImageRepository
+metadata:
+  name: sample-api
+  namespace: flux-system
+spec:
+  image: ghcr.io/kerinschristopher/sample-api
+  interval: 5m
+---
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImagePolicy
+metadata:
+  name: sample-api
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: sample-api
+  policy:
+    semver:
+      range: ">=0.1.0"
+  digestReflectionPolicy: IfNotPresent

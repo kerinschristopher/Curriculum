@@ -46,6 +46,24 @@ def test_every_env_has_an_apps_entry_point_for_its_own_overlay():
     assert wrong == []
 
 
+def image_automation():
+    """{kind: object} of dev's image-automation.yaml, which dev's entry point must list."""
+    entry = yaml.safe_load((APPS_ENTRY_POINTS / "dev" / "kustomization.yaml").read_text())
+    assert "image-automation.yaml" in entry["resources"], entry["resources"]
+    path = APPS_ENTRY_POINTS / "dev" / "image-automation.yaml"
+    return {doc["kind"]: doc for doc in yaml.safe_load_all(path.read_text())}
+
+
+def test_dev_image_markers_name_a_policy_that_exists():
+    # A marker naming no real policy is only a comment: dev would silently never update.
+    policy = image_automation()["ImagePolicy"]["metadata"]
+    reference = f'{policy["namespace"]}:{policy["name"]}'
+    overlay = (SAMPLE_API_OVERLAYS / "dev" / "kustomization.yaml").read_text()
+    for field, setter in (("newTag", "tag"), ("digest", "digest")):
+        marker = f'# {{"$imagepolicy": "{reference}:{setter}"}}'
+        assert re.search(rf"^\s*{field}: \S+ {re.escape(marker)}$", overlay, re.M), (field, marker)
+
+
 def test_operator_image_is_pinned_by_tag_and_digest():
     # The Operator runs as cluster-admin: a moved tag must not change what runs.
     values = yaml.safe_load((BOOTSTRAP / "flux-operator-values.yaml").read_text())
