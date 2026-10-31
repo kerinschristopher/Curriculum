@@ -60,6 +60,13 @@ def test_flux_instance_pins_an_exact_flux_version():
     assert distribution["registry"] == "ghcr.io/fluxcd", distribution["registry"]
 
 
+def test_flux_instance_runs_the_image_controllers():
+    # Image automation needs both; the FluxInstance only runs what it lists.
+    components = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]["components"]
+    missing = {"image-reflector-controller", "image-automation-controller"} - set(components)
+    assert not missing, missing
+
+
 def test_flux_syncs_its_own_folder_from_main_anonymously():
     sync = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"].get("sync", {})
     assert sync.get("kind") == "GitRepository", sync
