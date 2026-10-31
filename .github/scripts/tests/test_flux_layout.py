@@ -7,10 +7,13 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
     ~/.venvs/iam-tests/bin/pytest -v .github/scripts/tests
 """
 
+import json
 import re
 from pathlib import Path
 
 import yaml
+
+from test_branch_rulesets import applies_to
 
 REPO = Path(__file__).resolve().parents[3]
 SAMPLE_API_OVERLAYS = REPO / "Acme" / "platform" / "apps" / "sample-api" / "overlays"
@@ -62,6 +65,35 @@ def test_dev_image_markers_name_a_policy_that_exists():
     for field, setter in (("newTag", "tag"), ("digest", "digest")):
         marker = f'# {{"$imagepolicy": "{reference}:{setter}"}}'
         assert re.search(rf"^\s*{field}: \S+ {re.escape(marker)}$", overlay, re.M), (field, marker)
+
+
+def test_image_automation_pushes_beside_main_never_to_it():
+    git = image_automation()["ImageUpdateAutomation"]["spec"]["git"]
+    checkout, push = git["checkout"]["ref"]["branch"], git["push"]["branch"]
+    # main only changes through the merge gate: Flux proposes, a reviewed PR decides.
+    assert checkout == "main", checkout
+    assert push != checkout, push
+    # A ruleset on the push branch would refuse every run.
+    rulesets = sorted((REPO / "Acme" / "infra" / "github").glob("*-ruleset.json"))
+    assert rulesets
+    refusing = [p.name for p in rulesets if applies_to(json.loads(p.read_text()), f"refs/heads/{push}")]
+    assert refusing == []
+
+
+def test_image_automation_only_rewrites_dev():
+    update = image_automation()["ImageUpdateAutomation"]["spec"]["update"]
+    assert update["strategy"] == "Setters", update
+    assert (REPO / update["path"]).resolve() == (SAMPLE_API_OVERLAYS / "dev").resolve(), update
+
+
+def test_image_automation_writes_with_a_key_that_stays_out_of_git():
+    objects = image_automation()
+    source = objects["GitRepository"]
+    assert objects["ImageUpdateAutomation"]["spec"]["sourceRef"]["name"] == source["metadata"]["name"]
+    assert source["spec"]["url"].startswith("ssh://"), source["spec"]
+    assert source["spec"]["secretRef"]["name"] == "flux-image-updates", source["spec"]
+    committed = [str(p) for p in (REPO / "Acme").rglob("*.yaml") if re.search(r"^kind: Secret\s*$", p.read_text(), re.M)]
+    assert committed == []
 
 
 def test_operator_image_is_pinned_by_tag_and_digest():

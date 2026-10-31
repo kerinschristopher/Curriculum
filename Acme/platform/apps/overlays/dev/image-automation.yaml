@@ -20,3 +20,40 @@ spec:
     semver:
       range: ">=0.1.0"
   digestReflectionPolicy: IfNotPresent
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: flux-image-updates
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: ssh://git@github.com/kerinschristopher/Curriculum.git
+  ref:
+    branch: main
+  secretRef:
+    name: flux-image-updates
+---
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImageUpdateAutomation
+metadata:
+  name: sample-api
+  namespace: flux-system
+spec:
+  interval: 10m
+  sourceRef:
+    kind: GitRepository
+    name: flux-image-updates
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        name: fluxcdbot
+        email: fluxcdbot@users.noreply.github.com
+    push:
+      branch: flux/image-updates
+  update:
+    path: ./Acme/platform/apps/sample-api/overlays/dev
+    strategy: Setters
