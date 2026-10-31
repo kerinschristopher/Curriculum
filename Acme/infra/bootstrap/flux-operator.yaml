@@ -2,7 +2,8 @@
 # upgrades" example (operator-migration.md, v0.62.1) with an exact version instead of "*", values from the ConfigMap
 # kustomization.yaml generates from flux-operator-values.yaml, and no serviceAccountName (so the HelmRelease runs as
 # helm-controller). The HelmRelease adopts the release helm install made (same name and namespace) and reverts hand changes.
-# An Operator upgrade is one PR: the version here and the image tag@digest in flux-operator-values.yaml.
+# An Operator upgrade is one PR: the version here, the image tag@digest in flux-operator-values.yaml, and the
+# Operator version and checksums in sample-api-ci.yml.
 apiVersion: fluxcd.controlplane.io/v1
 kind: ResourceSet
 metadata:
