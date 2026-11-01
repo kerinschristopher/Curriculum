@@ -1,23 +1,18 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-
 namespace: sample-api-dev
-
 resources:
   - namespace.yaml
   - ../../base
-
 images:
   - name: ghcr.io/kerinschristopher/sample-api
     newTag: 0.1.3 # {"$imagepolicy": "flux-system:sample-api:tag"}
     digest: sha256:d3427a1e427955c9605d44cdb9b7dfe2744f4a639b243048ccda66806e1b4b17 # {"$imagepolicy": "flux-system:sample-api:digest"}
-
 configMapGenerator:
   - name: sample-api-config
     behavior: merge
     literals:
       - LOG_LEVEL=debug
-
 patches:
   - path: replicas.yaml
   - path: ingress-host.yaml
