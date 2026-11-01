@@ -149,7 +149,7 @@ verified"). What that allows, and the gaps left open, are in `docs/iam.md` ("Git
 1. Merge to `main` and wait for a green `sample-api-ci` run. GHCR then has `sha-<short>` for the merge commit.
 2. Tag that commit and push the tag: `git tag v0.2.0 <commit> && git push origin v0.2.0`.
 3. `release-tag` adds `0.2.0` to the same image. If the commit has no `sha-*` image (not on `main`, or its run failed), the job fails and says so. If it fails on a digest mismatch, the release tag was already pushed: delete that package version (Packages > sample-api > versions), fix the cause and re-run the job.
-4. Dev moves by itself: Flux sees the new release in GHCR and commits its `newTag` and `digest` to `flux/image-updates`. Open a PR from that branch into `main`; merging it deploys to dev. Don't push to that branch, because Flux overwrites it.
+4. Dev moves by itself: Flux sees the new release in GHCR and commits its `newTag` and `digest` to `flux/image-updates`. Open a PR from that branch into `main`; merging it deploys to dev. Then delete the branch, so Flux starts its next one from `main`: a kept branch conflicts after a rollback or a squash merge. GitHub's delete-on-merge setting would usually do this, but it's left off here because it would also delete merged `mod*` branches, which are kept as archival notes. Don't push to that branch: Flux commits on top of it, so your commits would stay.
 5. Promote to stage or prod in a PR: copy dev's `newTag` and `digest` lines into that environment's overlay. Change both lines together: the runtime pulls by digest, so a new `newTag` with the old `digest` still runs the old image. To read a release's digest yourself: `docker buildx imagetools inspect ghcr.io/kerinschristopher/sample-api:0.2.0 --format '{{.Manifest.Digest}}'`.
 
 The first push needs a one-time manual setting: in the `sample-api` package's settings, under "Manage Actions access", give the
@@ -290,7 +290,7 @@ Fix the Terraform; don't skip the policy.
 | What went wrong | Roll back by |
 |---|---|
 | A bad app change merged | Revert the PR. CI builds, scans and publishes a new `sha-*` image. Releases are untouched until you tag |
-| A bad release is deployed | Move that overlay's `newTag` and `digest` back to the previous release in a PR (both lines, as in "Releasing an image", step 5). In dev, Flux then proposes the bad release again on `flux/image-updates`, because it picks the highest version: leave that PR unmerged until a fixed release replaces it. Every release tag stays in GHCR |
+| A bad release is deployed | Move that overlay's `newTag` and `digest` back to the previous release in a PR (both lines, as in "Releasing an image", step 5). In dev, with the branch deleted as in step 4, Flux then proposes the bad release again on `flux/image-updates`, because it picks the highest version: leave that PR unmerged until a fixed release replaces it. Every release tag stays in GHCR |
 | A bad infrastructure change was applied | Revert the PR. The merge produces a new plan to undo it, which you approve like any other. Old state versions are kept in the versioned S3 bucket if you need to inspect them |
 | An apply failed halfway | Terraform releases the lock and state records what was done. Fix forward in a PR, or revert |
 | A runner died mid-apply and the lock is still held | From WSL: `terraform force-unlock <lock id>` in `Acme/infra/terraform/environments/dev` (the ID is in the error message). Only once you're sure no apply is running |

@@ -187,5 +187,8 @@ Afterwards the `ResourceSet` can still show Ready, up to an hour. That only mean
 - **"skipped" in `flux-system`'s events.** If `flux-instance.yaml` or `flux-operator.yaml` leaves Git, Flux deletes nothing
   and reports it as skipped. Those objects are protected from pruning, and they stay unmanaged until the file returns.
 - **`flux get` shows an old commit.** Check that the cluster has been running: `docker inspect sample-api-control-plane --format '{{.State.StartedAt}}'`.
-- **Commits you pushed to `flux/image-updates` disappeared.** Flux force-overwrites that branch on every run, so never push to it.
-  Change an image by merging its PR, or edit the overlay in your own branch.
+- **A PR from `flux/image-updates` shows conflicts.** Flux creates that branch from `main` only when it doesn't exist. If it
+  exists, Flux commits on top of it, and anything already there stays, hand commits included. Delete the branch, which also
+  closes any open PR from it. If dev isn't on the latest release, Flux recreates the branch from `main` at its next run, up to
+  10 minutes later, so open a new PR then. To avoid this, delete the branch after merging each PR, and never push to it: change
+  an image by merging its PR, or edit the overlay in your own branch.
