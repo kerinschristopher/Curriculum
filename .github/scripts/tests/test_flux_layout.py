@@ -24,6 +24,7 @@ BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
 SECRET_KIND = re.compile(r"""^kind:\s*["']?Secret["']?\s*$""", re.M)
 
 
+
 def test_every_env_overlay_pins_sample_api_by_digest():
     overlays = sorted(SAMPLE_API_OVERLAYS.glob("*/kustomization.yaml"))
     # A moved directory would make the loop below check nothing and pass.
@@ -101,6 +102,27 @@ def test_image_automation_writes_with_a_key_that_stays_out_of_git():
     assert committed == []
 
 
+def test_image_automation_watches_the_image_the_overlays_deploy():
+    # Characterisation (C6): all of these were green on arrival. Changing any one temporarily turns
+    # it red; the results are in the design doc's log.
+    objects = image_automation()
+    assert objects["ImageRepository"]["spec"]["image"] == SAMPLE_API_IMAGE
+    policy = objects["ImagePolicy"]["spec"]
+    assert policy["imageRepositoryRef"]["name"] == objects["ImageRepository"]["metadata"]["name"]
+    # Only semver ignores the sha-* tags: anything else would pick one, and dev's bumps would never stop.
+    assert "semver" in policy["policy"], policy
+    # Without it the :digest marker writes an empty digest.
+    assert policy["digestReflectionPolicy"] in ("IfNotPresent", "Always"), policy
+    spec = objects["ImageUpdateAutomation"]["spec"]
+    # Either would stop dev updating, silently.
+    assert "policySelector" not in spec and "suspend" not in spec, spec
+    # A refspec pushes beside push.branch, and this key can write mod*.
+    assert "refspec" not in spec["git"]["push"], spec["git"]["push"]
+    entry = yaml.safe_load((APPS_ENTRY_POINTS / "dev" / "kustomization.yaml").read_text())
+    # A namespace here would move the image objects out of flux-system, and the markers would match nothing.
+    assert "namespace" not in entry, entry
+
+
 def test_image_automation_commits_are_conventional_and_credit_no_account():
     commit = image_automation()["ImageUpdateAutomation"]["spec"]["git"]["commit"]
     # Flux's default message isn't a Conventional Commit, and merging the PR brings it into main.
@@ -171,6 +193,8 @@ def test_platform_applies_infrastructure_then_each_env():
         assert (REPO / spec["path"] / "kustomization.yaml").exists(), name
         assert spec["sourceRef"] == {"kind": "GitRepository", "name": "flux-system"}, name
         assert spec.get("prune") is True, name
+        # A suspended Kustomization stops applying and stops reverting drift, silently.
+        assert "suspend" not in spec, name
         # Deleting Flux's objects (a recovery drill) must not delete the workloads.
         assert spec.get("deletionPolicy") == "Orphan", name
 
