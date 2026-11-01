@@ -74,6 +74,8 @@ def test_image_automation_pushes_beside_main_never_to_it():
     assert checkout == "main", checkout
     assert push != checkout, push
     # A ruleset on the push branch would refuse every run.
+    # Characterisation (C6): no ruleset has ever covered it, so this was green on arrival. Adding the
+    # branch to a ruleset file temporarily turns it red; the result is in the design doc's log.
     rulesets = sorted((REPO / "Acme" / "infra" / "github").glob("*-ruleset.json"))
     assert rulesets
     refusing = [p.name for p in rulesets if applies_to(json.loads(p.read_text()), f"refs/heads/{push}")]
@@ -92,6 +94,8 @@ def test_image_automation_writes_with_a_key_that_stays_out_of_git():
     assert objects["ImageUpdateAutomation"]["spec"]["sourceRef"]["name"] == source["metadata"]["name"]
     assert source["spec"]["url"].startswith("ssh://"), source["spec"]
     assert source["spec"]["secretRef"]["name"] == "flux-image-updates", source["spec"]
+    # Characterisation (C6): no Secret has ever been committed, so this half was green on arrival.
+    # A temporary `kind: Secret` file turns it red; the result is in the design doc's log.
     committed = [str(p) for p in (REPO / "Acme").rglob("*.yaml") if re.search(r"^kind: Secret\s*$", p.read_text(), re.M)]
     assert committed == []
 
@@ -130,6 +134,8 @@ def test_flux_syncs_its_own_folder_from_main_anonymously():
     assert sync.get("kind") == "GitRepository", sync
     # Anonymous HTTPS (D3): the repo is public, so no credential sits in the cluster.
     assert sync.get("url", "").startswith("https://"), sync
+    # Characterisation (C6): the sync has never had a pullSecret, so this was green on arrival.
+    # Adding one temporarily turns it red; the result is in the design doc's log.
     assert "pullSecret" not in sync, sync
     # Only main is behind the merge gate; any other branch reaches a cluster-admin controller unreviewed.
     assert sync.get("ref") == "refs/heads/main", sync
@@ -205,6 +211,8 @@ def test_operator_resourceset_pins_the_version_helm_install_used():
     resourceset, templates = operator_resourceset()
     assert resourceset["kind"] == "ResourceSet", resourceset["kind"]
     # More than one input set would generate one HelmRelease each, all fighting over the same release.
+    # Characterisation (C6): there has only ever been one, so this was green on arrival. A second
+    # input set temporarily turns it red; the result is in the design doc's log.
     inputs = resourceset["spec"]["inputs"]
     assert len(inputs) == 1, inputs
     version = inputs[0]["version"]
@@ -227,6 +235,8 @@ def test_operator_helmrelease_takes_over_the_helm_install_release():
     # helm-controller adopts the release helm install made only if its name and namespace match (U9).
     assert spec["releaseName"] == "flux-operator", spec["releaseName"]
     assert release["metadata"]["namespace"] == "flux-system", release["metadata"]
+    # Characterisation (C6): neither key has ever been set, so this was green on arrival. Adding
+    # either one temporarily turns it red; the result is in the design doc's log.
     for key in ("targetNamespace", "storageNamespace"):
         assert key not in spec, key
     # Runs as helm-controller: a helm uninstall deletes the chart's own service account, which breaks the fallback (U9).
