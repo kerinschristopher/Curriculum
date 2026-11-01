@@ -38,6 +38,7 @@ GUARDED = [
     "Acme/platform/apps/overlays/dev/kustomization.yaml",
     "Acme/platform/apps/overlays/stage/kustomization.yaml",
     "Acme/platform/apps/overlays/prod/kustomization.yaml",
+    "Acme/platform/apps/overlays/dev/image-automation.yaml",
     "Acme/infra/bootstrap/flux-operator-values.yaml",
     "Acme/infra/bootstrap/flux-operator.yaml",
     "Acme/infra/bootstrap/flux-instance.yaml",
@@ -45,6 +46,13 @@ GUARDED = [
     "Acme/infra/bootstrap/platform.yaml",
     # test_flux_layout.py's guard reads subfolders too: this is where `flux bootstrap` writes.
     "Acme/infra/bootstrap/flux-system/gotk-components.yaml",
+    # test_kustomize_job_validates_against_the_cluster_kubernetes_version reads the node image.
+    "Acme/platform/kind/sample-api-cluster.yaml",
+    # test_flux_layout.py's no-Secret checks read every YAML file under Acme/: these stand for the rest.
+    "Acme/new-file.yaml",
+    "Acme/new-file.yml",
+    "Acme/platform/apps/sample-api/base/new-file.yaml",
+    "Acme/platform/infrastructure/overlays/kind/new-file.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
@@ -115,6 +123,19 @@ def kustomize_step(name):
     return steps[names.index(name)]
 
 
+def commands(step):
+    """The commands bash runs: comment lines dropped, backslash continuations joined."""
+    script = re.sub(r"\\\n\s*", "", step["run"])
+    return [line.strip() for line in script.splitlines() if line.strip() and not line.strip().startswith("#")]
+
+
+def kubeconform_command(step):
+    """The step's one `kubeconform -strict` command."""
+    found = [line for line in commands(step) if line.startswith("kubeconform -strict")]
+    assert len(found) == 1, step["run"]
+    return found[0]
+
+
 def test_kustomize_job_validates_schemas():
     # D7: kubeconform checks what the render step wrote against Kubernetes', Flux's and the
     # Operator's schemas. Each download is pinned by version and checksum, as Conftest is.
@@ -123,7 +144,7 @@ def test_kustomize_job_validates_schemas():
     for tool in ("KUBECONFORM", "FLUX", "OPERATOR"):
         assert re.fullmatch(r"\d+\.\d+\.\d+", str(env.get(f"{tool}_VERSION", ""))), env
         assert re.fullmatch(r"[0-9a-f]{64}", str(env.get(f"{tool}_SHA256", ""))), env
-    assert step["run"].count("sha256sum -c") == 3, step["run"]
+    assert step["run"].count("sha256sum -c") == 4, step["run"]
     # -strict rejects unknown fields in Kubernetes' own kinds, and repeated keys.
     assert "-strict" in step["run"], step["run"]
 
@@ -137,6 +158,49 @@ def test_kustomize_job_validates_against_the_versions_the_cluster_runs():
     tag = yaml.safe_load((bootstrap / "flux-operator-values.yaml").read_text())["image"]["tag"]
     operator = tag.removeprefix("v").split("@")[0]
     assert (str(env.get("FLUX_VERSION")), str(env.get("OPERATOR_VERSION"))) == (flux, operator)
+
+
+def test_kustomize_job_validates_against_the_cluster_kubernetes_version():
+    # Without -kubernetes-version, kubeconform uses the schemas for Kubernetes master, not what
+    # the cluster runs. A node image upgrade must move this too, as a Flux upgrade does above.
+    step = kustomize_step("Validate manifests against their schemas")
+    env = step.get("env", {})
+    cluster = yaml.safe_load((REPO / "Acme" / "platform" / "kind" / "sample-api-cluster.yaml").read_text())
+    image = cluster["nodes"][0]["image"]
+    node = re.fullmatch(r"kindest/node:v(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}", image)
+    assert node, image
+    assert str(env.get("KUBERNETES_VERSION")) == node.group(1), env
+    assert '-kubernetes-version "$KUBERNETES_VERSION"' in kubeconform_command(step), step["run"]
+    # "default" reads the schema repo's moving master, so a required check could turn red with no commit here.
+    assert re.fullmatch(r"[0-9a-f]{40}", str(env.get("KUBERNETES_SCHEMAS_COMMIT", ""))), env
+    assert "/${KUBERNETES_SCHEMAS_COMMIT}/" in step["run"], step["run"]
+    assert "-schema-location default" not in step["run"], step["run"]
+
+
+def test_kustomize_job_expands_every_resourceset():
+    # kubectl kustomize leaves a ResourceSet's templates unexpanded, so kubeconform never sees the
+    # objects it generates. Output outside rendered/ would be skipped without an error.
+    step = kustomize_step("Validate manifests against their schemas")
+    assert re.fullmatch(r"[0-9a-f]{64}", str(step.get("env", {}).get("OPERATOR_CLI_SHA256", ""))), step.get("env")
+    bootstrap = REPO / "Acme" / "infra" / "bootstrap"
+    resourcesets = [
+        path.relative_to(REPO).as_posix()
+        for path in sorted(bootstrap.rglob("*.yaml"))
+        if any(doc and doc.get("kind") == "ResourceSet" for doc in yaml.safe_load_all(path.read_text()))
+    ]
+    assert resourcesets, bootstrap
+    lines = commands(step)
+    build = r'flux-operator build resourceset -f "\$GITHUB_WORKSPACE/(\S+)" > rendered/[^/\s]+\.yaml'
+    built = [match.group(1) for match in (re.fullmatch(build, line) for line in lines) if match]
+    assert sorted(built) == resourcesets
+    # Each of these would leave the generated objects unchecked and the step green.
+    validate = kubeconform_command(step)
+    last_build = max(index for index, line in enumerate(lines) if line.startswith("flux-operator build"))
+    assert last_build < lines.index(validate), lines
+    assert validate.endswith(" rendered/*.yaml"), validate
+    assert "-ignore-missing-schemas" not in validate, validate
+    # Not asserted: the CLI's checksum target and download URL. If either is wrong, sha256sum -c
+    # fails loudly in CI unless the hash is changed too, which is enough here.
 
 
 def build_options():

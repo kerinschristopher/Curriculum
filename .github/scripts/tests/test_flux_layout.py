@@ -7,10 +7,13 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
     ~/.venvs/iam-tests/bin/pytest -v .github/scripts/tests
 """
 
+import json
 import re
 from pathlib import Path
 
 import yaml
+
+from test_branch_rulesets import applies_to
 
 REPO = Path(__file__).resolve().parents[3]
 SAMPLE_API_OVERLAYS = REPO / "Acme" / "platform" / "apps" / "sample-api" / "overlays"
@@ -18,6 +21,8 @@ SAMPLE_API_IMAGE = "ghcr.io/kerinschristopher/sample-api"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 APPS_ENTRY_POINTS = REPO / "Acme" / "platform" / "apps" / "overlays"
 BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
+SECRET_KIND = re.compile(r"""^kind:\s*["']?Secret["']?\s*$""", re.M)
+
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -46,6 +51,86 @@ def test_every_env_has_an_apps_entry_point_for_its_own_overlay():
     assert wrong == []
 
 
+def image_automation():
+    """{kind: object} of dev's image-automation.yaml, which dev's entry point must list."""
+    entry = yaml.safe_load((APPS_ENTRY_POINTS / "dev" / "kustomization.yaml").read_text())
+    assert "image-automation.yaml" in entry["resources"], entry["resources"]
+    path = APPS_ENTRY_POINTS / "dev" / "image-automation.yaml"
+    return {doc["kind"]: doc for doc in yaml.safe_load_all(path.read_text())}
+
+
+def test_dev_image_markers_name_a_policy_that_exists():
+    # A marker naming no real policy is only a comment: dev would silently never update.
+    policy = image_automation()["ImagePolicy"]["metadata"]
+    reference = f'{policy["namespace"]}:{policy["name"]}'
+    overlay = (SAMPLE_API_OVERLAYS / "dev" / "kustomization.yaml").read_text()
+    for field, setter in (("newTag", "tag"), ("digest", "digest")):
+        marker = f'# {{"$imagepolicy": "{reference}:{setter}"}}'
+        assert re.search(rf"^\s*{field}: \S+ {re.escape(marker)}$", overlay, re.M), (field, marker)
+
+
+def test_image_automation_pushes_beside_main_never_to_it():
+    git = image_automation()["ImageUpdateAutomation"]["spec"]["git"]
+    checkout, push = git["checkout"]["ref"]["branch"], git["push"]["branch"]
+    # main only changes through the merge gate: Flux proposes, a reviewed PR decides.
+    assert checkout == "main", checkout
+    assert push != checkout, push
+    # A ruleset on the push branch would refuse every run.
+    # Characterisation (C6): no ruleset has ever covered it, so this was green on arrival. Adding the
+    # branch to a ruleset file temporarily turns it red; the result is in the design doc's log.
+    rulesets = sorted((REPO / "Acme" / "infra" / "github").glob("*-ruleset.json"))
+    assert rulesets
+    refusing = [p.name for p in rulesets if applies_to(json.loads(p.read_text()), f"refs/heads/{push}")]
+    assert refusing == []
+
+
+def test_image_automation_only_rewrites_dev():
+    update = image_automation()["ImageUpdateAutomation"]["spec"]["update"]
+    assert update["strategy"] == "Setters", update
+    assert (REPO / update["path"]).resolve() == (SAMPLE_API_OVERLAYS / "dev").resolve(), update
+
+
+def test_image_automation_writes_with_a_key_that_stays_out_of_git():
+    objects = image_automation()
+    source = objects["GitRepository"]
+    assert objects["ImageUpdateAutomation"]["spec"]["sourceRef"]["name"] == source["metadata"]["name"]
+    assert source["spec"]["url"].startswith("ssh://"), source["spec"]
+    assert source["spec"]["secretRef"]["name"] == "flux-image-updates", source["spec"]
+    # Characterisation (C6): no Secret has ever been committed, so this half was green on arrival.
+    # A temporary `kind: Secret` file turns it red; the result is in the design doc's log.
+    committed = [str(p) for p in (REPO / "Acme").rglob("*.y*ml") if SECRET_KIND.search(p.read_text())]
+    assert committed == []
+
+
+def test_image_automation_watches_the_image_the_overlays_deploy():
+    # Characterisation (C6): all of these were green on arrival. Changing any one temporarily turns
+    # it red; the results are in the design doc's log.
+    objects = image_automation()
+    assert objects["ImageRepository"]["spec"]["image"] == SAMPLE_API_IMAGE
+    policy = objects["ImagePolicy"]["spec"]
+    assert policy["imageRepositoryRef"]["name"] == objects["ImageRepository"]["metadata"]["name"]
+    # Only semver ignores the sha-* tags: anything else would pick one, and dev's bumps would never stop.
+    assert "semver" in policy["policy"], policy
+    # Without it the :digest marker writes an empty digest.
+    assert policy["digestReflectionPolicy"] in ("IfNotPresent", "Always"), policy
+    spec = objects["ImageUpdateAutomation"]["spec"]
+    # Either would stop dev updating, silently.
+    assert "policySelector" not in spec and "suspend" not in spec, spec
+    # A refspec pushes beside push.branch, and this key can write mod*.
+    assert "refspec" not in spec["git"]["push"], spec["git"]["push"]
+    entry = yaml.safe_load((APPS_ENTRY_POINTS / "dev" / "kustomization.yaml").read_text())
+    # A namespace here would move the image objects out of flux-system, and the markers would match nothing.
+    assert "namespace" not in entry, entry
+
+
+def test_image_automation_commits_are_conventional_and_credit_no_account():
+    commit = image_automation()["ImageUpdateAutomation"]["spec"]["git"]["commit"]
+    # Flux's default message isn't a Conventional Commit, and merging the PR brings it into main.
+    assert commit.get("messageTemplate", "").startswith("chore(sample-api): deploy "), commit
+    # .invalid is a reserved domain: no GitHub account can be credited with these commits.
+    assert commit["author"]["email"].endswith(".invalid"), commit
+
+
 def test_operator_image_is_pinned_by_tag_and_digest():
     # The Operator runs as cluster-admin: a moved tag must not change what runs.
     values = yaml.safe_load((BOOTSTRAP / "flux-operator-values.yaml").read_text())
@@ -60,11 +145,20 @@ def test_flux_instance_pins_an_exact_flux_version():
     assert distribution["registry"] == "ghcr.io/fluxcd", distribution["registry"]
 
 
+def test_flux_instance_runs_the_image_controllers():
+    # Image automation needs both; the FluxInstance only runs what it lists.
+    components = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]["components"]
+    missing = {"image-reflector-controller", "image-automation-controller"} - set(components)
+    assert not missing, missing
+
+
 def test_flux_syncs_its_own_folder_from_main_anonymously():
     sync = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"].get("sync", {})
     assert sync.get("kind") == "GitRepository", sync
     # Anonymous HTTPS (D3): the repo is public, so no credential sits in the cluster.
     assert sync.get("url", "").startswith("https://"), sync
+    # Characterisation (C6): the sync has never had a pullSecret, so this was green on arrival.
+    # Adding one temporarily turns it red; the result is in the design doc's log.
     assert "pullSecret" not in sync, sync
     # Only main is behind the merge gate; any other branch reaches a cluster-admin controller unreviewed.
     assert sync.get("ref") == "refs/heads/main", sync
@@ -99,6 +193,8 @@ def test_platform_applies_infrastructure_then_each_env():
         assert (REPO / spec["path"] / "kustomization.yaml").exists(), name
         assert spec["sourceRef"] == {"kind": "GitRepository", "name": "flux-system"}, name
         assert spec.get("prune") is True, name
+        # A suspended Kustomization stops applying and stops reverting drift, silently.
+        assert "suspend" not in spec, name
         # Deleting Flux's objects (a recovery drill) must not delete the workloads.
         assert spec.get("deletionPolicy") == "Orphan", name
 
@@ -140,6 +236,8 @@ def test_operator_resourceset_pins_the_version_helm_install_used():
     resourceset, templates = operator_resourceset()
     assert resourceset["kind"] == "ResourceSet", resourceset["kind"]
     # More than one input set would generate one HelmRelease each, all fighting over the same release.
+    # Characterisation (C6): there has only ever been one, so this was green on arrival. A second
+    # input set temporarily turns it red; the result is in the design doc's log.
     inputs = resourceset["spec"]["inputs"]
     assert len(inputs) == 1, inputs
     version = inputs[0]["version"]
@@ -154,6 +252,7 @@ def test_operator_resourceset_pins_the_version_helm_install_used():
     assert source["ref"] == {"semver": "<< inputs.version | quote >>"}, source["ref"]
 
 
+
 def test_operator_helmrelease_takes_over_the_helm_install_release():
     _, templates = operator_resourceset()
     release = templates["HelmRelease"]
@@ -161,6 +260,8 @@ def test_operator_helmrelease_takes_over_the_helm_install_release():
     # helm-controller adopts the release helm install made only if its name and namespace match (U9).
     assert spec["releaseName"] == "flux-operator", spec["releaseName"]
     assert release["metadata"]["namespace"] == "flux-system", release["metadata"]
+    # Characterisation (C6): neither key has ever been set, so this was green on arrival. Adding
+    # either one temporarily turns it red; the result is in the design doc's log.
     for key in ("targetNamespace", "storageNamespace"):
         assert key not in spec, key
     # Runs as helm-controller: a helm uninstall deletes the chart's own service account, which breaks the fallback (U9).
@@ -191,3 +292,13 @@ def test_bootstrap_holds_no_generated_flux_manifests():
         if "CustomResourceDefinition" in kinds or len(text.splitlines()) > 200:
             generated.append(path.relative_to(BOOTSTRAP).as_posix())
     assert generated == []
+
+
+def test_no_kustomization_generates_a_secret():
+    # A secretGenerator renders a real Secret with no `kind: Secret` in any file.
+    # Characterisation (C6): none has ever been committed, so this was green on arrival. Adding
+    # one temporarily turns it red; the result is in the design doc's log.
+    paths = sorted((REPO / "Acme").rglob("kustomization.y*ml"))
+    assert paths
+    generating = [str(p) for p in paths if "secretGenerator" in yaml.safe_load(p.read_text())]
+    assert generating == []

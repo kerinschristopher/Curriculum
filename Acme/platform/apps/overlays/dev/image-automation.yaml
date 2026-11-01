@@ -1,0 +1,63 @@
+# Flux's image automation for dev: docs/design/module-8-gitops-flux.md §4.
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImageRepository
+metadata:
+  name: sample-api
+  namespace: flux-system
+spec:
+  image: ghcr.io/kerinschristopher/sample-api
+  interval: 5m
+---
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImagePolicy
+metadata:
+  name: sample-api
+  namespace: flux-system
+spec:
+  imageRepositoryRef:
+    name: sample-api
+  policy:
+    semver:
+      range: ">=0.1.0"
+  digestReflectionPolicy: IfNotPresent
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: flux-image-updates
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: ssh://git@github.com/kerinschristopher/Curriculum.git
+  ref:
+    branch: main
+  secretRef:
+    name: flux-image-updates
+---
+apiVersion: image.toolkit.fluxcd.io/v1
+kind: ImageUpdateAutomation
+metadata:
+  name: sample-api
+  namespace: flux-system
+spec:
+  interval: 10m
+  sourceRef:
+    kind: GitRepository
+    name: flux-image-updates
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        name: Flux image automation
+        email: flux@localhost.invalid
+      messageTemplate: |
+        chore(sample-api): deploy {{ range .Changed.Changes }}{{ if hasSuffix ":tag" .Setter }}{{ .NewValue }}{{ end }}{{ end }} to dev
+
+        {{ .Changed.Summary }}
+    push:
+      branch: flux/image-updates
+  update:
+    path: ./Acme/platform/apps/sample-api/overlays/dev
+    strategy: Setters

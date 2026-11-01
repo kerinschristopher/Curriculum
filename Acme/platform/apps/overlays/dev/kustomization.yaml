@@ -3,3 +3,4 @@ kind: Kustomization
 
 resources:
   - ../../sample-api/overlays/dev
+  - image-automation.yaml
