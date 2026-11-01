@@ -21,6 +21,7 @@ SAMPLE_API_IMAGE = "ghcr.io/kerinschristopher/sample-api"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 APPS_ENTRY_POINTS = REPO / "Acme" / "platform" / "apps" / "overlays"
 BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
+SECRET_KIND = re.compile(r"""^kind:\s*["']?Secret["']?\s*$""", re.M)
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -96,7 +97,7 @@ def test_image_automation_writes_with_a_key_that_stays_out_of_git():
     assert source["spec"]["secretRef"]["name"] == "flux-image-updates", source["spec"]
     # Characterisation (C6): no Secret has ever been committed, so this half was green on arrival.
     # A temporary `kind: Secret` file turns it red; the result is in the design doc's log.
-    committed = [str(p) for p in (REPO / "Acme").rglob("*.yaml") if re.search(r"^kind: Secret\s*$", p.read_text(), re.M)]
+    committed = [str(p) for p in (REPO / "Acme").rglob("*.y*ml") if SECRET_KIND.search(p.read_text())]
     assert committed == []
 
 
@@ -267,3 +268,13 @@ def test_bootstrap_holds_no_generated_flux_manifests():
         if "CustomResourceDefinition" in kinds or len(text.splitlines()) > 200:
             generated.append(path.relative_to(BOOTSTRAP).as_posix())
     assert generated == []
+
+
+def test_no_kustomization_generates_a_secret():
+    # A secretGenerator renders a real Secret with no `kind: Secret` in any file.
+    # Characterisation (C6): none has ever been committed, so this was green on arrival. Adding
+    # one temporarily turns it red; the result is in the design doc's log.
+    paths = sorted((REPO / "Acme").rglob("kustomization.y*ml"))
+    assert paths
+    generating = [str(p) for p in paths if "secretGenerator" in yaml.safe_load(p.read_text())]
+    assert generating == []

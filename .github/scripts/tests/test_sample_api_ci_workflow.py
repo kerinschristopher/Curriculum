@@ -48,6 +48,11 @@ GUARDED = [
     "Acme/infra/bootstrap/flux-system/gotk-components.yaml",
     # test_kustomize_job_validates_against_the_cluster_kubernetes_version reads the node image.
     "Acme/platform/kind/sample-api-cluster.yaml",
+    # test_flux_layout.py's no-Secret checks read every YAML file under Acme/: these stand for the rest.
+    "Acme/new-file.yaml",
+    "Acme/new-file.yml",
+    "Acme/platform/apps/sample-api/base/new-file.yaml",
+    "Acme/platform/infrastructure/overlays/kind/new-file.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
