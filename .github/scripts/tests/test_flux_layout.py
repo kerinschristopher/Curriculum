@@ -79,7 +79,8 @@ def test_image_automation_pushes_beside_main_never_to_it():
     # main only changes through the merge gate: Flux proposes, a reviewed PR decides.
     assert checkout == "main", checkout
     assert push != checkout, push
-    # A ruleset on the push branch would refuse every run.
+    # The automation's branch is never a trusted branch: if it matched mod*, Flux would hold a branch
+    # the AWS plan role trusts. A ruleset can't be relied on to stop this key: P9's push bypassed one.
     # Characterisation (C6): no ruleset has ever covered it, so this was green on arrival. Adding the
     # branch to a ruleset file temporarily turns it red; the result is in the design doc's log.
     rulesets = sorted((REPO / "Acme" / "infra" / "github").glob("*-ruleset.json"))
