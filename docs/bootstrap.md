@@ -113,11 +113,7 @@ an object. Deleting the namespace also deleted those controllers, so nothing is 
 waits forever. This removes the notes:
 
 ```bash
-for kind in helmreleases.helm.toolkit.fluxcd.io ocirepositories.source.toolkit.fluxcd.io \
-            imagerepositories.image.toolkit.fluxcd.io imagepolicies.image.toolkit.fluxcd.io \
-            imageupdateautomations.image.toolkit.fluxcd.io \
-            gitrepositories.source.toolkit.fluxcd.io kustomizations.kustomize.toolkit.fluxcd.io \
-            fluxinstances.fluxcd.controlplane.io resourcesets.fluxcd.controlplane.io; do
+for kind in $(kubectl api-resources --namespaced --verbs=list -o name | grep -E 'fluxcd\.(io|controlplane\.io)$'); do
   for object in $(kubectl -n flux-system get "$kind" -o name); do
     kubectl -n flux-system patch "$object" --type=merge -p '{"metadata":{"finalizers":null}}'
   done
