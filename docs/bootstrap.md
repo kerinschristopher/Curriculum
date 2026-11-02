@@ -22,8 +22,8 @@ cd "$(mktemp -d)" && curl -fsSLO https://get.helm.sh/helm-v4.3.1-linux-amd64.tar
 If the checksum line doesn't print `OK`, the chain stops and nothing is installed.
 
 Flux also needs its write key at `~/.ssh/flux-image-updates`, registered on the repo as the deploy key `flux-image-updates`.
-Guard it like an admin credential: GitHub lets it bypass the `mod*` ruleset (see [`docs/iam.md`](iam.md)). If it's lost, make a
-new key and replace the deploy key.
+Guard it like an admin credential: GitHub lets it bypass the `mod*` ruleset (see [`docs/iam.md`](iam.md)). If it's lost or may
+have leaked, [replace it](#replace-the-write-key).
 
 Run everything from an up-to-date `main`, because step 3 applies `flux-instance.yaml` from your checkout.
 
@@ -160,6 +160,35 @@ kubectl -n flux-system wait resourceset/flux-operator --for=create --timeout=5m 
 
 Then run the checks in [step 6](#rebuild-the-cluster). The Helm revision number will be higher than 2. Flux removes the
 `requestedAt` annotation at its next reconcile, up to 10 minutes later. That's normal, and it means the annotate worked.
+
+## Replace the write key
+
+Do this if the key is lost or may have leaked, without waiting to be sure. The old key works until its deploy key is deleted,
+so that happens first. Flux can't push until the block finishes, which does no harm.
+
+```bash
+(
+set -eu
+cd /mnt/c/Work/GitHub/Curriculum
+rm -f ~/.ssh/flux-image-updates ~/.ssh/flux-image-updates.pub
+ssh-keygen -q -t ed25519 -N '' -C flux-image-updates -f ~/.ssh/flux-image-updates
+old=$(gh repo deploy-key list --json id,title --jq '.[] | select(.title == "flux-image-updates") | .id')
+if [ -n "$old" ]; then gh repo deploy-key delete "$old"; fi
+gh repo deploy-key add ~/.ssh/flux-image-updates.pub --allow-write --title flux-image-updates
+flux create secret git flux-image-updates --namespace=flux-system \
+  --url=ssh://git@github.com/kerinschristopher/Curriculum.git --private-key-file="$HOME/.ssh/flux-image-updates"
+flux reconcile source git flux-image-updates
+kubectl -n flux-system wait gitrepository/flux-image-updates --for=condition=Ready --timeout=2m
+)
+```
+
+`condition met` proves GitHub accepts the new key. With no cluster running, the block stops at `flux create`, and rebuild step 4
+creates the Secret later.
+
+`gh` ties a key it adds to your login token, so revoking that token removes the deploy key and Flux can't push. If that happens,
+run this again.
+
+Not run yet.
 
 ## Removing Flux safely
 
