@@ -190,9 +190,14 @@ def test_kustomize_job_expands_every_resourceset():
     ]
     assert resourcesets, bootstrap
     lines = commands(step)
-    build = r'flux-operator build resourceset -f "\$GITHUB_WORKSPACE/(\S+)" > rendered/[^/\s]+\.yaml'
-    built = [match.group(1) for match in (re.fullmatch(build, line) for line in lines) if match]
-    assert sorted(built) == resourcesets
+    build = r'flux-operator build resourceset -f "\$GITHUB_WORKSPACE/(\S+)" > rendered/([^/\s]+)\.yaml'
+    built = [match.groups() for match in (re.fullmatch(build, line) for line in lines) if match]
+    assert sorted(path for path, _ in built) == resourcesets
+    # Characterisation (C6): green on arrival, with one ResourceSet. Two writing one file, or one
+    # taking a kustomize render's name (Acme_...), would overwrite objects kubeconform should see.
+    outputs = [name for _, name in built]
+    assert len(set(outputs)) == len(outputs), lines
+    assert not any(name.startswith("Acme_") for name in outputs), lines
     # Each of these would leave the generated objects unchecked and the step green.
     validate = kubeconform_command(step)
     last_build = max(index for index, line in enumerate(lines) if line.startswith("flux-operator build"))
