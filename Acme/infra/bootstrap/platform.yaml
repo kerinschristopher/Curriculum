@@ -27,7 +27,7 @@ metadata:
 spec:
   dependsOn:
     - name: infrastructure
-  interval: 10m
+  intervall: 10m
   retryInterval: 2m
   timeout: 5m
   sourceRef:
