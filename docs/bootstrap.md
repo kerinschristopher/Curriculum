@@ -15,17 +15,29 @@ Helm is the only one this repo pins by hand. To install it once, into `~/.local/
 ```bash
 cd "$(mktemp -d)" && curl -fsSLO https://get.helm.sh/helm-v4.3.1-linux-amd64.tar.gz \
   && echo "0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b  helm-v4.3.1-linux-amd64.tar.gz" | sha256sum -c - \
-  && tar -xzf helm-v4.3.1-linux-amd64.tar.gz linux-amd64/helm && install -m 0755 linux-amd64/helm ~/.local/bin/helm \
-  && helm version --short
+  && tar -xzf helm-v4.3.1-linux-amd64.tar.gz linux-amd64/helm && install -D -m 0755 linux-amd64/helm ~/.local/bin/helm \
+  && ~/.local/bin/helm version --short
 ```
 
-If the checksum line doesn't print `OK`, the chain stops and nothing is installed.
+If the checksum line doesn't print `OK`, the chain stops and nothing is installed. On a new machine, open a new terminal
+afterwards, so `~/.local/bin` is on your `PATH`.
 
 Flux also needs its write key at `~/.ssh/flux-image-updates`, registered on the repo as the deploy key `flux-image-updates`.
 Guard it like an admin credential: GitHub lets it bypass the `mod*` ruleset (see [`docs/iam.md`](iam.md)). If it's lost or may
 have leaked, [replace it](#replace-the-write-key).
 
-Run everything from an up-to-date `main`, because step 3 applies `flux-instance.yaml` from your checkout.
+Run everything from an up-to-date `main`, because step 3 applies `flux-instance.yaml` from your checkout. If the repo isn't on
+this machine yet, clone it to the path every command below uses:
+
+```bash
+git clone https://github.com/kerinschristopher/Curriculum.git /mnt/c/Work/GitHub/Curriculum
+```
+
+If it's already there, update it instead:
+
+```bash
+cd /mnt/c/Work/GitHub/Curriculum && git switch main && git pull --ff-only
+```
 
 ## Rebuild the cluster
 
@@ -118,10 +130,10 @@ for kind in $(kubectl api-resources --namespaced --verbs=list -o name | grep -E 
     kubectl -n flux-system patch "$object" --type=merge -p '{"metadata":{"finalizers":null}}'
   done
 done
-kubectl get namespace flux-system
+kubectl wait --for=delete namespace/flux-system --timeout=2m
 ```
 
-The last line should print `NotFound`. No cleanup runs, so the workloads and CRDs stay.
+The last line returns once the namespace has gone. No cleanup runs, so the workloads and CRDs stay.
 
 **2. Reinstall the Operator.** This isn't the same command as a rebuild. A plain `helm install` fails with server-side apply
 conflicts, because Flux owns fields on the objects the namespace delete left behind. `--force-conflicts` takes them back, and
@@ -158,8 +170,9 @@ kubectl -n flux-system wait resourceset/flux-operator --for=create --timeout=5m 
   && kubectl -n flux-system wait helmrelease/flux-operator --for=condition=Ready --timeout=5m
 ```
 
-Then run the checks in [step 6](#rebuild-the-cluster). The Helm revision number will be higher than 2. Flux removes the
-`requestedAt` annotation at its next reconcile, up to 10 minutes later. That's normal, and it means the annotate worked.
+Then run the checks in [step 6](#rebuild-the-cluster). After a namespace delete the Helm revision is 2 again, because the delete
+took Helm's history with it. After a `FluxInstance` delete it's higher than 2. Flux removes the `requestedAt` annotation at its
+next reconcile, up to 10 minutes later. That's normal, and it means the annotate worked.
 
 ## Replace the write key
 
