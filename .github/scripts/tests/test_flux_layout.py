@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 from test_branch_rulesets import applies_to
@@ -21,7 +22,10 @@ SAMPLE_API_IMAGE = "ghcr.io/kerinschristopher/sample-api"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 APPS_ENTRY_POINTS = REPO / "Acme" / "platform" / "apps" / "overlays"
 BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
-SECRET_KIND = re.compile(r"""^kind:\s*["']?Secret["']?\s*$""", re.M)
+# Any indentation or list dash, because an indented Secret still reaches the cluster. A future
+# `valuesFrom: - kind: Secret` would be flagged too, which fails safe.
+SECRET_KIND = re.compile(r"""^\s*-?\s*kind:\s*["']?Secret["']?\s*$""", re.M)
+
 
 
 
@@ -100,6 +104,28 @@ def test_image_automation_writes_with_a_key_that_stays_out_of_git():
     # A temporary `kind: Secret` file turns it red; the result is in the design doc's log.
     committed = [str(p) for p in (REPO / "Acme").rglob("*.y*ml") if SECRET_KIND.search(p.read_text())]
     assert committed == []
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        "kind: Secret\n",
+        '---\nkind: "Secret"\n',
+        "items:\n  - kind: Secret\n",
+        "spec:\n  resources:\n    - apiVersion: v1\n      kind: Secret\n",
+    ],
+    ids=["bare-document", "quoted", "list-item", "resourceset-template"],
+)
+def test_secret_check_sees_every_way_a_secret_can_be_written(carrier):
+    # The Operator applies whatever a ResourceSet template generates, so an indented Secret reaches
+    # the cluster just like a top-level one.
+    assert SECRET_KIND.search(carrier)
+
+
+def test_secret_check_ignores_other_kinds():
+    # Characterisation (C6): this was green on arrival. Dropping the regex's end-of-line anchor
+    # temporarily turns it red; the result is in the design doc's log.
+    assert not SECRET_KIND.search("kind: ConfigMap\nkind: SecretStore\n")
 
 
 def test_image_automation_watches_the_image_the_overlays_deploy():
