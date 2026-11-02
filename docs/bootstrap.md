@@ -84,6 +84,7 @@ kubectl get deployments -n sample-api-dev
 kubectl get deployments -n sample-api-stage
 kubectl get deployments -n sample-api-prod
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: sample-api.dev.local' localhost/health
+flux reconcile source git flux-image-updates
 kubectl -n flux-system wait gitrepository/flux-image-updates --for=condition=Ready --timeout=2m
 ```
 
