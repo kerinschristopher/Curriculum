@@ -8,7 +8,9 @@ that file alone skips the test that would catch it, and a skipped job counts as 
 """
 
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -106,6 +108,47 @@ def test_scripts_filter_covers_guarded_files(filters):
 def test_app_filter_covers_app_paths(filters):
     missed = [path for path in APP_PATHS if not re.search(filters["app"], path)]
     assert missed == []
+
+
+def test_changes_step_sees_a_non_ascii_path(tmp_path):
+    # git quotes a path with non-ASCII bytes ("Acme/platform/caf\303\251.yaml"), so no ^Acme/ filter
+    # matches it: every job skips, and a skipped job passes the merge gate. This runs the step itself
+    # on a throwaway repo, with git's defaults (no user or system config).
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["changes"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "diff")
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    }
+
+    def git(*args):
+        run = subprocess.run(["git", *args], cwd=tmp_path, env=env, stdout=subprocess.PIPE, text=True, check=True)
+        return run.stdout.strip()
+
+    git("init", "-q")
+    git("commit", "-q", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    path = tmp_path / "Acme" / "platform" / "café.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("kind: ConfigMap\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "head")
+    output = tmp_path / "github_output"
+    step_env = {**env, "EVENT": "pull_request", "PR_BASE": base, "PR_HEAD": git("rev-parse", "HEAD")}
+    subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+        cwd=tmp_path,
+        env={**step_env, "GITHUB_OUTPUT": str(output)},
+        stdout=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    assert output.read_text().split() == ["app=true", "scripts=true"]
 
 
 def test_kustomize_job_renders_every_entry_point():
