@@ -269,6 +269,16 @@ def test_platform_applies_infrastructure_then_each_env():
         assert spec.get("deletionPolicy") == "Orphan", name
 
 
+def test_ci_renders_exactly_the_folders_flux_applies():
+    # ENTRY_POINTS is kept by hand, and the render loop and digest tests trust it: a folder Flux
+    # applies but the list misses deploys unrendered and unchecked (third C3 review, finding 3).
+    # Characterisation (C6): the list already matched, so this was green on arrival. The mutations
+    # are in the design doc's log.
+    sync = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]["sync"]
+    paths = [sync["path"]] + [spec["path"] for spec in flux_kustomizations().values()]
+    assert sorted(ENTRY_POINTS) == sorted(path.removeprefix("./") for path in paths)
+
+
 def test_flux_instance_is_never_pruned():
     # If flux-instance.yaml left Git, prune would make Flux uninstall itself.
     annotations = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["metadata"].get("annotations", {})
