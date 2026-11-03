@@ -8,7 +8,9 @@ Run everything from WSL. The design and its evidence are in
 
 ## Before you start
 
-You need Docker Desktop running, with its WSL integration on, and these in WSL: `kind`, `kubectl`, `flux` and `helm`.
+You need Docker Desktop running, with its WSL integration on, and these in WSL: `kind`, `kubectl`, `flux`, `helm`, and `gh`
+logged in (for [replacing the write key](#replace-the-write-key)). This guide last ran with kind v0.33.0, kubectl v1.36.0,
+flux v2.10.0 and gh 2.86.0. Keep the `flux` CLI at the cluster's Flux version, v2.10.0.
 
 Helm is the only one this repo pins by hand. To install it once, into `~/.local/bin`:
 
@@ -76,15 +78,25 @@ flux create secret git flux-image-updates --namespace=flux-system \
   --url=ssh://git@github.com/kerinschristopher/Curriculum.git --private-key-file="$HOME/.ssh/flux-image-updates"
 ```
 
-**5. Wait for everything to be Ready.**
+**5. Wait for everything to be Ready.** The block stops at the first wait that fails. An `apps-*` Kustomization is Ready
+once its objects are applied, not once its pods run, so the last lines wait for the pods: on a fresh cluster the image pull
+can take a few minutes. Each timeout is a limit, not a delay.
 
 ```bash
+(
+set -eu
 for name in infrastructure apps-dev apps-stage apps-prod; do
   kubectl -n flux-system wait "kustomization/$name" --for=create --timeout=5m \
-    && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=10m
+    && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=10m \
+    || exit 1
 done
 kubectl -n flux-system wait helmrelease/flux-operator --for=create --timeout=5m \
-  && kubectl -n flux-system wait helmrelease/flux-operator --for=condition=Ready --timeout=5m
+  && kubectl -n flux-system wait helmrelease/flux-operator --for=condition=Ready --timeout=5m \
+  || exit 1
+for env in dev stage prod; do
+  kubectl -n "sample-api-$env" rollout status deployment/sample-api --timeout=5m
+done
+)
 ```
 
 **6. Check it.**
@@ -177,17 +189,19 @@ next reconcile, up to 10 minutes later. That's normal, and it means the annotate
 ## Replace the write key
 
 Do this if the key is lost or may have leaked, without waiting to be sure. The old key works until its deploy key is deleted,
-so that happens first. Flux can't push until the block finishes, which does no harm.
+so that happens first. Flux can't push until the block finishes, which does no harm. The first command only reads GitHub's key
+list, so if `gh` isn't logged in or can't reach the repo, the block stops before anything changes.
 
 ```bash
 (
 set -eu
 cd /mnt/c/Work/GitHub/Curriculum
+old=$(gh repo deploy-key list --json id,title --jq '.[] | select(.title == "flux-image-updates") | .id')
 rm -f ~/.ssh/flux-image-updates ~/.ssh/flux-image-updates.pub
 ssh-keygen -q -t ed25519 -N '' -C flux-image-updates -f ~/.ssh/flux-image-updates
-old=$(gh repo deploy-key list --json id,title --jq '.[] | select(.title == "flux-image-updates") | .id')
-if [ -n "$old" ]; then gh repo deploy-key delete "$old"; fi
+if [ -n "$old" ]; then gh repo deploy-key delete "$old"; else echo "No old deploy key on GitHub; adding the new one"; fi
 gh repo deploy-key add ~/.ssh/flux-image-updates.pub --allow-write --title flux-image-updates
+[ "$(kubectl config current-context)" = kind-sample-api ] || { echo "kubectl isn't on kind-sample-api; stopping before flux create"; exit 1; }
 flux create secret git flux-image-updates --namespace=flux-system \
   --url=ssh://git@github.com/kerinschristopher/Curriculum.git --private-key-file="$HOME/.ssh/flux-image-updates"
 flux reconcile source git flux-image-updates
@@ -195,8 +209,11 @@ kubectl -n flux-system wait gitrepository/flux-image-updates --for=condition=Rea
 )
 ```
 
-`condition met` proves GitHub accepts the new key. With no cluster running, the block stops at `flux create`, and rebuild step 4
-creates the Secret later.
+`condition met` proves GitHub accepts the new key. If `kubectl` has no context (as after `kind delete cluster`) or is on another
+cluster, the block stops at the context check, just before `flux create`; if the cluster is only stopped, the check passes and
+the block stops at `flux create`. Either way the key is already replaced on GitHub, and rebuild step 4 creates the Secret later.
+If the key may have leaked, also check what it could have done: see
+[After a leak of the write key](iam.md#after-a-leak-of-the-write-key).
 
 `gh` ties a key it adds to your login token, so revoking that token removes the deploy key and Flux can't push. If that happens,
 run this again.
@@ -211,7 +228,7 @@ kubectl -n flux-system delete fluxinstance flux --timeout=3m
 
 The Operator removes Flux's controllers, objects and CRDs. It keeps the namespace, itself, the `ResourceSet` and your workloads.
 Afterwards the `ResourceSet` can still show Ready, up to an hour. That only means its last run worked, so check the
-`HelmRelease` itself. To bring Flux back, follow steps 3 and 5 above.
+`HelmRelease` itself. To bring Flux back, follow steps 3 and 5 of [Recover Flux](#recover-flux).
 
 ## Things that look wrong but aren't
 
