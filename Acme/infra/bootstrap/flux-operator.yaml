@@ -44,3 +44,7 @@ spec:
           - kind: ConfigMap
             name: flux-operator-values
             valuesKey: values.yaml
+        # Compare the live objects with the release and patch any hand edit back, every interval.
+        # Off by default: without it only a hand helm upgrade is undone.
+        driftDetection:
+          mode: enabled

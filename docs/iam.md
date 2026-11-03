@@ -327,7 +327,7 @@ IAM is half of each control; GitHub holds the other half. All of these are captu
 | Ruleset `main-protect` (`25760562`, Module 7) | Only admins can create, delete or force-push `main`. No `update` rule, so it doesn't refuse merges. The deploy key below probably passes this ruleset too, because it has the same admin bypass (not tested); `main-merge-gate` still refuses its pushes | Created 2026-10-23 23:23 UTC; applies to `~DEFAULT_BRANCH`. `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: always}]` |
 | Ruleset `main-merge-gate` (`24832716`) | `main` changes only through a PR whose 9 required checks pass (listed in [`docs/ci.md`](ci.md)) | `bypass_actors: [{actor_id: 5, RepositoryRole (admin), bypass_mode: pull_request}]`: an admin can merge a PR over a failing check, explicitly, but can't push to `main` directly |
 | Environment `dev-apply` | Required reviewer `kerinschristopher`, `prevent_self_review: false`, deployment branch `main` only. Backs the apply role's trust | `can_admins_bypass: true`. The only admin is also the only reviewer, so this changes nothing today; set it to `false` when someone else joins |
-| Deploy key `flux-image-updates` (Module 8) | Flux's one write credential, used to push `flux/image-updates`. Works on this repo only. The private key stays out of Git, in WSL at `~/.ssh/flux-image-updates` (mode 600) and in the cluster Secret `flux-image-updates`. Refused on `main`, but it **bypasses `trusted-branches`**, so it can push `mod*`. Accepted 2026-10-31: guard it like an admin credential. Not tested, but assume its holder can overwrite or delete `mod*` branches, push a workflow to a `mod*` branch to assume the plan role, push a workflow to any branch to use `packages: write` or repo secrets, and push `v*` tags. Also assume it can reach `main` with no person involved (not tested, and not to be tested): the gate needs 0 approvals, so a holder could edit a workflow on an open PR's branch to report the 9 checks green and merge that PR, and `main` feeds Flux's cluster-admin | Added 2026-10-31 22:23 UTC by `kerinschristopher`, `read_only: false`. Replace it on any suspicion (`docs/bootstrap.md`) |
+| Deploy key `flux-image-updates` (Module 8) | Flux's one write credential, used to push `flux/image-updates`. Works on this repo only. The private key stays out of Git, in WSL at `~/.ssh/flux-image-updates` (mode 600) and in the cluster Secret `flux-image-updates`. Refused on `main`, but it **bypasses `trusted-branches`**, so it can push `mod*`. Accepted 2026-10-31: guard it like an admin credential. The rule suites logged its pushes as `kerinschristopher`, who added it (read 2026-10-31; on 2026-11-03 the API showed `actor_name: null` for both suites, after the old key's deletion on 2026-11-02, the likely but unproven cause), so an admin's bypasses appear to travel with the key (observed in the suites, not stated in GitHub's docs). Not tested, but assume its holder can overwrite or delete `mod*` branches, push a workflow to a `mod*` branch to assume the plan role, push a workflow to any branch to use `packages: write` or repo secrets, and push `v*` tags. The cheapest route to `main` needs no workflow: the key can push to `flux/image-updates` before the PR opens, Flux commits on top of what's there, and a planted change rides in if the reviewer expects a routine bump. **So a Flux PR changes only dev's `newTag` and `digest` lines; anything else is closed and the branch deleted.** Also assume it can reach `main` with no person involved (not tested, and not to be tested): the gate needs 0 approvals, so a holder could edit a workflow on an open PR's branch to report the 9 checks green and merge that PR, and `main` feeds Flux's cluster-admin | Added 2026-10-31 22:23 UTC by `kerinschristopher`, then replaced on 2026-11-02 by `168528522` and on 2026-11-03 by `168555567`, `read_only: false`. `gh` added the new key, so it's tied to that login token. Replace it on any suspicion (`docs/bootstrap.md`), then check what it did (below) |
 
 The bypass actor list can't be seen by people without admin access to the repo, so it's recorded here. Re-check it with
 `gh api repos/kerinschristopher/Curriculum/rulesets/<id> --jq .bypass_actors` and update this table when it changes.
@@ -356,6 +356,31 @@ What that allows, accepted on purpose (2026-10-23):
 - **`strict_required_status_checks_policy: false`:** a PR's checks may have run against an older `main`, so two PRs that each pass
   can still break `main` together.
 
+### After a leak of the write key
+
+Replace the key first ([`docs/bootstrap.md`](bootstrap.md#replace-the-write-key)), then look for anything it did. GitHub logs
+the key's pushes under the account that added it, so the activity log can't tell them from yours: Flux's creation of
+`flux/image-updates` at 2026-11-02 23:27:14 UTC shows as `kerinschristopher`. So look for what you didn't do, from the
+suspected leak onwards. Every command here only reads.
+
+```bash
+cd /mnt/c/Work/GitHub/Curriculum
+git ls-remote --heads --tags origin
+gh api 'repos/kerinschristopher/Curriculum/activity?per_page=100' --jq '.[] | [.timestamp, .activity_type, .ref, (.actor.login // "null")] | @tsv'
+gh run list --event push --limit 50
+gh pr list --state all --limit 30
+```
+
+- **Branches and tags:** any you don't recognise. No ruleset covers tags, and a `v*` tag runs `release-tag`, which can write
+  to GHCR (R3 in [the Module 8 design](design/module-8-gitops-flux.md)).
+- **Activity:** pushes, creations and deletions you didn't make. Flux's own pushes to `flux/image-updates` are expected.
+- **Runs:** push-triggered runs on branches you didn't push; a workflow there could use `packages: write` or repo secrets.
+- **PRs:** any you didn't open, and new commits on open ones.
+
+**A limit of the rotation block:** if GitHub ever holds two deploy keys titled `flux-image-updates`, the block stops at the
+delete, after the local key is already replaced, and both old keys stay live. Delete each one by its ID
+(`gh repo deploy-key list`, then `gh repo deploy-key delete`), then run the block again.
+
 ## How it's verified
 
 | Check | What it proves | Status |
@@ -369,7 +394,10 @@ What that allows, accepted on purpose (2026-10-23):
 | Ruleset coverage after the split (Module 7) | `main` gets `main-protect` and `main-merge-gate` rules and no `update` rule; `mod7-caching` still gets all four `trusted-branches` rules; a PR with green checks reads `CLEAN`, not `BLOCKED` | Passed (2026-10-23): `main` gets `pull_request` and `required_status_checks` (`24832716`) plus `creation`, `deletion` and `non_fast_forward` (`25760562`), and no `update`; `mod7-caching` gets all four `trusted-branches` rules (re-checked 2026-10-28). PR #15 went `BLOCKED` → `CLEAN`, and its merge (`73f217b`) is rule suite `4695546538`, result `pass`. Every earlier merge into `main` the rule-suites API lists for the past month is `bypass` |
 | Ruleset enforcement: push `HEAD:mod/evil` with the `trusted-branches` bypass temporarily set to "pull requests only" (Module 5) | A push that doesn't bypass is rejected | Passed: `GH013 ... Cannot create ref due to creations being restricted`; bypass restored to Always |
 | Direct push to `main` (2026-10-10) | `main-merge-gate` refuses it even for an admin | Passed: `GH013 ... Changes must be made through a pull request` |
-| Deploy key pushes of a throwaway empty commit (2026-10-31) | Whether the rulesets stop the key, and whether it can write where no ruleset applies | `main` refused: `GH013 ... Changes must be made through a pull request` (rule suite `4836425872`, `fail`). **`mod8-key-test` went through:** `Bypassed rule violations ... Cannot create ref due to creations being restricted` (rule suite `4836425972`, `bypass`, actor logged as `kerinschristopher`). Control branch pushed and deleted with the key. `mod8-key-test` deleted afterwards |
+| Deploy key pushes of a throwaway empty commit (2026-10-31) | Whether the rulesets stop the key, and whether it can write where no ruleset applies | `main` refused: `GH013 ... Changes must be made through a pull request` (rule suite `4836425872`, `fail`). **`mod8-key-test` went through:** `Bypassed rule violations ... Cannot create ref due to creations being restricted` (rule suite `4836425972`, `bypass`, actor logged as `kerinschristopher` on 2026-10-31, `null` by 2026-11-03). Control branch pushed and deleted with the key. `mod8-key-test` deleted afterwards |
+| The deploy key's replacement (2026-11-02) | The guide's rotation block works, and the new key can read and write | Passed: old key `168331320` deleted, new key `168528522` fetched (`condition met`) and pushed Flux's commit `80e74c5` for PR #20 |
+| The rotation block in its new order (2026-11-03) | The reordered block works end to end, and a failed `gh` stops it before the local key is deleted | Passed: old key `168528522` deleted, new key `168555567` added (`read_only: false`) and fetched (`condition met`). With a bad `GH_TOKEN`, the `gh` line failed (`HTTP 401`) before `rm -f`. The new key's first push isn't seen yet |
+| A PR with a failing required check (PR #21, 2026-11-02) | `main-merge-gate` refuses the merge on a real PR, and what an admin viewer sees | Passed: `kustomize` red (run `41548290691`), `mergeStateStatus` `BLOCKED` for `kerinschristopher`. Closed unmerged, with no override |
 | Full refresh: deploy dev (VPC + EKS), run the CI plan, expect `No changes` | The EKS, KMS (alias condition), logs and cluster-IAM read statements against real resources | Passed in Module 5: 58 resources refreshed with no AccessDenied (`eb34972`) |
 | First CI apply after the Module 6 merge | The apply role against real AWS, including actions that authorize against two resources (for example `AssociateRouteTable` on the subnet and the route table), and the environment gate | Passed on attempt 2: run `38492865526` (`e094c93`, 2026-10-14). Attempt 1 failed with 403s on `CreateSubnet` (4) and `CreateRouteTable` (2), which AWS also authorizes against the parent VPC (`docs/design/module-6-ci-cd.md`, "First apply after merge"); attempt 2 succeeded after the fix |
 

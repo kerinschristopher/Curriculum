@@ -7,21 +7,30 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
     ~/.venvs/iam-tests/bin/pytest -v .github/scripts/tests
 """
 
+import functools
 import json
 import re
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from test_branch_rulesets import applies_to
+from test_sample_api_ci_workflow import ENTRY_POINTS
 
 REPO = Path(__file__).resolve().parents[3]
 SAMPLE_API_OVERLAYS = REPO / "Acme" / "platform" / "apps" / "sample-api" / "overlays"
 SAMPLE_API_IMAGE = "ghcr.io/kerinschristopher/sample-api"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+# name:tag@digest. The tag has no `/`, so a registry port like host:5000/name@sha256:... does not count.
+TAG_AND_DIGEST = re.compile(rf":[^/:@]+@{DIGEST.pattern}$")
 APPS_ENTRY_POINTS = REPO / "Acme" / "platform" / "apps" / "overlays"
 BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
-SECRET_KIND = re.compile(r"""^kind:\s*["']?Secret["']?\s*$""", re.M)
+# Any indentation or list dash, because an indented Secret still reaches the cluster. A future
+# `valuesFrom: - kind: Secret` would be flagged too, which fails safe.
+SECRET_KIND = re.compile(r"""^\s*-?\s*kind:\s*["']?Secret["']?\s*$""", re.M)
+
 
 
 
@@ -36,6 +45,52 @@ def test_every_env_overlay_pins_sample_api_by_digest():
         if "newTag" not in image or not DIGEST.fullmatch(image.get("digest", "")):
             unpinned.append(path.parent.name)
     assert unpinned == []
+
+
+def container_images(node):
+    """Every container's image under a rendered object, for any workload kind."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("containers", "initContainers"):
+                yield from (container["image"] for container in value)
+            else:
+                yield from container_images(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from container_images(item)
+
+
+@functools.cache
+def rendered(entry):
+    """The objects `kubectl kustomize` builds from `entry`, a folder relative to the repo, rendered once per run."""
+    render = subprocess.run(["kubectl", "kustomize", str(REPO / entry)], stdout=subprocess.PIPE, text=True, check=True)
+    return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
+
+
+def test_every_container_flux_deploys_has_a_tag_and_digest():
+    # The render, not the files: a renamed image in base/ leaves the overlay's `images` entry
+    # matching nothing, so the overlay still looks pinned and the Deployment isn't.
+    # Characterisation (C6): every image was already pinned, so this was green on arrival. The
+    # mutations are in the design doc's log.
+    found = {}
+    for entry in ENTRY_POINTS:
+        found[entry] = [image for doc in rendered(entry) for image in container_images(doc)]
+    # Bootstrap holds no containers: test_operator_image_is_pinned_by_tag_and_digest covers its image.
+    empty = [entry for entry, images in found.items() if not images and entry != "Acme/infra/bootstrap"]
+    assert empty == []
+    unpinned = sorted({i for images in found.values() for i in images if not TAG_AND_DIGEST.search(i)})
+    assert unpinned == []
+
+
+def test_flux_kustomizations_set_only_known_fields():
+    # Flux applies spec.images, spec.patches and spec.components after the render, so the test
+    # above can't see them, and any one can swap an image (third C3 review, finding 2). A newTag
+    # alone drops the digest. Each may set only what they set today: a new field fails here until
+    # a test covers it.
+    # Characterisation (C6): green on arrival. The mutations are in the design doc's log.
+    allowed = {"deletionPolicy", "dependsOn", "interval", "path", "prune", "retryInterval", "sourceRef", "timeout", "wait"}
+    extra = {name: sorted(set(spec) - allowed) for name, spec in flux_kustomizations().items() if set(spec) - allowed}
+    assert extra == {}
 
 
 def test_every_env_has_an_apps_entry_point_for_its_own_overlay():
@@ -75,13 +130,14 @@ def test_image_automation_pushes_beside_main_never_to_it():
     # main only changes through the merge gate: Flux proposes, a reviewed PR decides.
     assert checkout == "main", checkout
     assert push != checkout, push
-    # A ruleset on the push branch would refuse every run.
+    # The automation's branch is never a trusted branch: if it matched mod*, Flux would hold a branch
+    # the AWS plan role trusts. A ruleset can't be relied on to stop this key: P9's push bypassed one.
     # Characterisation (C6): no ruleset has ever covered it, so this was green on arrival. Adding the
     # branch to a ruleset file temporarily turns it red; the result is in the design doc's log.
     rulesets = sorted((REPO / "Acme" / "infra" / "github").glob("*-ruleset.json"))
     assert rulesets
-    refusing = [p.name for p in rulesets if applies_to(json.loads(p.read_text()), f"refs/heads/{push}")]
-    assert refusing == []
+    rulesets_on_push_branch = [p.name for p in rulesets if applies_to(json.loads(p.read_text()), f"refs/heads/{push}")]
+    assert rulesets_on_push_branch == []
 
 
 def test_image_automation_only_rewrites_dev():
@@ -100,6 +156,31 @@ def test_image_automation_writes_with_a_key_that_stays_out_of_git():
     # A temporary `kind: Secret` file turns it red; the result is in the design doc's log.
     committed = [str(p) for p in (REPO / "Acme").rglob("*.y*ml") if SECRET_KIND.search(p.read_text())]
     assert committed == []
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        "kind: Secret\n",
+        '---\nkind: "Secret"\n',
+        "items:\n  - kind: Secret\n",
+        "spec:\n  resources:\n    - apiVersion: v1\n      kind: Secret\n",
+    ],
+    ids=["bare-document", "quoted", "list-item", "resourceset-template"],
+)
+def test_secret_check_sees_bare_quoted_and_nested_secrets(carrier):
+    # The Operator applies whatever a ResourceSet template generates, so an indented Secret reaches
+    # the cluster just like a top-level one.
+    # The regex alone covers files Flux never applies and Secrets nested in a ResourceSet template.
+    # It misses a trailing comment, flow style, a quoted key and .json; for applied files,
+    # test_nothing_flux_applies_is_a_secret catches those.
+    assert SECRET_KIND.search(carrier)
+
+
+def test_secret_check_ignores_other_kinds():
+    # Characterisation (C6): this was green on arrival. Dropping the regex's end-of-line anchor
+    # temporarily turns it red; the result is in the design doc's log.
+    assert not SECRET_KIND.search("kind: ConfigMap\nkind: SecretStore\n")
 
 
 def test_image_automation_watches_the_image_the_overlays_deploy():
@@ -152,6 +233,16 @@ def test_flux_instance_runs_the_image_controllers():
     assert not missing, missing
 
 
+def test_flux_instance_sets_only_known_fields():
+    # The Operator builds Flux's controllers in the cluster, so no render shows them.
+    # spec.kustomize.patches edits them after the build, and distribution.artifact or variant picks
+    # other manifests: any one can swap a controller's image (third C3 review, finding 2).
+    # Characterisation (C6): green on arrival. The mutations are in the design doc's log.
+    spec = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]
+    assert sorted(spec) == ["components", "distribution", "sync"], sorted(spec)
+    assert sorted(spec["distribution"]) == ["registry", "version"], sorted(spec["distribution"])
+
+
 def test_flux_syncs_its_own_folder_from_main_anonymously():
     sync = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"].get("sync", {})
     assert sync.get("kind") == "GitRepository", sync
@@ -197,6 +288,30 @@ def test_platform_applies_infrastructure_then_each_env():
         assert "suspend" not in spec, name
         # Deleting Flux's objects (a recovery drill) must not delete the workloads.
         assert spec.get("deletionPolicy") == "Orphan", name
+
+
+def test_ci_renders_exactly_the_folders_flux_applies():
+    # ENTRY_POINTS is kept by hand, and the render loop and digest tests trust it: a folder Flux
+    # applies but the list misses deploys unrendered and unchecked (third C3 review, finding 3).
+    # Characterisation (C6): the list already matched, so this was green on arrival. The mutations
+    # are in the design doc's log.
+    sync = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]["sync"]
+    paths = [sync["path"]] + [spec["path"] for spec in flux_kustomizations().values()]
+    assert sorted(ENTRY_POINTS) == sorted(path.removeprefix("./") for path in paths)
+
+
+def test_every_flux_kustomization_is_in_platform_yaml():
+    # The checks above read platform.yaml only, but Flux applies every file in the render. One
+    # elsewhere would skip them all: no dependsOn, its own spec.images (third C3 review, finding 4).
+    # Characterisation (C6): every one was already in platform.yaml, so this was green on arrival.
+    # The mutations are in the design doc's log.
+    found = sorted(
+        (entry, doc["metadata"]["name"])
+        for entry in ENTRY_POINTS
+        for doc in rendered(entry)
+        if doc["kind"] == "Kustomization" and doc["apiVersion"].startswith("kustomize.toolkit.fluxcd.io/")
+    )
+    assert found == sorted(("Acme/infra/bootstrap", name) for name in flux_kustomizations())
 
 
 def test_flux_instance_is_never_pruned():
@@ -273,6 +388,28 @@ def test_operator_helmrelease_takes_over_the_helm_install_release():
     ], spec.get("valuesFrom")
 
 
+def test_operator_helmrelease_reverts_hand_edits():
+    # helm-controller compares the live cluster only when driftDetection is set; without it, a kubectl
+    # edit of the cluster-admin Operator stays until the next chart or values change (L18).
+    _, templates = operator_resourceset()
+    spec = templates["HelmRelease"]["spec"]
+    assert spec.get("driftDetection") == {"mode": "enabled"}, spec
+
+
+def test_operator_resourceset_generates_only_the_release_and_its_source():
+    # The Operator builds these objects in the cluster, so no render shows them. Inline values or
+    # postRenderers on the HelmRelease beat valuesFrom's tag@digest, and resourcesTemplate, steps or
+    # a third template can add any object (third C3 review, finding 2). Each may set only what it
+    # sets today: a new field fails here until a test covers it.
+    # Characterisation (C6): green on arrival. The mutations are in the design doc's log.
+    resourceset, templates = operator_resourceset()
+    assert sorted(resourceset["spec"]) == ["inputs", "resources"], sorted(resourceset["spec"])
+    # templates is keyed by kind, so a second HelmRelease would hide behind the first.
+    assert [t["kind"] for t in resourceset["spec"]["resources"]] == ["OCIRepository", "HelmRelease"]
+    spec = templates["HelmRelease"]["spec"]
+    assert sorted(spec) == ["chartRef", "driftDetection", "interval", "releaseName", "valuesFrom"], sorted(spec)
+
+
 def test_operator_resourceset_is_applied_and_never_pruned():
     resources = yaml.safe_load((BOOTSTRAP / "kustomization.yaml").read_text())["resources"]
     assert "flux-operator.yaml" in resources, resources
@@ -302,3 +439,15 @@ def test_no_kustomization_generates_a_secret():
     assert paths
     generating = [str(p) for p in paths if "secretGenerator" in yaml.safe_load(p.read_text())]
     assert generating == []
+
+
+def test_nothing_flux_applies_is_a_secret():
+    # The file checks above read text and file names. The render is what Flux applies: a
+    # secretGenerator in an extensionless Kustomization file, or a kind written as an escape, a tag
+    # or a block scalar, renders a Secret they miss (third C3 review, finding 6).
+    # Characterisation (C6): nothing rendered has ever been a Secret, so this was green on arrival.
+    # The mutations are in the design doc's log.
+    secrets = sorted(
+        (entry, doc["metadata"]["name"]) for entry in ENTRY_POINTS for doc in rendered(entry) if doc["kind"] == "Secret"
+    )
+    assert secrets == []

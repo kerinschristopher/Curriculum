@@ -8,24 +8,38 @@ Run everything from WSL. The design and its evidence are in
 
 ## Before you start
 
-You need Docker Desktop running, with its WSL integration on, and these in WSL: `kind`, `kubectl`, `flux` and `helm`.
+You need Docker Desktop running, with its WSL integration on, and these in WSL: `kind`, `kubectl`, `flux`, `helm`, and `gh`
+logged in (for [replacing the write key](#replace-the-write-key)). This guide last ran with kind v0.33.0, kubectl v1.36.0,
+flux v2.10.0 and gh 2.86.0. Keep the `flux` CLI at the cluster's Flux version, v2.10.0.
 
 Helm is the only one this repo pins by hand. To install it once, into `~/.local/bin`:
 
 ```bash
 cd "$(mktemp -d)" && curl -fsSLO https://get.helm.sh/helm-v4.3.1-linux-amd64.tar.gz \
   && echo "0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b  helm-v4.3.1-linux-amd64.tar.gz" | sha256sum -c - \
-  && tar -xzf helm-v4.3.1-linux-amd64.tar.gz linux-amd64/helm && install -m 0755 linux-amd64/helm ~/.local/bin/helm \
-  && helm version --short
+  && tar -xzf helm-v4.3.1-linux-amd64.tar.gz linux-amd64/helm && install -D -m 0755 linux-amd64/helm ~/.local/bin/helm \
+  && ~/.local/bin/helm version --short
 ```
 
-If the checksum line doesn't print `OK`, the chain stops and nothing is installed.
+If the checksum line doesn't print `OK`, the chain stops and nothing is installed. On a new machine, open a new terminal
+afterwards, so `~/.local/bin` is on your `PATH`.
 
 Flux also needs its write key at `~/.ssh/flux-image-updates`, registered on the repo as the deploy key `flux-image-updates`.
-Guard it like an admin credential: GitHub lets it bypass the `mod*` ruleset (see [`docs/iam.md`](iam.md)). If it's lost, make a
-new key and replace the deploy key.
+Guard it like an admin credential: GitHub lets it bypass the `mod*` ruleset (see [`docs/iam.md`](iam.md)). If it's lost or may
+have leaked, [replace it](#replace-the-write-key).
 
-Run everything from an up-to-date `main`, because step 3 applies `flux-instance.yaml` from your checkout.
+Run everything from an up-to-date `main`, because step 3 applies `flux-instance.yaml` from your checkout. If the repo isn't on
+this machine yet, clone it to the path every command below uses:
+
+```bash
+git clone https://github.com/kerinschristopher/Curriculum.git /mnt/c/Work/GitHub/Curriculum
+```
+
+If it's already there, update it instead:
+
+```bash
+cd /mnt/c/Work/GitHub/Curriculum && git switch main && git pull --ff-only
+```
 
 ## Rebuild the cluster
 
@@ -64,15 +78,25 @@ flux create secret git flux-image-updates --namespace=flux-system \
   --url=ssh://git@github.com/kerinschristopher/Curriculum.git --private-key-file="$HOME/.ssh/flux-image-updates"
 ```
 
-**5. Wait for everything to be Ready.**
+**5. Wait for everything to be Ready.** The block stops at the first wait that fails. An `apps-*` Kustomization is Ready
+once its objects are applied, not once its pods run, so the last lines wait for the pods: on a fresh cluster the image pull
+can take a few minutes. Each timeout is a limit, not a delay.
 
 ```bash
+(
+set -eu
 for name in infrastructure apps-dev apps-stage apps-prod; do
   kubectl -n flux-system wait "kustomization/$name" --for=create --timeout=5m \
-    && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=10m
+    && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=10m \
+    || exit 1
 done
 kubectl -n flux-system wait helmrelease/flux-operator --for=create --timeout=5m \
-  && kubectl -n flux-system wait helmrelease/flux-operator --for=condition=Ready --timeout=5m
+  && kubectl -n flux-system wait helmrelease/flux-operator --for=condition=Ready --timeout=5m \
+  || exit 1
+for env in dev stage prod; do
+  kubectl -n "sample-api-$env" rollout status deployment/sample-api --timeout=5m
+done
+)
 ```
 
 **6. Check it.**
@@ -84,6 +108,7 @@ kubectl get deployments -n sample-api-dev
 kubectl get deployments -n sample-api-stage
 kubectl get deployments -n sample-api-prod
 curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: sample-api.dev.local' localhost/health
+flux reconcile source git flux-image-updates
 kubectl -n flux-system wait gitrepository/flux-image-updates --for=condition=Ready --timeout=2m
 ```
 
@@ -112,19 +137,15 @@ an object. Deleting the namespace also deleted those controllers, so nothing is 
 waits forever. This removes the notes:
 
 ```bash
-for kind in helmreleases.helm.toolkit.fluxcd.io ocirepositories.source.toolkit.fluxcd.io \
-            imagerepositories.image.toolkit.fluxcd.io imagepolicies.image.toolkit.fluxcd.io \
-            imageupdateautomations.image.toolkit.fluxcd.io \
-            gitrepositories.source.toolkit.fluxcd.io kustomizations.kustomize.toolkit.fluxcd.io \
-            fluxinstances.fluxcd.controlplane.io resourcesets.fluxcd.controlplane.io; do
+for kind in $(kubectl api-resources --namespaced --verbs=list -o name | grep -E 'fluxcd\.(io|controlplane\.io)$'); do
   for object in $(kubectl -n flux-system get "$kind" -o name); do
     kubectl -n flux-system patch "$object" --type=merge -p '{"metadata":{"finalizers":null}}'
   done
 done
-kubectl get namespace flux-system
+kubectl wait --for=delete namespace/flux-system --timeout=2m
 ```
 
-The last line should print `NotFound`. No cleanup runs, so the workloads and CRDs stay.
+The last line returns once the namespace has gone. No cleanup runs, so the workloads and CRDs stay.
 
 **2. Reinstall the Operator.** This isn't the same command as a rebuild. A plain `helm install` fails with server-side apply
 conflicts, because Flux owns fields on the objects the namespace delete left behind. `--force-conflicts` takes them back, and
@@ -161,8 +182,41 @@ kubectl -n flux-system wait resourceset/flux-operator --for=create --timeout=5m 
   && kubectl -n flux-system wait helmrelease/flux-operator --for=condition=Ready --timeout=5m
 ```
 
-Then run the checks in [step 6](#rebuild-the-cluster). The Helm revision number will be higher than 2. Flux removes the
-`requestedAt` annotation at its next reconcile, up to 10 minutes later. That's normal, and it means the annotate worked.
+Then run the checks in [step 6](#rebuild-the-cluster). After a namespace delete the Helm revision is 2 again, because the delete
+took Helm's history with it. After a `FluxInstance` delete it's higher than 2. Flux removes the `requestedAt` annotation at its
+next reconcile, up to 10 minutes later. That's normal, and it means the annotate worked.
+
+## Replace the write key
+
+Do this if the key is lost or may have leaked, without waiting to be sure. The old key works until its deploy key is deleted,
+so that happens first. Flux can't push until the block finishes, which does no harm. The first command only reads GitHub's key
+list, so if `gh` isn't logged in or can't reach the repo, the block stops before anything changes.
+
+```bash
+(
+set -eu
+cd /mnt/c/Work/GitHub/Curriculum
+old=$(gh repo deploy-key list --json id,title --jq '.[] | select(.title == "flux-image-updates") | .id')
+rm -f ~/.ssh/flux-image-updates ~/.ssh/flux-image-updates.pub
+ssh-keygen -q -t ed25519 -N '' -C flux-image-updates -f ~/.ssh/flux-image-updates
+if [ -n "$old" ]; then gh repo deploy-key delete "$old"; else echo "No old deploy key on GitHub; adding the new one"; fi
+gh repo deploy-key add ~/.ssh/flux-image-updates.pub --allow-write --title flux-image-updates
+[ "$(kubectl config current-context)" = kind-sample-api ] || { echo "kubectl isn't on kind-sample-api; stopping before flux create"; exit 1; }
+flux create secret git flux-image-updates --namespace=flux-system \
+  --url=ssh://git@github.com/kerinschristopher/Curriculum.git --private-key-file="$HOME/.ssh/flux-image-updates"
+flux reconcile source git flux-image-updates
+kubectl -n flux-system wait gitrepository/flux-image-updates --for=condition=Ready --timeout=2m
+)
+```
+
+`condition met` proves GitHub accepts the new key. If `kubectl` has no context (as after `kind delete cluster`) or is on another
+cluster, the block stops at the context check, just before `flux create`; if the cluster is only stopped, the check passes and
+the block stops at `flux create`. Either way the key is already replaced on GitHub, and rebuild step 4 creates the Secret later.
+If the key may have leaked, also check what it could have done: see
+[After a leak of the write key](iam.md#after-a-leak-of-the-write-key).
+
+`gh` ties a key it adds to your login token, so revoking that token removes the deploy key and Flux can't push. If that happens,
+run this again.
 
 ## Removing Flux safely
 
@@ -174,7 +228,7 @@ kubectl -n flux-system delete fluxinstance flux --timeout=3m
 
 The Operator removes Flux's controllers, objects and CRDs. It keeps the namespace, itself, the `ResourceSet` and your workloads.
 Afterwards the `ResourceSet` can still show Ready, up to an hour. That only means its last run worked, so check the
-`HelmRelease` itself. To bring Flux back, follow steps 3 and 5 above.
+`HelmRelease` itself. To bring Flux back, follow steps 3 and 5 of [Recover Flux](#recover-flux).
 
 ## Things that look wrong but aren't
 
