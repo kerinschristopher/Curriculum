@@ -343,6 +343,14 @@ def test_operator_helmrelease_takes_over_the_helm_install_release():
     ], spec.get("valuesFrom")
 
 
+def test_operator_helmrelease_reverts_hand_edits():
+    # helm-controller compares the live cluster only when driftDetection is set; without it, a kubectl
+    # edit of the cluster-admin Operator stays until the next chart or values change (L18).
+    _, templates = operator_resourceset()
+    spec = templates["HelmRelease"]["spec"]
+    assert spec.get("driftDetection") == {"mode": "enabled"}, spec
+
+
 def test_operator_resourceset_is_applied_and_never_pruned():
     resources = yaml.safe_load((BOOTSTRAP / "kustomization.yaml").read_text())["resources"]
     assert "flux-operator.yaml" in resources, resources
