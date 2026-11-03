@@ -7,6 +7,7 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
     ~/.venvs/iam-tests/bin/pytest -v .github/scripts/tests
 """
 
+import functools
 import json
 import re
 import subprocess
@@ -244,6 +245,13 @@ def flux_kustomizations():
     return {d["metadata"]["name"]: d["spec"] for d in docs if d and d["kind"] == "Kustomization"}
 
 
+@functools.cache
+def rendered(entry):
+    """The objects `kubectl kustomize` builds from `entry`, a folder relative to the repo, rendered once per run."""
+    render = subprocess.run(["kubectl", "kustomize", str(REPO / entry)], stdout=subprocess.PIPE, text=True, check=True)
+    return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
+
+
 def test_platform_applies_infrastructure_then_each_env():
     resources = yaml.safe_load((BOOTSTRAP / "kustomization.yaml").read_text())["resources"]
     # Not listed means Flux never applies it.
@@ -277,6 +285,20 @@ def test_ci_renders_exactly_the_folders_flux_applies():
     sync = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]["sync"]
     paths = [sync["path"]] + [spec["path"] for spec in flux_kustomizations().values()]
     assert sorted(ENTRY_POINTS) == sorted(path.removeprefix("./") for path in paths)
+
+
+def test_every_flux_kustomization_is_in_platform_yaml():
+    # The checks above read platform.yaml only, but Flux applies every file in the render. One
+    # elsewhere would skip them all: no dependsOn, its own spec.images (third C3 review, finding 4).
+    # Characterisation (C6): every one was already in platform.yaml, so this was green on arrival.
+    # The mutations are in the design doc's log.
+    found = sorted(
+        (entry, doc["metadata"]["name"])
+        for entry in ENTRY_POINTS
+        for doc in rendered(entry)
+        if doc["kind"] == "Kustomization" and doc["apiVersion"].startswith("kustomize.toolkit.fluxcd.io/")
+    )
+    assert found == sorted(("Acme/infra/bootstrap", name) for name in flux_kustomizations())
 
 
 def test_flux_instance_is_never_pruned():
