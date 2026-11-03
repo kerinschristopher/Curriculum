@@ -60,6 +60,13 @@ def container_images(node):
             yield from container_images(item)
 
 
+@functools.cache
+def rendered(entry):
+    """The objects `kubectl kustomize` builds from `entry`, a folder relative to the repo, rendered once per run."""
+    render = subprocess.run(["kubectl", "kustomize", str(REPO / entry)], stdout=subprocess.PIPE, text=True, check=True)
+    return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
+
+
 def test_every_container_flux_deploys_has_a_tag_and_digest():
     # The render, not the files: a renamed image in base/ leaves the overlay's `images` entry
     # matching nothing, so the overlay still looks pinned and the Deployment isn't.
@@ -67,10 +74,7 @@ def test_every_container_flux_deploys_has_a_tag_and_digest():
     # mutations are in the design doc's log.
     found = {}
     for entry in ENTRY_POINTS:
-        render = subprocess.run(
-            ["kubectl", "kustomize", str(REPO / entry)], stdout=subprocess.PIPE, text=True, check=True
-        )
-        found[entry] = [image for doc in yaml.safe_load_all(render.stdout) for image in container_images(doc)]
+        found[entry] = [image for doc in rendered(entry) for image in container_images(doc)]
     # Bootstrap holds no containers: test_operator_image_is_pinned_by_tag_and_digest covers its image.
     empty = [entry for entry, images in found.items() if not images and entry != "Acme/infra/bootstrap"]
     assert empty == []
@@ -243,13 +247,6 @@ def flux_kustomizations():
     """{name: spec} of the Flux Kustomizations in platform.yaml."""
     docs = yaml.safe_load_all((BOOTSTRAP / "platform.yaml").read_text())
     return {d["metadata"]["name"]: d["spec"] for d in docs if d and d["kind"] == "Kustomization"}
-
-
-@functools.cache
-def rendered(entry):
-    """The objects `kubectl kustomize` builds from `entry`, a folder relative to the repo, rendered once per run."""
-    render = subprocess.run(["kubectl", "kustomize", str(REPO / entry)], stdout=subprocess.PIPE, text=True, check=True)
-    return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
 
 
 def test_platform_applies_infrastructure_then_each_env():
