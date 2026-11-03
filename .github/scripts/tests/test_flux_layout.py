@@ -82,12 +82,15 @@ def test_every_container_flux_deploys_has_a_tag_and_digest():
     assert unpinned == []
 
 
-def test_no_flux_kustomization_rewrites_images():
-    # Flux applies spec.images after the render, so the test above can't see it. A newTag alone
-    # drops the digest, and a newName or a digest alone deploys something else.
-    # Characterisation (C6): none has ever been committed, so this was green on arrival. Adding
-    # one temporarily turns it red; the result is in the design doc's log.
-    assert [name for name, spec in flux_kustomizations().items() if "images" in spec] == []
+def test_flux_kustomizations_set_only_known_fields():
+    # Flux applies spec.images, spec.patches and spec.components after the render, so the test
+    # above can't see them, and any one can swap an image (third C3 review, finding 2). A newTag
+    # alone drops the digest. Each may set only what they set today: a new field fails here until
+    # a test covers it.
+    # Characterisation (C6): green on arrival. The mutations are in the design doc's log.
+    allowed = {"deletionPolicy", "dependsOn", "interval", "path", "prune", "retryInterval", "sourceRef", "timeout", "wait"}
+    extra = {name: sorted(set(spec) - allowed) for name, spec in flux_kustomizations().items() if set(spec) - allowed}
+    assert extra == {}
 
 
 def test_every_env_has_an_apps_entry_point_for_its_own_overlay():
@@ -225,6 +228,16 @@ def test_flux_instance_runs_the_image_controllers():
     components = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]["components"]
     missing = {"image-reflector-controller", "image-automation-controller"} - set(components)
     assert not missing, missing
+
+
+def test_flux_instance_sets_only_known_fields():
+    # The Operator builds Flux's controllers in the cluster, so no render shows them.
+    # spec.kustomize.patches edits them after the build, and distribution.artifact or variant picks
+    # other manifests: any one can swap a controller's image (third C3 review, finding 2).
+    # Characterisation (C6): green on arrival. The mutations are in the design doc's log.
+    spec = yaml.safe_load((BOOTSTRAP / "flux-instance.yaml").read_text())["spec"]
+    assert sorted(spec) == ["components", "distribution", "sync"], sorted(spec)
+    assert sorted(spec["distribution"]) == ["registry", "version"], sorted(spec["distribution"])
 
 
 def test_flux_syncs_its_own_folder_from_main_anonymously():
@@ -378,6 +391,20 @@ def test_operator_helmrelease_reverts_hand_edits():
     _, templates = operator_resourceset()
     spec = templates["HelmRelease"]["spec"]
     assert spec.get("driftDetection") == {"mode": "enabled"}, spec
+
+
+def test_operator_resourceset_generates_only_the_release_and_its_source():
+    # The Operator builds these objects in the cluster, so no render shows them. Inline values or
+    # postRenderers on the HelmRelease beat valuesFrom's tag@digest, and resourcesTemplate, steps or
+    # a third template can add any object (third C3 review, finding 2). Each may set only what it
+    # sets today: a new field fails here until a test covers it.
+    # Characterisation (C6): green on arrival. The mutations are in the design doc's log.
+    resourceset, templates = operator_resourceset()
+    assert sorted(resourceset["spec"]) == ["inputs", "resources"], sorted(resourceset["spec"])
+    # templates is keyed by kind, so a second HelmRelease would hide behind the first.
+    assert [t["kind"] for t in resourceset["spec"]["resources"]] == ["OCIRepository", "HelmRelease"]
+    spec = templates["HelmRelease"]["spec"]
+    assert sorted(spec) == ["chartRef", "driftDetection", "interval", "releaseName", "valuesFrom"], sorted(spec)
 
 
 def test_operator_resourceset_is_applied_and_never_pruned():
