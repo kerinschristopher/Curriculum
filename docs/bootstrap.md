@@ -201,8 +201,6 @@ creates the Secret later.
 `gh` ties a key it adds to your login token, so revoking that token removes the deploy key and Flux can't push. If that happens,
 run this again.
 
-Not run yet.
-
 ## Removing Flux safely
 
 Delete the `FluxInstance`, never the namespace:
