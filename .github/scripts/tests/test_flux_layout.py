@@ -136,8 +136,8 @@ def test_image_automation_pushes_beside_main_never_to_it():
     # branch to a ruleset file temporarily turns it red; the result is in the design doc's log.
     rulesets = sorted((REPO / "Acme" / "infra" / "github").glob("*-ruleset.json"))
     assert rulesets
-    refusing = [p.name for p in rulesets if applies_to(json.loads(p.read_text()), f"refs/heads/{push}")]
-    assert refusing == []
+    rulesets_on_push_branch = [p.name for p in rulesets if applies_to(json.loads(p.read_text()), f"refs/heads/{push}")]
+    assert rulesets_on_push_branch == []
 
 
 def test_image_automation_only_rewrites_dev():
@@ -168,9 +168,12 @@ def test_image_automation_writes_with_a_key_that_stays_out_of_git():
     ],
     ids=["bare-document", "quoted", "list-item", "resourceset-template"],
 )
-def test_secret_check_sees_every_way_a_secret_can_be_written(carrier):
+def test_secret_check_sees_bare_quoted_and_nested_secrets(carrier):
     # The Operator applies whatever a ResourceSet template generates, so an indented Secret reaches
     # the cluster just like a top-level one.
+    # The regex alone covers files Flux never applies and Secrets nested in a ResourceSet template.
+    # It misses a trailing comment, flow style, a quoted key and .json; for applied files,
+    # test_nothing_flux_applies_is_a_secret catches those.
     assert SECRET_KIND.search(carrier)
 
 
