@@ -409,3 +409,15 @@ def test_no_kustomization_generates_a_secret():
     assert paths
     generating = [str(p) for p in paths if "secretGenerator" in yaml.safe_load(p.read_text())]
     assert generating == []
+
+
+def test_nothing_flux_applies_is_a_secret():
+    # The file checks above read text and file names. The render is what Flux applies: a
+    # secretGenerator in an extensionless Kustomization file, or a kind written as an escape, a tag
+    # or a block scalar, renders a Secret they miss (third C3 review, finding 6).
+    # Characterisation (C6): nothing rendered has ever been a Secret, so this was green on arrival.
+    # The mutations are in the design doc's log.
+    secrets = sorted(
+        (entry, doc["metadata"]["name"]) for entry in ENTRY_POINTS for doc in rendered(entry) if doc["kind"] == "Secret"
+    )
+    assert secrets == []
