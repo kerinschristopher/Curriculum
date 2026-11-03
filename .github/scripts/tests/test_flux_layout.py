@@ -9,17 +9,21 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
 from test_branch_rulesets import applies_to
+from test_sample_api_ci_workflow import ENTRY_POINTS
 
 REPO = Path(__file__).resolve().parents[3]
 SAMPLE_API_OVERLAYS = REPO / "Acme" / "platform" / "apps" / "sample-api" / "overlays"
 SAMPLE_API_IMAGE = "ghcr.io/kerinschristopher/sample-api"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+# name:tag@digest. The tag has no `/`, so a registry port like host:5000/name@sha256:... does not count.
+TAG_AND_DIGEST = re.compile(rf":[^/:@]+@{DIGEST.pattern}$")
 APPS_ENTRY_POINTS = REPO / "Acme" / "platform" / "apps" / "overlays"
 BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
 # Any indentation or list dash, because an indented Secret still reaches the cluster. A future
@@ -40,6 +44,45 @@ def test_every_env_overlay_pins_sample_api_by_digest():
         if "newTag" not in image or not DIGEST.fullmatch(image.get("digest", "")):
             unpinned.append(path.parent.name)
     assert unpinned == []
+
+
+def container_images(node):
+    """Every container's image under a rendered object, for any workload kind."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("containers", "initContainers"):
+                yield from (container["image"] for container in value)
+            else:
+                yield from container_images(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from container_images(item)
+
+
+def test_every_container_flux_deploys_has_a_tag_and_digest():
+    # The render, not the files: a renamed image in base/ leaves the overlay's `images` entry
+    # matching nothing, so the overlay still looks pinned and the Deployment isn't.
+    # Characterisation (C6): every image was already pinned, so this was green on arrival. The
+    # mutations are in the design doc's log.
+    found = {}
+    for entry in ENTRY_POINTS:
+        render = subprocess.run(
+            ["kubectl", "kustomize", str(REPO / entry)], stdout=subprocess.PIPE, text=True, check=True
+        )
+        found[entry] = [image for doc in yaml.safe_load_all(render.stdout) for image in container_images(doc)]
+    # Bootstrap holds no containers: test_operator_image_is_pinned_by_tag_and_digest covers its image.
+    empty = [entry for entry, images in found.items() if not images and entry != "Acme/infra/bootstrap"]
+    assert empty == []
+    unpinned = sorted({i for images in found.values() for i in images if not TAG_AND_DIGEST.search(i)})
+    assert unpinned == []
+
+
+def test_no_flux_kustomization_rewrites_images():
+    # Flux applies spec.images after the render, so the test above can't see it. A newTag alone
+    # drops the digest, and a newName or a digest alone deploys something else.
+    # Characterisation (C6): none has ever been committed, so this was green on arrival. Adding
+    # one temporarily turns it red; the result is in the design doc's log.
+    assert [name for name, spec in flux_kustomizations().items() if "images" in spec] == []
 
 
 def test_every_env_has_an_apps_entry_point_for_its_own_overlay():

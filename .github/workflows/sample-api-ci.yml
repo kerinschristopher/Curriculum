@@ -292,7 +292,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # shellcheck, jq and python3 are preinstalled on the runner image.
+      # shellcheck, jq, python3 and kubectl are preinstalled on the runner image.
       - name: Lint the scripts (shellcheck)
         run: shellcheck .github/scripts/*.sh
 
