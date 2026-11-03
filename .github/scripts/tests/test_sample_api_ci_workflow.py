@@ -53,6 +53,11 @@ GUARDED = [
     "Acme/new-file.yml",
     "Acme/platform/apps/sample-api/base/new-file.yaml",
     "Acme/platform/infrastructure/overlays/kind/new-file.yaml",
+    # test_flux_layout.py renders every entry point, and kustomize reads any file a kustomization
+    # lists, whatever its extension, and a kustomization file named plain Kustomization.
+    "Acme/platform/apps/sample-api/overlays/dev/new-patch.json",
+    "Acme/platform/apps/overlays/dev/extra/Kustomization",
+    "Acme/infra/bootstrap/new-file.json",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
