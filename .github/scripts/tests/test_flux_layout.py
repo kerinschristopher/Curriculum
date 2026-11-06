@@ -51,13 +51,23 @@ def container_images(node):
     """Every container's image under a rendered object, for any workload kind."""
     if isinstance(node, dict):
         for key, value in node.items():
+            # Not ephemeralContainers: a pod can't be created with them (Module 9 design, F18), so no manifest has one.
             if key in ("containers", "initContainers"):
-                yield from (container["image"] for container in value)
+                # `image` is optional (F18). A missing one reads as "", which fails the
+                # tag@digest match like any unpinned image.
+                yield from (container.get("image", "") for container in value)
             else:
                 yield from container_images(value)
     elif isinstance(node, list):
         for item in node:
             yield from container_images(item)
+
+
+def test_a_container_without_an_image_reads_as_unpinned():
+    # `image` is optional on a container (Module 9 design, F18): the digest check must report it, not crash.
+    doc = {"spec": {"template": {"spec": {"containers": [{"name": "app"}]}}}}
+    images = list(container_images(doc))
+    assert [image for image in images if not TAG_AND_DIGEST.search(image)] == [""]
 
 
 @functools.cache
