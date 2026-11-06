@@ -569,3 +569,16 @@ def test_the_release_reads_its_values_from_values_yaml():
     ], objects["HelmRelease"]["spec"]
     # helm-controller acts on a values change at once instead of at its 30m interval.
     assert configmap["metadata"].get("labels", {}).get("reconcile.fluxcd.io/watch") == "Enabled", configmap["metadata"]
+
+
+def test_the_release_sets_only_known_fields():
+    # Inline values or postRenderers would beat values.yaml, the file the tests check (Module 8's third
+    # review, finding 2). A new field fails here until a test covers it.
+    # Characterisation (C6) for this first assert: green on arrival; inline values turn it red (recorded).
+    spec = monitoring_objects()["HelmRelease"]["spec"]
+    allowed = {"chartRef", "driftDetection", "install", "interval", "timeout", "upgrade", "valuesFrom"}
+    assert sorted(set(spec) - allowed) == [], sorted(spec)
+    # Helm alone installs a chart's CRDs once and never updates them (F4): CreateReplace moves them with the
+    # chart. RetryOnFailure retries a failed install every 5m; the default rolls it back and stalls until Git changes.
+    assert spec.get("install") == {"crds": "Create", "strategy": {"name": "RetryOnFailure"}}, spec.get("install")
+    assert spec.get("upgrade") == {"crds": "CreateReplace", "strategy": {"name": "RetryOnFailure"}}, spec.get("upgrade")

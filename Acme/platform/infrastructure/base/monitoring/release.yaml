@@ -11,3 +11,16 @@ spec:
     - kind: ConfigMap
       name: kube-prometheus-stack-values
       valuesKey: values.yaml
+  # One Helm install or upgrade attempt. Helm's default 5m is short for a first pull of ~0.7 GB (design
+  # §8; P6 measures the real time to Ready).
+  timeout: 10m
+  # Helm alone installs a chart's CRDs once and never updates them: CreateReplace moves them with the chart.
+  # RetryOnFailure retries a failed attempt every 5m; the default rolls back and stalls until Git changes.
+  install:
+    crds: Create
+    strategy:
+      name: RetryOnFailure
+  upgrade:
+    crds: CreateReplace
+    strategy:
+      name: RetryOnFailure
