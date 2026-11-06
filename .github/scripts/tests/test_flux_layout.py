@@ -582,3 +582,21 @@ def test_the_release_sets_only_known_fields():
     # chart. RetryOnFailure retries a failed install every 5m; the default rolls it back and stalls until Git changes.
     assert spec.get("install") == {"crds": "Create", "strategy": {"name": "RetryOnFailure"}}, spec.get("install")
     assert spec.get("upgrade") == {"crds": "CreateReplace", "strategy": {"name": "RetryOnFailure"}}, spec.get("upgrade")
+
+
+def test_no_flux_apply_holds_a_release_and_a_monitoring_object():
+    # F22: Flux dry-runs a Kustomization's objects in one batch before applying any. A PrometheusRule
+    # beside the HelmRelease that brings its CRD fails that dry-run, so the release is never applied and
+    # the CRD never comes: infrastructure fails every retry and every apps-* stops. kubeconform catches
+    # it only until P3a adds the monitoring schemas.
+    # Characterisation (C6): green on arrival; a PrometheusRule in base/monitoring turns it red (recorded).
+    mixed = []
+    for entry in ENTRY_POINTS:
+        docs = rendered(entry)
+        if any(doc["kind"] == "HelmRelease" for doc in docs):
+            mixed += [
+                (entry, doc["kind"], doc["metadata"]["name"])
+                for doc in docs
+                if doc["apiVersion"].startswith("monitoring.coreos.com/")
+            ]
+    assert mixed == []
