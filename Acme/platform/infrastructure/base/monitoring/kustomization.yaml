@@ -10,3 +10,14 @@ resources:
   - namespace.yaml
   - chart.yaml
   - release.yaml
+
+# The values as the ConfigMap the HelmRelease reads. No hash suffix: kustomize doesn't rewrite a
+# HelmRelease's valuesFrom, so a suffixed name would leave it pointing at nothing.
+configMapGenerator:
+  - name: kube-prometheus-stack-values
+    files:
+      - values.yaml
+    options:
+      disableNameSuffixHash: true
+      labels:
+        reconcile.fluxcd.io/watch: Enabled

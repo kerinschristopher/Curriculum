@@ -40,6 +40,7 @@ SECRET_KIND = re.compile(r"""^\s*-?\s*kind:\s*["']?Secret["']?\s*$""", re.M)
 
 KIND_INFRASTRUCTURE = "Acme/platform/infrastructure/overlays/kind"
 KUBE_PROMETHEUS_STACK = "oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack"
+MONITORING = REPO / "Acme" / "platform" / "infrastructure" / "base" / "monitoring"
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -552,3 +553,19 @@ def test_the_release_installs_the_pinned_chart():
     assert sorted(ref) == ["digest", "tag"], ref
     assert re.fullmatch(r"\d+\.\d+\.\d+", ref["tag"]), ref
     assert DIGEST.fullmatch(ref["digest"]), ref
+
+
+def test_the_release_reads_its_values_from_values_yaml():
+    # values.yaml is what P4b's render test checks (image digests, selectors), so it must be what
+    # helm-controller installs with; otherwise the chart runs on its defaults, tag-only images included.
+    objects = monitoring_objects()
+    assert "ConfigMap" in objects, sorted(objects)
+    configmap = objects["ConfigMap"]
+    assert configmap["data"] == {"values.yaml": (MONITORING / "values.yaml").read_text()}, sorted(configmap["data"])
+    # The rendered name, not the generator's: kustomize doesn't rewrite valuesFrom, so a hash suffix would
+    # leave it naming a ConfigMap that doesn't exist.
+    assert objects["HelmRelease"]["spec"].get("valuesFrom") == [
+        {"kind": "ConfigMap", "name": configmap["metadata"]["name"], "valuesKey": "values.yaml"}
+    ], objects["HelmRelease"]["spec"]
+    # helm-controller acts on a values change at once instead of at its 30m interval.
+    assert configmap["metadata"].get("labels", {}).get("reconcile.fluxcd.io/watch") == "Enabled", configmap["metadata"]
