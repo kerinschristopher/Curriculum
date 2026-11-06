@@ -90,16 +90,21 @@ def egress_works():
         return False
 
 
+def fail_naming_the_cause(action, suspect, stderr):
+    """Fail, blaming the network if EGRESS_PROBE doesn't answer, otherwise `suspect` (PR #22 finding 1, D6)."""
+    if egress_works():
+        cause = f"{EGRESS_PROBE} answers, so the cause is {suspect}"
+    else:
+        cause = f"the network is down ({EGRESS_PROBE} doesn't answer)"
+    pytest.fail(f"{action} failed: {cause}.\n{stderr}")
+
+
 @functools.cache
 def rendered(entry):
     """The objects `kustomize build` builds from `entry`, a folder relative to the repo, rendered once per run."""
     render = subprocess.run(["kustomize", "build", str(REPO / entry)], capture_output=True, text=True)
     if render.returncode:
-        if egress_works():
-            cause = f"{EGRESS_PROBE} answers, so the cause is the kustomization or a URL in it"
-        else:
-            cause = f"the network is down ({EGRESS_PROBE} doesn't answer)"
-        pytest.fail(f"Rendering {entry} failed: {cause}.\n{render.stderr}")
+        fail_naming_the_cause(f"Rendering {entry}", "the kustomization or a URL in it", render.stderr)
     return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
 
 
