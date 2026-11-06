@@ -54,3 +54,14 @@ prometheus-node-exporter:
     # The chart adds "-distroless" itself.
     tag: v1.12.1
     digest: sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106
+
+# kind binds the controller-manager, scheduler and etcd metrics to 127.0.0.1 and doesn't expose kube-proxy's
+# (F8), so Prometheus could never reach them. Off, so their monitors, alerts and dashboards aren't installed.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false

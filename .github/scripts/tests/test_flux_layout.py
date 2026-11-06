@@ -45,6 +45,8 @@ MONITORING = REPO / "Acme" / "platform" / "infrastructure" / "base" / "monitorin
 # containers, in Prometheus's and Alertmanager's spec.image and in operator arguments (F6); a later version
 # may add another place, and a text scan still sees it.
 IMAGE_REFERENCE = re.compile(rf"[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?/[a-z0-9._/-]+:[\w.-]+(?:@{DIGEST.pattern})?")
+# The control-plane parts kind hides on loopback (Module 9 design, F8): a monitor for them only ever sees "down".
+CONTROL_PLANE = re.compile(r"kube-controller-manager|kube-scheduler|etcd|kube-proxy")
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -664,3 +666,13 @@ def test_every_image_the_chart_runs_is_pinned(chart_render):
     # Prometheus's image is in no container field, so only the scan finds it: a broken scan fails here.
     assert any("/prometheus/prometheus:" in image for image in images), sorted(images)
     assert sorted(image for image in images if not TAG_AND_DIGEST.search(image)) == []
+
+
+def test_nothing_watches_the_control_plane_kind_hides(chart_render):
+    # kind binds these to 127.0.0.1 (F8), so their targets are down for good and their alerts never stop firing.
+    docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
+    monitors = [d["metadata"]["name"] for d in docs if d["kind"] == "ServiceMonitor"]
+    exprs = [r["expr"] for d in docs if d["kind"] == "PrometheusRule"
+             for g in d["spec"]["groups"] for r in g["rules"]]
+    assert [m for m in monitors if CONTROL_PLANE.search(m)] == []
+    assert [e for e in exprs if CONTROL_PLANE.search(str(e))] == []
