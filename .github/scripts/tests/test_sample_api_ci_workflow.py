@@ -89,6 +89,9 @@ ENTRY_POINTS = [
 # sigs.k8s.io/kustomize/api with this release's api. Flux 2.10.0 = kustomize-controller v1.10.1,
 # api v0.21.1 = kustomize v5.8.1. A Flux bump fails until its row is looked up and added (D7).
 KUSTOMIZE_FOR_FLUX = {"2.10.0": "5.8.1"}
+# The Helm each Flux release renders charts with: its helm-controller embeds helm.sh/helm/v4 at this
+# version. Flux 2.10.0 = helm-controller v1.7.1 = Helm v4.3.1. A Flux bump fails until its row is added.
+HELM_FOR_FLUX = {"2.10.0": "4.3.1"}
 
 
 @pytest.fixture(scope="module")
@@ -210,6 +213,16 @@ def test_kustomize_job_validates_against_the_versions_the_cluster_runs():
     tag = yaml.safe_load((bootstrap / "flux-operator-values.yaml").read_text())["image"]["tag"]
     operator = tag.removeprefix("v").split("@")[0]
     assert (str(env.get("FLUX_VERSION")), str(env.get("OPERATOR_VERSION"))) == (flux, operator)
+
+
+def test_helm_pin_matches_the_flux_version():
+    # scripts-test installs HELM_VERSION, so P4b renders kube-prometheus-stack as helm-controller does;
+    # the runner image ships Helm 3.22.1. FLUX_VERSION is tied to flux-instance.yaml by the test above.
+    env = yaml.safe_load(WORKFLOW.read_text()).get("env", {})
+    flux = str(kustomize_step("Validate manifests against their schemas").get("env", {}).get("FLUX_VERSION"))
+    assert flux in HELM_FOR_FLUX, f"look up the Helm that Flux {flux}'s helm-controller embeds"
+    assert str(env.get("HELM_VERSION")) == HELM_FOR_FLUX[flux], env
+    assert re.fullmatch(r"[0-9a-f]{64}", str(env.get("HELM_SHA256", ""))), env
 
 
 def test_kustomize_pin_matches_the_flux_version():
