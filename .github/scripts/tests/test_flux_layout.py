@@ -112,6 +112,15 @@ def test_renders_use_the_pinned_kustomize():
     assert version.stdout.strip() == pinned, version.stdout
 
 
+def test_renders_use_the_pinned_helm():
+    # The Helm on PATH must be the one sample-api-ci.yml pins to Flux's version, in scripts-test and
+    # locally: the runner image ships Helm 3.22.1, and helm-controller renders with v4.3.1.
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "sample-api-ci.yml").read_text())
+    pinned = f"v{workflow['env']['HELM_VERSION']}"
+    version = subprocess.run(["helm", "version", "--template", "{{.Version}}"], capture_output=True, text=True, check=True)
+    assert version.stdout.strip() == pinned, version.stdout
+
+
 def test_a_render_that_fails_offline_names_the_network(tmp_path, monkeypatch):
     # PR #22 finding 1 (Module 9 design A1, D6): an outage must not look like a broken kustomization.
     (tmp_path / "kustomization.yaml").write_text("resources:\n  - https://manifests.invalid/deploy.yaml\n")
