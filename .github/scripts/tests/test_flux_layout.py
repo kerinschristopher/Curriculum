@@ -38,7 +38,8 @@ BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
 # `valuesFrom: - kind: Secret` would be flagged too, which fails safe.
 SECRET_KIND = re.compile(r"""^\s*-?\s*kind:\s*["']?Secret["']?\s*$""", re.M)
 
-
+KIND_INFRASTRUCTURE = "Acme/platform/infrastructure/overlays/kind"
+KUBE_PROMETHEUS_STACK = "oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack"
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -522,3 +523,32 @@ def test_nothing_flux_applies_is_a_secret():
         (entry, doc["metadata"]["name"]) for entry in ENTRY_POINTS for doc in rendered(entry) if doc["kind"] == "Secret"
     )
     assert secrets == []
+
+
+def monitoring_objects():
+    """{kind: object} of what Flux's infrastructure Kustomization applies to the monitoring namespace."""
+    return {
+        doc["kind"]: doc
+        for doc in rendered(KIND_INFRASTRUCTURE)
+        if doc["metadata"].get("namespace") == "monitoring"
+        or (doc["kind"] == "Namespace" and doc["metadata"]["name"] == "monitoring")
+    }
+
+
+def test_the_release_installs_the_pinned_chart():
+    # Module 9 (D1 = C, D3 = C): Flux's infrastructure Kustomization installs kube-prometheus-stack,
+    # and which chart it installs can't change without a PR.
+    objects = monitoring_objects()
+    assert {"HelmRelease", "OCIRepository"} <= set(objects), sorted(objects)
+    release, source = objects["HelmRelease"], objects["OCIRepository"]
+    # A wrong name leaves helm-controller no chart: the release never goes Ready, infrastructure fails
+    # its wait, and every apps-* stops receiving changes (R11). kubeconform doesn't check names.
+    assert release["spec"]["chartRef"] == {"kind": "OCIRepository", "name": source["metadata"]["name"]}, release["spec"]
+    spec = source["spec"]
+    assert spec["url"] == KUBE_PROMETHEUS_STACK, spec
+    # The chart's templates run as cluster-admin. With a digest, a re-pushed tag changes nothing: the
+    # digest beats the tag (Module 8 F22). The tag stays for people to read; P4b checks they agree.
+    ref = spec.get("ref", {})
+    assert sorted(ref) == ["digest", "tag"], ref
+    assert re.fullmatch(r"\d+\.\d+\.\d+", ref["tag"]), ref
+    assert DIGEST.fullmatch(ref["digest"]), ref

@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# kube-prometheus-stack, installed by helm-controller (Module 9 design §1, D1 = C). No monitoring.coreos.com
+# object goes here: its CRD arrives with the chart, so it would fail Flux's dry-run and block the whole
+# apply (F22). Rules and dashboards of ours go in a Kustomization that depends on infrastructure.
+namespace: monitoring
+
+resources:
+  - namespace.yaml
+  - chart.yaml
+  - release.yaml
