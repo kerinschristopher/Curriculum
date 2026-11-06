@@ -324,6 +324,18 @@ jobs:
           install -m 0755 kustomize /usr/local/bin/kustomize
           kustomize version
 
+      # The runner image ships Helm 3.22.1; P4b's render test renders the chart with HELM_VERSION, as
+      # helm-controller does, and test_renders_use_the_pinned_helm checks it.
+      - name: Install Helm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl --retry 3 --retry-all-errors -fsSLo helm.tar.gz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          helm version
+
       # shellcheck, jq and python3 are preinstalled on the runner image.
       - name: Lint the scripts (shellcheck)
         run: shellcheck .github/scripts/*.sh
