@@ -8,9 +8,14 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
 """
 
 import functools
+import http.server
 import json
 import re
 import subprocess
+import sys
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -25,6 +30,8 @@ SAMPLE_API_IMAGE = "ghcr.io/kerinschristopher/sample-api"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 # name:tag@digest. The tag has no `/`, so a registry port like host:5000/name@sha256:... does not count.
 TAG_AND_DIGEST = re.compile(rf":[^/:@]+@{DIGEST.pattern}$")
+# Where every remote resource we render comes from today: if it doesn't answer, a failed render is the network.
+EGRESS_PROBE = "https://raw.githubusercontent.com/"
 APPS_ENTRY_POINTS = REPO / "Acme" / "platform" / "apps" / "overlays"
 BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
 # Any indentation or list dash, because an indented Secret still reaches the cluster. A future
@@ -70,11 +77,56 @@ def test_a_container_without_an_image_reads_as_unpinned():
     assert [image for image in images if not TAG_AND_DIGEST.search(image)] == [""]
 
 
+def egress_works():
+    """Whether EGRESS_PROBE answers at all. Any HTTP status means the network is up; only no answer means it's down."""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(EGRESS_PROBE, method="HEAD"), timeout=10):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except OSError:
+        return False
+
+
 @functools.cache
 def rendered(entry):
     """The objects `kubectl kustomize` builds from `entry`, a folder relative to the repo, rendered once per run."""
-    render = subprocess.run(["kubectl", "kustomize", str(REPO / entry)], stdout=subprocess.PIPE, text=True, check=True)
+    render = subprocess.run(["kubectl", "kustomize", str(REPO / entry)], capture_output=True, text=True)
+    if render.returncode:
+        if egress_works():
+            cause = f"{EGRESS_PROBE} answers, so the cause is the kustomization or a URL in it"
+        else:
+            cause = f"the network is down ({EGRESS_PROBE} doesn't answer)"
+        pytest.fail(f"Rendering {entry} failed: {cause}.\n{render.stderr}")
     return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
+
+
+def test_a_render_that_fails_offline_names_the_network(tmp_path, monkeypatch):
+    # PR #22 finding 1 (Module 9 design A1, D6): an outage must not look like a broken kustomization.
+    (tmp_path / "kustomization.yaml").write_text("resources:\n  - https://manifests.invalid/deploy.yaml\n")
+    # .invalid never resolves (RFC 2606), so both lookups fail offline, as in an outage.
+    monkeypatch.setattr(sys.modules[__name__], "EGRESS_PROBE", "https://probe.invalid/")
+    with pytest.raises(pytest.fail.Exception) as failure:
+        rendered(str(tmp_path))
+    assert "manifests.invalid" in str(failure.value), failure.value
+    assert "network" in str(failure.value), failure.value
+
+
+def test_a_render_that_fails_online_blames_the_kustomization(tmp_path, monkeypatch):
+    # The other half: with the network up, a broken kustomization must not be blamed on an outage.
+    (tmp_path / "kustomization.yaml").write_text("resources:\n  - missing.yaml\n")
+    # A local server stands in for a working network, so this runs offline too. It answers every
+    # request with 501, and any HTTP answer means the network is up.
+    server = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(sys.modules[__name__], "EGRESS_PROBE", f"http://127.0.0.1:{server.server_port}/")
+        with pytest.raises(pytest.fail.Exception) as failure:
+            rendered(str(tmp_path))
+    finally:
+        server.shutdown()
+    assert "missing.yaml" in str(failure.value), failure.value
+    assert "network" not in str(failure.value), failure.value
 
 
 def test_every_container_flux_deploys_has_a_tag_and_digest():
