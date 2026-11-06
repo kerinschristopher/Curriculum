@@ -90,8 +90,8 @@ def egress_works():
 
 @functools.cache
 def rendered(entry):
-    """The objects `kubectl kustomize` builds from `entry`, a folder relative to the repo, rendered once per run."""
-    render = subprocess.run(["kubectl", "kustomize", str(REPO / entry)], capture_output=True, text=True)
+    """The objects `kustomize build` builds from `entry`, a folder relative to the repo, rendered once per run."""
+    render = subprocess.run(["kustomize", "build", str(REPO / entry)], capture_output=True, text=True)
     if render.returncode:
         if egress_works():
             cause = f"{EGRESS_PROBE} answers, so the cause is the kustomization or a URL in it"
@@ -99,6 +99,15 @@ def rendered(entry):
             cause = f"the network is down ({EGRESS_PROBE} doesn't answer)"
         pytest.fail(f"Rendering {entry} failed: {cause}.\n{render.stderr}")
     return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
+
+
+def test_renders_use_the_pinned_kustomize():
+    # The kustomize on PATH must be the one sample-api-ci.yml pins to Flux's version, in scripts-test
+    # and locally: the runner image ships its own (5.8.3), and kubectl bundles yet another.
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "sample-api-ci.yml").read_text())
+    pinned = f"v{workflow['env']['KUSTOMIZE_VERSION']}"
+    version = subprocess.run(["kustomize", "version"], capture_output=True, text=True, check=True)
+    assert version.stdout.strip() == pinned, version.stdout
 
 
 def test_a_render_that_fails_offline_names_the_network(tmp_path, monkeypatch):
