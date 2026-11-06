@@ -614,3 +614,24 @@ def test_no_flux_apply_holds_a_release_and_a_monitoring_object():
                 if doc["apiVersion"].startswith("monitoring.coreos.com/")
             ]
     assert mixed == []
+
+
+@pytest.fixture(scope="session")
+def chart(tmp_path_factory):
+    """The chart the HelmRelease installs, pulled by its digest as Flux pulls it (D3 = C)."""
+    ref = monitoring_objects()["OCIRepository"]["spec"]["ref"]
+    reference = f"{KUBE_PROMETHEUS_STACK}@{ref['digest']}"
+    folder = tmp_path_factory.mktemp("chart")
+    pull = subprocess.run(["helm", "pull", reference, "--destination", str(folder)], capture_output=True, text=True)
+    if pull.returncode:
+        fail_naming_the_cause(f"Pulling {reference}", "the chart reference", pull.stderr)
+    (tgz,) = folder.glob("*.tgz")
+    return tgz
+
+
+def test_the_chart_at_the_digest_is_the_tagged_version(chart):
+    # Flux installs the digest; people read the tag. An upgrade that changes one line of the two makes
+    # the PR say one version while the cluster runs another, and nothing else compares them.
+    show = subprocess.run(["helm", "show", "chart", str(chart)], capture_output=True, text=True, check=True)
+    tag = monitoring_objects()["OCIRepository"]["spec"]["ref"]["tag"]
+    assert yaml.safe_load(show.stdout)["version"] == tag
