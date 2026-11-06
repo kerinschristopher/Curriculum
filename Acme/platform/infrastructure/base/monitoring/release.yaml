@@ -24,3 +24,12 @@ spec:
     crds: CreateReplace
     strategy:
       name: RetryOnFailure
+  # Without it, a kubectl edit of a chart object stays until the chart or values change; P9 proves the
+  # restore. The webhook annotates every PrometheusRule (design F10): ignored, or each reconcile would
+  # strip it and the webhook would re-add it.
+  driftDetection:
+    mode: enabled
+    ignore:
+      - paths: ["/metadata/annotations/prometheus-operator-validated"]
+        target:
+          kind: PrometheusRule
