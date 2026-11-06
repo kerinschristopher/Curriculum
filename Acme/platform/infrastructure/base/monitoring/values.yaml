@@ -1,3 +1,56 @@
 # kube-prometheus-stack's values (Module 9 design §2, §8). Not a manifest: kustomization.yaml turns it
 # into the ConfigMap the HelmRelease reads (valuesFrom), and P4b's render test renders the chart with it.
 # Nothing goes inline on the HelmRelease: inline values would beat this file.
+
+# Every image by tag and digest (D3 = C, NFR3): the digest is what runs, and the tag is for people. Each
+# tag is written here so a chart upgrade can't move it away from its digest; upgrade both together.
+# The charts spell the digest three ways (F6): `sha` without "sha256:" (this chart and Grafana), `sha`
+# with it (kube-state-metrics), and `digest` (node-exporter). Digests are index digests, read with
+# `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`.
+prometheusOperator:
+  image:
+    tag: v0.94.2
+    sha: c7edf0379b7271ef1705dce258d2bb73820e299cc95559369e9f6fc3321639ec
+  prometheusConfigReloader:
+    image:
+      tag: v0.94.2
+      sha: a1897c67478bc23434534e91ad3855280771196b1daf17144db9dbcb655bef71
+  # Not run (no Thanos here), but the operator is told this image, so it is pinned too.
+  thanosImage:
+    tag: v0.42.5
+    sha: 0a546b98a8dd47735456ab389983675ee363d68127e334937a9fceeea10da5e7
+  admissionWebhooks:
+    patch:
+      image:
+        tag: 1.11.1
+        sha: 8009b04f9873f7279b5adee37fdd03b6a9aa7b6751d4f69fde2683010e41cd1f
+prometheus:
+  prometheusSpec:
+    image:
+      tag: v3.16.0-distroless
+      sha: 9764044e09eb2c9e1abdb12d0f0188d4efb7384b0262d3c080f0fc59045c89ba
+alertmanager:
+  alertmanagerSpec:
+    image:
+      tag: v0.34.2
+      sha: 39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b
+grafana:
+  image:
+    tag: 13.3.0-distroless
+    sha: 540b8afb775bf34aefce417e4329039daa5d44b6f2fbda6881397b1b247ca7df
+  sidecar:
+    image:
+      tag: 2.14.3
+      sha: 52d311dcedd587421a236c4d6c621f05614c40a51386e955e0699dca97ec0880
+  # Its test image has no digest field (F6). Flux never runs Helm tests here, so nothing is lost.
+  testFramework:
+    enabled: false
+kube-state-metrics:
+  image:
+    tag: v2.20.0
+    sha: sha256:42cfe3723a5f058171c627537fb57a3ea0f26e4380fa18555a95cb1a1b4cfc5b
+prometheus-node-exporter:
+  image:
+    # The chart adds "-distroless" itself.
+    tag: v1.12.1
+    digest: sha256:8c9bac11973b94b59be88d6e11fee4429aa743c8846cdc75d65b18db33f6a106

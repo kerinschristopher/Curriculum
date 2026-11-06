@@ -41,6 +41,10 @@ SECRET_KIND = re.compile(r"""^\s*-?\s*kind:\s*["']?Secret["']?\s*$""", re.M)
 KIND_INFRASTRUCTURE = "Acme/platform/infrastructure/overlays/kind"
 KUBE_PROMETHEUS_STACK = "oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack"
 MONITORING = REPO / "Acme" / "platform" / "infrastructure" / "base" / "monitoring"
+# Any registry-hosted name:tag in rendered text, with its digest if it has one. The chart puts images in
+# containers, in Prometheus's and Alertmanager's spec.image and in operator arguments (F6); a later version
+# may add another place, and a text scan still sees it.
+IMAGE_REFERENCE = re.compile(rf"[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?/[a-z0-9._/-]+:[\w.-]+(?:@{DIGEST.pattern})?")
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -635,3 +639,28 @@ def test_the_chart_at_the_digest_is_the_tagged_version(chart):
     show = subprocess.run(["helm", "show", "chart", str(chart)], capture_output=True, text=True, check=True)
     tag = monitoring_objects()["OCIRepository"]["spec"]["ref"]["tag"]
     assert yaml.safe_load(show.stdout)["version"] == tag
+
+
+@pytest.fixture(scope="session")
+def chart_render(chart):
+    """The chart's manifests as helm-controller renders them: values.yaml, the release's name and namespace,
+    and the kind node's Kubernetes version. Hooks included, because Helm renders them too."""
+    release = monitoring_objects()["HelmRelease"]["metadata"]
+    cluster = yaml.safe_load((REPO / "Acme" / "platform" / "kind" / "sample-api-cluster.yaml").read_text())
+    kube_version = re.search(r":v(\d+\.\d+\.\d+)@", cluster["nodes"][0]["image"]).group(1)
+    render = subprocess.run(
+        ["helm", "template", release["name"], str(chart), "--namespace", release["namespace"],
+         "--values", str(MONITORING / "values.yaml"), "--kube-version", kube_version],
+        capture_output=True, text=True, check=True,
+    )
+    return render.stdout
+
+
+def test_every_image_the_chart_runs_is_pinned(chart_render):
+    # A re-pushed tag changes what runs, and the operator runs with cluster-wide rights (NFR3).
+    # test_every_container_flux_deploys_has_a_tag_and_digest reads kustomize renders, so it never sees these.
+    docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
+    images = set(IMAGE_REFERENCE.findall(chart_render)) | {i for doc in docs for i in container_images(doc)}
+    # Prometheus's image is in no container field, so only the scan finds it: a broken scan fails here.
+    assert any("/prometheus/prometheus:" in image for image in images), sorted(images)
+    assert sorted(image for image in images if not TAG_AND_DIGEST.search(image)) == []
