@@ -466,9 +466,10 @@ def test_operator_resourceset_pins_the_version_helm_install_used():
     assert tag.split("@")[0] == f"v{version}", (version, tag)
     source = templates["OCIRepository"]["spec"]
     assert source["url"] == "oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator", source["url"]
-    # A tag or digest beside semver wins over it, and the input would then change nothing.
-    assert source["ref"] == {"semver": "<< inputs.version | quote >>"}, source["ref"]
-
+    # The chart's templates run as cluster-admin. With a digest, a re-pushed 0.62.1 changes nothing:
+    # the digest beats semver (Module 9 P0e, D3 = C). semver stays, tied to the input, for people to read.
+    assert source["ref"] == {"semver": "<< inputs.version | quote >>", "digest": "<< inputs.digest | quote >>"}, source["ref"]
+    assert DIGEST.fullmatch(inputs[0].get("digest", "")), inputs
 
 
 def test_operator_helmrelease_takes_over_the_helm_install_release():
