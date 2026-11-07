@@ -54,8 +54,7 @@ CONTROL_PLANE = re.compile(r"kube-controller-manager|kube-scheduler|etcd|kube-pr
 RELEASE = ("HelmRelease", "kube-prometheus-stack")
 CHART_SOURCE = ("OCIRepository", "kube-prometheus-stack")
 BASE_VALUES = ("ConfigMap", "kube-prometheus-stack-values")
-
-
+KIND_VALUES = ("ConfigMap", "kube-prometheus-stack-values-kind")
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -587,19 +586,21 @@ def test_the_release_installs_the_pinned_chart():
 
 
 def test_the_release_reads_its_values_from_values_yaml():
-    # values.yaml is what P4b's render test checks (image digests, selectors), so it must be what
-    # helm-controller installs with; otherwise the chart runs on its defaults, tag-only images included.
+    # values.yaml is what P4b's render test checks (image digests), so it must be what helm-controller
+    # installs with; otherwise the chart runs on its defaults, tag-only images included. kind adds its own
+    # file after it: helm-controller merges valuesFrom in order, and the later file wins.
     objects = monitoring_objects()
-    assert BASE_VALUES in objects, sorted(objects)
-    configmap = objects[BASE_VALUES]
-    assert configmap["data"] == {"values.yaml": (MONITORING / "values.yaml").read_text()}, sorted(configmap["data"])
-    # The rendered name, not the generator's: kustomize doesn't rewrite valuesFrom, so a hash suffix would
+    files = {BASE_VALUES: MONITORING / "values.yaml", KIND_VALUES: REPO / KIND_INFRASTRUCTURE / "monitoring-values.yaml"}
+    assert set(files) <= set(objects), sorted(objects)
+    # The rendered names, not the generator's: kustomize doesn't rewrite valuesFrom, so a hash suffix would
     # leave it naming a ConfigMap that doesn't exist.
     assert objects[RELEASE]["spec"].get("valuesFrom") == [
-        {"kind": "ConfigMap", "name": configmap["metadata"]["name"], "valuesKey": "values.yaml"}
+        {"kind": "ConfigMap", "name": name, "valuesKey": "values.yaml"} for _, name in files
     ], objects[RELEASE]["spec"]
-    # helm-controller acts on a values change at once instead of at its 30m interval.
-    assert configmap["metadata"].get("labels", {}).get("reconcile.fluxcd.io/watch") == "Enabled", configmap["metadata"]
+    for key, path in files.items():
+        assert objects[key]["data"] == {"values.yaml": path.read_text()}, key
+        # helm-controller acts on a values change at once instead of at its 30m interval.
+        assert objects[key]["metadata"].get("labels", {}).get("reconcile.fluxcd.io/watch") == "Enabled", key
 
 
 def test_the_release_sets_only_known_fields():

@@ -1,6 +1,7 @@
 # kube-prometheus-stack's values (Module 9 design §2, §8). Not a manifest: kustomization.yaml turns it
 # into the ConfigMap the HelmRelease reads (valuesFrom), and P4b's render test renders the chart with it.
-# Nothing goes inline on the HelmRelease: inline values would beat this file.
+# Nothing goes inline on the HelmRelease: inline values would beat this file. Every environment gets this
+# file; a value only one environment wants goes in that overlay (kind's: overlays/kind/monitoring-values.yaml).
 
 # Every image by tag and digest (D3 = C, NFR3): the digest is what runs, and the tag is for people. Each
 # tag is written here so a chart upgrade can't move it away from its digest; upgrade both together.
@@ -29,13 +30,6 @@ prometheus:
     image:
       tag: v3.16.0-distroless
       sha: 9764044e09eb2c9e1abdb12d0f0188d4efb7384b0262d3c080f0fc59045c89ba
-    # Sized for one kind node (Module 9 design, Defaults): data is in emptyDir (the chart's default
-    # storageSpec), so a long retention only costs memory for history a restart loses. P6 measures it (U5).
-    retention: 2d
-    resources:
-      requests:
-        cpu: 200m
-        memory: 400Mi
 alertmanager:
   alertmanagerSpec:
     image:

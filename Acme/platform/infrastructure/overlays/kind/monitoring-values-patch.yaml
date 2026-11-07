@@ -1,0 +1,8 @@
+# JSON 6902 patch: valuesFrom has no merge key, so a strategic merge patch would replace the whole list
+# (dropping base's values). Append kind's values after base's instead: the later entry wins.
+- op: add
+  path: /spec/valuesFrom/-
+  value:
+    kind: ConfigMap
+    name: kube-prometheus-stack-values-kind
+    valuesKey: values.yaml
