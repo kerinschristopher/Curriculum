@@ -163,6 +163,7 @@ def test_a_render_that_fails_online_blames_the_kustomization(tmp_path, monkeypat
 def test_every_container_flux_deploys_has_a_tag_and_digest():
     # The render, not the files: a renamed image in base/ leaves the overlay's `images` entry
     # matching nothing, so the overlay still looks pinned and the Deployment isn't.
+    # Charts that a HelmRelease installs aren't in these renders: test_every_image_the_chart_runs_is_pinned covers them.
     # Characterisation (C6): every image was already pinned, so this was green on arrival. The
     # mutations are in the design doc's log.
     found = {}
