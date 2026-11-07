@@ -79,8 +79,12 @@ flux create secret git flux-image-updates --namespace=flux-system \
 ```
 
 **5. Wait for everything to be Ready.** The block stops at the first wait that fails. An `apps-*` Kustomization is Ready
-once its objects are applied, not once its pods run, so the last lines wait for the pods: on a fresh cluster the image pull
-can take a few minutes. Each timeout is a limit, not a delay.
+once its objects are applied, not once its pods run, so the sample-api lines wait for the pods: on a fresh cluster the
+image pull can take a few minutes. Each timeout is a limit, not a delay. `infrastructure` also installs the monitoring
+chart, kube-prometheus-stack (Prometheus, Alertmanager and Grafana), and is Ready once Helm has finished. Prometheus and
+Alertmanager aren't objects the chart creates: the chart's operator creates them while the install runs, so Helm
+finishing doesn't promise they're ready, and the last lines wait for each to exist and then to be ready. The first install
+took about 2 minutes on a laptop; the 10-minute limit leaves room for a slow image pull.
 
 ```bash
 (
@@ -96,6 +100,11 @@ kubectl -n flux-system wait helmrelease/flux-operator --for=create --timeout=5m 
 for env in dev stage prod; do
   kubectl -n "sample-api-$env" rollout status deployment/sample-api --timeout=5m
 done
+for sts in prometheus-kube-prometheus-stack-prometheus alertmanager-kube-prometheus-stack-alertmanager; do
+  kubectl -n monitoring wait "statefulset/$sts" --for=create --timeout=5m \
+    && kubectl -n monitoring rollout status "statefulset/$sts" --timeout=5m \
+    || exit 1
+done
 )
 ```
 
@@ -104,6 +113,8 @@ done
 ```bash
 flux get kustomizations
 helm history -n flux-system flux-operator
+helm history -n monitoring kube-prometheus-stack
+kubectl get pods -n monitoring
 kubectl get deployments -n sample-api-dev
 kubectl get deployments -n sample-api-stage
 kubectl get deployments -n sample-api-prod
@@ -117,9 +128,25 @@ You should see:
 - All five Kustomizations `True`, at the same `main` commit.
 - Helm revision 2, chart `flux-operator-0.62.1+1135514a01cc`. That chart name means Flux made the revision; revision 1,
   `flux-operator-0.62.1`, is your `helm install`.
+- Helm revision 1 for `kube-prometheus-stack`, chart `kube-prometheus-stack-92.21.2+4ae2ebc21830`. Flux installed it from
+  the chart's digest; there's no hand-made revision.
+- Six pods `Running` in `monitoring`: Prometheus, Alertmanager, Grafana, the Prometheus Operator, kube-state-metrics and
+  node-exporter.
 - `sample-api` at 1/1 in dev, 2/2 in stage and 3/3 in prod.
 - `200` from the health check.
 - `condition met` for `flux-image-updates`, which proves the Secret works and GitHub accepts the key.
+
+## Open Grafana
+
+Grafana has no ingress; reach it through a port-forward. The chart generates the admin password when it installs and keeps
+it in a Secret, so it's different on every cluster.
+
+```bash
+kubectl -n monitoring get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
+```
+
+Open http://localhost:3000 and log in as `admin` with the printed password.
 
 ## Recover Flux
 

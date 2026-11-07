@@ -1,0 +1,35 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-stack
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: kube-prometheus-stack
+  valuesFrom:
+    - kind: ConfigMap
+      name: kube-prometheus-stack-values
+      valuesKey: values.yaml
+  # One Helm install or upgrade attempt. Helm's default 5m is short for a first pull of ~0.7 GB (design
+  # §8; P6 measures the real time to Ready).
+  timeout: 10m
+  # Helm alone installs a chart's CRDs once and never updates them: CreateReplace moves them with the chart.
+  # RetryOnFailure retries a failed attempt every 5m; the default rolls back and stalls until Git changes.
+  install:
+    crds: Create
+    strategy:
+      name: RetryOnFailure
+  upgrade:
+    crds: CreateReplace
+    strategy:
+      name: RetryOnFailure
+  # Without it, a kubectl edit of a chart object stays until the chart or values change; P9 proves the
+  # restore. The webhook annotates every PrometheusRule (design F10): ignored, or each reconcile would
+  # strip it and the webhook would re-add it.
+  driftDetection:
+    mode: enabled
+    ignore:
+      - paths: ["/metadata/annotations/prometheus-operator-validated"]
+        target:
+          kind: PrometheusRule

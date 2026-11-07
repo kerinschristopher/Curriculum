@@ -8,9 +8,14 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
 """
 
 import functools
+import http.server
 import json
 import re
 import subprocess
+import sys
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -25,13 +30,31 @@ SAMPLE_API_IMAGE = "ghcr.io/kerinschristopher/sample-api"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 # name:tag@digest. The tag has no `/`, so a registry port like host:5000/name@sha256:... does not count.
 TAG_AND_DIGEST = re.compile(rf":[^/:@]+@{DIGEST.pattern}$")
+# Where the remote resources kustomize renders come from: if it doesn't answer, a failed render is the network.
+EGRESS_PROBE = "https://raw.githubusercontent.com/"
+# Where the chart comes from: if ghcr.io doesn't answer, a failed chart pull is the network.
+CHART_PROBE = "https://ghcr.io/v2/"
 APPS_ENTRY_POINTS = REPO / "Acme" / "platform" / "apps" / "overlays"
 BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
 # Any indentation or list dash, because an indented Secret still reaches the cluster. A future
 # `valuesFrom: - kind: Secret` would be flagged too, which fails safe.
 SECRET_KIND = re.compile(r"""^\s*-?\s*kind:\s*["']?Secret["']?\s*$""", re.M)
 
-
+KIND_INFRASTRUCTURE = "Acme/platform/infrastructure/overlays/kind"
+KUBE_PROMETHEUS_STACK = "oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack"
+MONITORING = REPO / "Acme" / "platform" / "infrastructure" / "base" / "monitoring"
+# Any registry-hosted name:tag in rendered text, with its digest if it has one. The chart puts images in
+# containers, in Prometheus's and Alertmanager's spec.image and in operator arguments (F6); a later version
+# may add another place, and a text scan still sees it.
+IMAGE_REFERENCE = re.compile(rf"[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?/[a-z0-9._/-]+:[\w.-]+(?:@{DIGEST.pattern})?")
+# The control-plane parts kind hides on loopback (Module 9 design, F8): a monitor for them only ever sees "down".
+CONTROL_PLANE = re.compile(r"kube-controller-manager|kube-scheduler|etcd|kube-proxy")
+# What helm-controller reads, by (kind, name): kind's overlay adds a second values ConfigMap, and PR 2 a
+# dashboards one, so the kind alone no longer names one object.
+RELEASE = ("HelmRelease", "kube-prometheus-stack")
+CHART_SOURCE = ("OCIRepository", "kube-prometheus-stack")
+BASE_VALUES = ("ConfigMap", "kube-prometheus-stack-values")
+KIND_VALUES = ("ConfigMap", "kube-prometheus-stack-values-kind")
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -51,8 +74,11 @@ def container_images(node):
     """Every container's image under a rendered object, for any workload kind."""
     if isinstance(node, dict):
         for key, value in node.items():
+            # Not ephemeralContainers: a pod can't be created with them (Module 9 design, F18), so no manifest has one.
             if key in ("containers", "initContainers"):
-                yield from (container["image"] for container in value)
+                # `image` is optional (F18). A missing one reads as "", which fails the
+                # tag@digest match like any unpinned image.
+                yield from (container.get("image", "") for container in value)
             else:
                 yield from container_images(value)
     elif isinstance(node, list):
@@ -60,16 +86,93 @@ def container_images(node):
             yield from container_images(item)
 
 
+def test_a_container_without_an_image_reads_as_unpinned():
+    # `image` is optional on a container (Module 9 design, F18): the digest check must report it, not crash.
+    doc = {"spec": {"template": {"spec": {"containers": [{"name": "app"}]}}}}
+    images = list(container_images(doc))
+    assert [image for image in images if not TAG_AND_DIGEST.search(image)] == [""]
+
+
+def egress_works(probe):
+    """Whether `probe` answers at all. Any HTTP status means the network is up; only no answer means it's down."""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(probe, method="HEAD"), timeout=10):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except OSError:
+        return False
+
+
+def fail_naming_the_cause(action, suspect, stderr, probe=None):
+    """Fail, blaming the network if `probe` (default EGRESS_PROBE) doesn't answer, else `suspect` (PR #22 finding 1, D6)."""
+    probe = probe or EGRESS_PROBE
+    if egress_works(probe):
+        cause = f"{probe} answers, so the cause is {suspect}"
+    else:
+        cause = f"the network is down ({probe} doesn't answer)"
+    pytest.fail(f"{action} failed: {cause}.\n{stderr}")
+
+
 @functools.cache
 def rendered(entry):
-    """The objects `kubectl kustomize` builds from `entry`, a folder relative to the repo, rendered once per run."""
-    render = subprocess.run(["kubectl", "kustomize", str(REPO / entry)], stdout=subprocess.PIPE, text=True, check=True)
+    """The objects `kustomize build` builds from `entry`, a folder relative to the repo, rendered once per run."""
+    render = subprocess.run(["kustomize", "build", str(REPO / entry)], capture_output=True, text=True)
+    if render.returncode:
+        fail_naming_the_cause(f"Rendering {entry}", "the kustomization or a URL in it", render.stderr)
     return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
+
+
+def test_renders_use_the_pinned_kustomize():
+    # The kustomize on PATH must be the one sample-api-ci.yml pins to Flux's version, in scripts-test
+    # and locally: the runner image ships its own (5.8.3), and kubectl bundles yet another.
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "sample-api-ci.yml").read_text())
+    pinned = f"v{workflow['env']['KUSTOMIZE_VERSION']}"
+    version = subprocess.run(["kustomize", "version"], capture_output=True, text=True, check=True)
+    assert version.stdout.strip() == pinned, version.stdout
+
+
+def test_renders_use_the_pinned_helm():
+    # The Helm on PATH must be the one sample-api-ci.yml pins to Flux's version, in scripts-test and
+    # locally: the runner image ships Helm 3.22.1, and helm-controller renders with v4.3.1.
+    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "sample-api-ci.yml").read_text())
+    pinned = f"v{workflow['env']['HELM_VERSION']}"
+    version = subprocess.run(["helm", "version", "--template", "{{.Version}}"], capture_output=True, text=True, check=True)
+    assert version.stdout.strip() == pinned, version.stdout
+
+
+def test_a_render_that_fails_offline_names_the_network(tmp_path, monkeypatch):
+    # PR #22 finding 1 (Module 9 design A1, D6): an outage must not look like a broken kustomization.
+    (tmp_path / "kustomization.yaml").write_text("resources:\n  - https://manifests.invalid/deploy.yaml\n")
+    # .invalid never resolves (RFC 2606), so both lookups fail offline, as in an outage.
+    monkeypatch.setattr(sys.modules[__name__], "EGRESS_PROBE", "https://probe.invalid/")
+    with pytest.raises(pytest.fail.Exception) as failure:
+        rendered(str(tmp_path))
+    assert "manifests.invalid" in str(failure.value), failure.value
+    assert "network" in str(failure.value), failure.value
+
+
+def test_a_render_that_fails_online_blames_the_kustomization(tmp_path, monkeypatch):
+    # The other half: with the network up, a broken kustomization must not be blamed on an outage.
+    (tmp_path / "kustomization.yaml").write_text("resources:\n  - missing.yaml\n")
+    # A local server stands in for a working network, so this runs offline too. It answers every
+    # request with 501, and any HTTP answer means the network is up.
+    server = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(sys.modules[__name__], "EGRESS_PROBE", f"http://127.0.0.1:{server.server_port}/")
+        with pytest.raises(pytest.fail.Exception) as failure:
+            rendered(str(tmp_path))
+    finally:
+        server.shutdown()
+    assert "missing.yaml" in str(failure.value), failure.value
+    assert "network" not in str(failure.value), failure.value
 
 
 def test_every_container_flux_deploys_has_a_tag_and_digest():
     # The render, not the files: a renamed image in base/ leaves the overlay's `images` entry
     # matching nothing, so the overlay still looks pinned and the Deployment isn't.
+    # Charts that a HelmRelease installs aren't in these renders: test_every_image_the_chart_runs_is_pinned covers them.
     # Characterisation (C6): every image was already pinned, so this was green on arrival. The
     # mutations are in the design doc's log.
     found = {}
@@ -451,3 +554,137 @@ def test_nothing_flux_applies_is_a_secret():
         (entry, doc["metadata"]["name"]) for entry in ENTRY_POINTS for doc in rendered(entry) if doc["kind"] == "Secret"
     )
     assert secrets == []
+
+
+def monitoring_objects():
+    """{(kind, name): object} of what Flux's infrastructure Kustomization applies to the monitoring namespace."""
+    return {
+        (doc["kind"], doc["metadata"]["name"]): doc
+        for doc in rendered(KIND_INFRASTRUCTURE)
+        if doc["metadata"].get("namespace") == "monitoring"
+        or (doc["kind"] == "Namespace" and doc["metadata"]["name"] == "monitoring")
+    }
+
+
+def test_the_release_installs_the_pinned_chart():
+    # Module 9 (D1 = C, D3 = C): Flux's infrastructure Kustomization installs kube-prometheus-stack,
+    # and which chart it installs can't change without a PR.
+    objects = monitoring_objects()
+    assert {RELEASE, CHART_SOURCE} <= set(objects), sorted(objects)
+    release, source = objects[RELEASE], objects[CHART_SOURCE]
+    # A wrong name leaves helm-controller no chart: the release never goes Ready, infrastructure fails
+    # its wait, and every apps-* stops receiving changes (R11). kubeconform doesn't check names.
+    assert release["spec"]["chartRef"] == {"kind": "OCIRepository", "name": source["metadata"]["name"]}, release["spec"]
+    spec = source["spec"]
+    assert spec["url"] == KUBE_PROMETHEUS_STACK, spec
+    # The chart's templates run as cluster-admin. With a digest, a re-pushed tag changes nothing: the
+    # digest beats the tag (Module 8 F22). The tag stays for people to read; P4b checks they agree.
+    ref = spec.get("ref", {})
+    assert sorted(ref) == ["digest", "tag"], ref
+    assert re.fullmatch(r"\d+\.\d+\.\d+", ref["tag"]), ref
+    assert DIGEST.fullmatch(ref["digest"]), ref
+
+
+def test_the_release_reads_its_values_from_values_yaml():
+    # values.yaml is what P4b's render test checks (image digests), so it must be what helm-controller
+    # installs with; otherwise the chart runs on its defaults, tag-only images included. kind adds its own
+    # file after it: helm-controller merges valuesFrom in order, and the later file wins.
+    objects = monitoring_objects()
+    files = {BASE_VALUES: MONITORING / "values.yaml", KIND_VALUES: REPO / KIND_INFRASTRUCTURE / "monitoring-values.yaml"}
+    assert set(files) <= set(objects), sorted(objects)
+    # The rendered names, not the generator's: kustomize doesn't rewrite valuesFrom, so a hash suffix would
+    # leave it naming a ConfigMap that doesn't exist.
+    assert objects[RELEASE]["spec"].get("valuesFrom") == [
+        {"kind": "ConfigMap", "name": name, "valuesKey": "values.yaml"} for _, name in files
+    ], objects[RELEASE]["spec"]
+    for key, path in files.items():
+        assert objects[key]["data"] == {"values.yaml": path.read_text()}, key
+        # helm-controller acts on a values change at once instead of at its 30m interval.
+        assert objects[key]["metadata"].get("labels", {}).get("reconcile.fluxcd.io/watch") == "Enabled", key
+
+
+def test_the_release_sets_only_known_fields():
+    # Inline values or postRenderers would beat values.yaml, the file the tests check (Module 8's third
+    # review, finding 2). A new field fails here until a test covers it.
+    # Characterisation (C6) for this first assert: green on arrival; inline values turn it red (recorded).
+    spec = monitoring_objects()[RELEASE]["spec"]
+    allowed = {"chartRef", "driftDetection", "install", "interval", "timeout", "upgrade", "valuesFrom"}
+    assert sorted(set(spec) - allowed) == [], sorted(spec)
+    # Helm alone installs a chart's CRDs once and never updates them (F4): CreateReplace moves them with the
+    # chart. RetryOnFailure retries a failed install every 5m; the default rolls it back and stalls until Git changes.
+    assert spec.get("install") == {"crds": "Create", "strategy": {"name": "RetryOnFailure"}}, spec.get("install")
+    assert spec.get("upgrade") == {"crds": "CreateReplace", "strategy": {"name": "RetryOnFailure"}}, spec.get("upgrade")
+
+
+def test_no_flux_apply_holds_a_release_and_a_monitoring_object():
+    # F22: Flux dry-runs a Kustomization's objects in one batch before applying any. A PrometheusRule
+    # beside the HelmRelease that brings its CRD fails that dry-run, so the release is never applied and
+    # the CRD never comes: infrastructure fails every retry and every apps-* stops. kubeconform catches
+    # it only until P3a adds the monitoring schemas.
+    # Characterisation (C6): green on arrival; a PrometheusRule in base/monitoring turns it red (recorded).
+    mixed = []
+    for entry in ENTRY_POINTS:
+        docs = rendered(entry)
+        if any(doc["kind"] == "HelmRelease" for doc in docs):
+            mixed += [
+                (entry, doc["kind"], doc["metadata"]["name"])
+                for doc in docs
+                if doc["apiVersion"].startswith("monitoring.coreos.com/")
+            ]
+    assert mixed == []
+
+
+@pytest.fixture(scope="session")
+def chart(tmp_path_factory):
+    """The chart the HelmRelease installs, pulled by its digest as Flux pulls it (D3 = C)."""
+    ref = monitoring_objects()[CHART_SOURCE]["spec"]["ref"]
+    reference = f"{KUBE_PROMETHEUS_STACK}@{ref['digest']}"
+    folder = tmp_path_factory.mktemp("chart")
+    pull = subprocess.run(["helm", "pull", reference, "--destination", str(folder)], capture_output=True, text=True)
+    if pull.returncode:
+        fail_naming_the_cause(f"Pulling {reference}", "the chart reference", pull.stderr, probe=CHART_PROBE)
+    (tgz,) = folder.glob("*.tgz")
+    return tgz
+
+
+def test_the_chart_at_the_digest_is_the_tagged_version(chart):
+    # Flux installs the digest; people read the tag. An upgrade that changes one line of the two makes
+    # the PR say one version while the cluster runs another, and nothing else compares them.
+    show = subprocess.run(["helm", "show", "chart", str(chart)], capture_output=True, text=True, check=True)
+    tag = monitoring_objects()[CHART_SOURCE]["spec"]["ref"]["tag"]
+    assert yaml.safe_load(show.stdout)["version"] == tag
+
+
+@pytest.fixture(scope="session")
+def chart_render(chart):
+    """The chart's manifests as helm-controller renders them: values.yaml, the release's name and namespace,
+    and the kind node's Kubernetes version. Hooks included, because Helm renders them too."""
+    release = monitoring_objects()[RELEASE]["metadata"]
+    cluster = yaml.safe_load((REPO / "Acme" / "platform" / "kind" / "sample-api-cluster.yaml").read_text())
+    kube_version = re.search(r":v(\d+\.\d+\.\d+)@", cluster["nodes"][0]["image"]).group(1)
+    render = subprocess.run(
+        ["helm", "template", release["name"], str(chart), "--namespace", release["namespace"],
+         "--values", str(MONITORING / "values.yaml"), "--kube-version", kube_version],
+        capture_output=True, text=True, check=True,
+    )
+    return render.stdout
+
+
+def test_every_image_the_chart_runs_is_pinned(chart_render):
+    # A re-pushed tag changes what runs, and the operator runs with cluster-wide rights (NFR3).
+    # test_every_container_flux_deploys_has_a_tag_and_digest reads kustomize renders, so it never sees these.
+    docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
+    images = set(IMAGE_REFERENCE.findall(chart_render)) | {i for doc in docs for i in container_images(doc)}
+    # Prometheus's image is in no container field, so only the scan finds it: a broken scan fails here.
+    assert any("/prometheus/prometheus:" in image for image in images), sorted(images)
+    assert sorted(image for image in images if not TAG_AND_DIGEST.search(image)) == []
+
+
+def test_nothing_watches_the_control_plane_kind_hides(chart_render):
+    # kind binds these to 127.0.0.1 (F8), so their targets are down for good and their alerts never stop firing.
+    docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
+    monitors = [d["metadata"]["name"] for d in docs if d["kind"] == "ServiceMonitor"]
+    exprs = [r["expr"] for d in docs if d["kind"] == "PrometheusRule"
+             for g in d["spec"]["groups"] for r in g["rules"]]
+    assert [m for m in monitors if CONTROL_PLANE.search(m)] == []
+    assert [e for e in exprs if CONTROL_PLANE.search(str(e))] == []

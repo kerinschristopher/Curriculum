@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# kube-prometheus-stack, installed by helm-controller (Module 9 design §1, D1 = C). No monitoring.coreos.com
+# object goes here: its CRD arrives with the chart, so it would fail Flux's dry-run and block the whole
+# apply (F22). Rules and dashboards of ours go in a Kustomization that depends on infrastructure.
+namespace: monitoring
+
+resources:
+  - namespace.yaml
+  - chart.yaml
+  - release.yaml
+
+# The values as the ConfigMap the HelmRelease reads. No hash suffix: kustomize doesn't rewrite a
+# HelmRelease's valuesFrom, so a suffixed name would leave it pointing at nothing.
+configMapGenerator:
+  - name: kube-prometheus-stack-values
+    files:
+      - values.yaml
+    options:
+      disableNameSuffixHash: true
+      labels:
+        reconcile.fluxcd.io/watch: Enabled

@@ -7,3 +7,22 @@ resources:
 
 components:
   - ../../components/ingress-nginx-kind
+
+# kind's sizing for kube-prometheus-stack, as a second values ConfigMap the HelmRelease reads after base's.
+# namespace: base's `namespace: monitoring` covers only base's own objects. No hash suffix and the watch
+# label, as in base/monitoring/kustomization.yaml.
+configMapGenerator:
+  - name: kube-prometheus-stack-values-kind
+    namespace: monitoring
+    files:
+      - values.yaml=monitoring-values.yaml
+    options:
+      disableNameSuffixHash: true
+      labels:
+        reconcile.fluxcd.io/watch: Enabled
+
+patches:
+  - path: monitoring-values-patch.yaml
+    target:
+      kind: HelmRelease
+      name: kube-prometheus-stack

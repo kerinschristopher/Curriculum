@@ -85,6 +85,13 @@ ENTRY_POINTS = [
     "Acme/platform/infrastructure/overlays/kind",
 ]
 
+# The kustomize each Flux release renders with: its kustomize-controller's go.mod replaces
+# sigs.k8s.io/kustomize/api with this release's api. Flux 2.10.0 = kustomize-controller v1.10.1,
+# api v0.21.1 = kustomize v5.8.1. A Flux bump fails until its row is looked up and added (D7).
+KUSTOMIZE_FOR_FLUX = {"2.10.0": "5.8.1"}
+# The Helm each Flux release renders charts with: its helm-controller embeds helm.sh/helm/v4 at this
+# version. Flux 2.10.0 = helm-controller v1.7.1 = Helm v4.3.1. A Flux bump fails until its row is added.
+HELM_FOR_FLUX = {"2.10.0": "4.3.1"}
 
 
 @pytest.fixture(scope="module")
@@ -206,6 +213,42 @@ def test_kustomize_job_validates_against_the_versions_the_cluster_runs():
     tag = yaml.safe_load((bootstrap / "flux-operator-values.yaml").read_text())["image"]["tag"]
     operator = tag.removeprefix("v").split("@")[0]
     assert (str(env.get("FLUX_VERSION")), str(env.get("OPERATOR_VERSION"))) == (flux, operator)
+
+
+def test_helm_pin_matches_the_flux_version():
+    # scripts-test installs HELM_VERSION, so P4b renders kube-prometheus-stack as helm-controller does;
+    # the runner image ships Helm 3.22.1. FLUX_VERSION is tied to flux-instance.yaml by the test above.
+    env = yaml.safe_load(WORKFLOW.read_text()).get("env", {})
+    flux = str(kustomize_step("Validate manifests against their schemas").get("env", {}).get("FLUX_VERSION"))
+    assert flux in HELM_FOR_FLUX, f"look up the Helm that Flux {flux}'s helm-controller embeds"
+    assert str(env.get("HELM_VERSION")) == HELM_FOR_FLUX[flux], env
+    assert re.fullmatch(r"[0-9a-f]{64}", str(env.get("HELM_SHA256", ""))), env
+
+
+def test_kustomize_pin_matches_the_flux_version():
+    # Both render jobs install KUSTOMIZE_VERSION, so CI renders as Flux's controller does, whatever
+    # kubectl the runner image ships. FLUX_VERSION is tied to flux-instance.yaml by the test above.
+    env = yaml.safe_load(WORKFLOW.read_text()).get("env", {})
+    flux = str(kustomize_step("Validate manifests against their schemas").get("env", {}).get("FLUX_VERSION"))
+    assert flux in KUSTOMIZE_FOR_FLUX, f"look up the kustomize that Flux {flux}'s kustomize-controller uses"
+    assert str(env.get("KUSTOMIZE_VERSION")) == KUSTOMIZE_FOR_FLUX[flux], env
+    assert re.fullmatch(r"[0-9a-f]{64}", str(env.get("KUSTOMIZE_SHA256", ""))), env
+
+
+def test_kustomize_job_installs_the_pinned_kustomize_first():
+    # The runner image ships its own kustomize (5.8.3 on 20261101.360.1), so without this install,
+    # or with it after the render, `kustomize build` still succeeds with the wrong version.
+    # scripts-test isn't checked here: test_flux_layout.py asserts the version it actually runs.
+    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["kustomize"]["steps"]
+    names = [s.get("name") for s in steps]
+    assert "Install kustomize" in names, names
+    assert names.index("Install kustomize") < names.index("Render every base and overlay"), names
+    lines = commands(steps[names.index("Install kustomize")])
+    assert any(line.startswith("curl") and "${KUSTOMIZE_VERSION}" in line for line in lines), lines
+    assert any("${KUSTOMIZE_SHA256}" in line and "sha256sum -c" in line for line in lines), lines
+    assert "kustomize version" in lines, lines
+    render = commands(kustomize_step("Render every base and overlay"))
+    assert any(line.startswith('kustomize build "$dir"') for line in render), render
 
 
 def test_kustomize_job_validates_against_the_cluster_kubernetes_version():

@@ -39,6 +39,14 @@ env:
   APP_DIR: Acme/apps/sample-api
   # GHCR image names must be lowercase.
   IMAGE_NAME: ghcr.io/kerinschristopher/sample-api
+  # The kustomize Flux's kustomize-controller renders with; both render jobs install it, so CI
+  # renders as the cluster does. test_kustomize_pin_matches_the_flux_version ties it to FLUX_VERSION.
+  KUSTOMIZE_VERSION: "5.8.1"
+  KUSTOMIZE_SHA256: 029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d
+  # The Helm Flux's helm-controller renders charts with (v1.7.1 embeds v4.3.1); scripts-test installs it
+  # for P4b's render test. test_helm_pin_matches_the_flux_version ties it to FLUX_VERSION.
+  HELM_VERSION: "4.3.1"
+  HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
 
 jobs:
   changes:
@@ -212,8 +220,20 @@ jobs:
         with:
           persist-credentials: false
 
-      # kubectl (with built-in kustomize) is preinstalled on the runner image. The output is kept
-      # for the schema check in the next step.
+      # The runner image ships its own kustomize (5.8.3 on 20261101.360.1), not the one Flux renders
+      # with, so install KUSTOMIZE_VERSION from the workflow's env, checked against its sha256.
+      - name: Install kustomize
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl --retry 3 --retry-all-errors -fsSLo kustomize.tar.gz "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          echo "${KUSTOMIZE_SHA256}  kustomize.tar.gz" | sha256sum -c -
+          tar -xzf kustomize.tar.gz kustomize
+          install -m 0755 kustomize /usr/local/bin/kustomize
+          kustomize version
+
+      # Rendered with the kustomize installed above. The output is kept for the schema check in the
+      # next step.
       - name: Render every base and overlay
         run: |
           set -euo pipefail
@@ -224,7 +244,7 @@ jobs:
                      Acme/platform/infrastructure/overlays/* \
                      Acme/infra/bootstrap; do
             echo "== $dir"
-            kubectl kustomize "$dir" > "$RUNNER_TEMP/rendered/${dir//\//_}.yaml"
+            kustomize build "$dir" > "$RUNNER_TEMP/rendered/${dir//\//_}.yaml"
           done
 
       # D7 (Module 8): Flux's and the Operator's schemas reject fields they don't define, such as a
@@ -261,7 +281,7 @@ jobs:
           tar -xzf operator-schemas.tar.gz -C schemas/operator
           tar -xzf flux-operator.tar.gz flux-operator
           install -m 0755 flux-operator /usr/local/bin/flux-operator
-          # kubectl kustomize leaves the ResourceSet's templates unexpanded; a misspelt placeholder fails here.
+          # kustomize build leaves the ResourceSet's templates unexpanded; a misspelt placeholder fails here.
           flux-operator build resourceset -f "$GITHUB_WORKSPACE/Acme/infra/bootstrap/flux-operator.yaml" > rendered/flux-operator-resourceset.yaml
           kubeconform -strict -summary \
             -kubernetes-version "$KUBERNETES_VERSION" \
@@ -292,7 +312,31 @@ jobs:
         with:
           persist-credentials: false
 
-      # shellcheck, jq, python3 and kubectl are preinstalled on the runner image.
+      # The runner image ships its own kustomize (5.8.3 on 20261101.360.1); test_flux_layout.py renders
+      # with KUSTOMIZE_VERSION, as Flux does, and test_renders_use_the_pinned_kustomize checks it.
+      - name: Install kustomize
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl --retry 3 --retry-all-errors -fsSLo kustomize.tar.gz "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          echo "${KUSTOMIZE_SHA256}  kustomize.tar.gz" | sha256sum -c -
+          tar -xzf kustomize.tar.gz kustomize
+          install -m 0755 kustomize /usr/local/bin/kustomize
+          kustomize version
+
+      # The runner image ships Helm 3.22.1; P4b's render test renders the chart with HELM_VERSION, as
+      # helm-controller does, and test_renders_use_the_pinned_helm checks it.
+      - name: Install Helm
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl --retry 3 --retry-all-errors -fsSLo helm.tar.gz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  helm.tar.gz" | sha256sum -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          helm version
+
+      # shellcheck, jq and python3 are preinstalled on the runner image.
       - name: Lint the scripts (shellcheck)
         run: shellcheck .github/scripts/*.sh
 

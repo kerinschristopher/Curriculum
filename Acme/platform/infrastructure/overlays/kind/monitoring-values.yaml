@@ -1,0 +1,12 @@
+# kind's own kube-prometheus-stack values, merged after base/monitoring/values.yaml (valuesFrom order: the
+# later file wins). Laptop choices, so not in base: dev, stage and prod include base verbatim.
+
+prometheus:
+  prometheusSpec:
+    # Sized for one kind node (Module 9 design, Defaults): data is in emptyDir (the chart's default
+    # storageSpec), so a long retention only costs memory for history a restart loses. P6 measured 216 MiB (U5).
+    retention: 2d
+    resources:
+      requests:
+        cpu: 200m
+        memory: 400Mi

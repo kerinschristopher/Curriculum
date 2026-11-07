@@ -1,0 +1,15 @@
+# The chart by digest (D3 = C): the digest beats the tag, so a re-pushed 92.21.2 changes nothing. The tag
+# is for people; P4b's test checks the chart at the digest is that version. Upgrade: both lines in one PR.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: kube-prometheus-stack
+spec:
+  interval: 30m
+  url: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+  layerSelector:
+    mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+    operation: copy
+  ref:
+    tag: "92.21.2"
+    digest: sha256:4ae2ebc218308441449aa3e74b00271c9f8a3eb3df587438295c2bf1517c75bb

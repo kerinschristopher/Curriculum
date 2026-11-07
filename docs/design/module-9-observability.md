@@ -1,0 +1,605 @@
+# Module 9: Observability
+## Design Document
+
+| Field | Value |
+|---|---|
+| **Author** | CK |
+| **Date** | November 2026 |
+| **Status** | Approved (CK, 2026-11-05). Decisions D1-D7 and Q8 recorded in L3. Re-scoped by CK on 2026-11-06: PR 1 carries kube-prometheus-stack through Flux, the rest moves to PR 2 (D5, L5) |
+| **Affected Repo** | `kerinschristopher/Curriculum` (public). Branches (D5, changed 2026-11-06): `mod9` (PR 1: PR #22's fixes, then kube-prometheus-stack installed by Flux) and a second branch for PR 2 (Module 8's records, the Operator chart pin, sample-api's metrics, scraping, the alert, the dashboard, `docs/observability.md`). New: `Acme/platform/infrastructure/base/monitoring/` (namespace, chart source, `HelmRelease`, values), `Acme/platform/infrastructure/monitoring-config/` (the sample-api `PrometheusRule` and its unit tests, the sample-api dashboard), `Acme/platform/apps/sample-api/base/servicemonitor.yaml`, `Acme/apps/sample-api/metrics.go`, `go.sum` and tests (D2 = A), `.github/scripts/tests/test_monitoring.py`, `docs/observability.md`. Changed: `Acme/platform/infrastructure/base/kustomization.yaml`, `Acme/infra/bootstrap/platform.yaml` (one timeout, one new Kustomization `monitoring-config`), `Acme/infra/bootstrap/flux-operator.yaml` (the Operator chart by digest, P0e), `Acme/apps/sample-api/main.go` and `go.mod`, sample-api's base Deployment and Service and dev overlay, `.github/workflows/sample-api-ci.yml`, `test_flux_layout.py`, `test_sample_api_ci_workflow.py`, `docs/bootstrap.md`, `docs/ci.md`, and Module 8's design doc (records only). `docs/curriculum.md` is never edited |
+| **Scope** | CK (sole maintainer and admin); the kind cluster `sample-api`; anyone opening a PR into `main` (the required `kustomize` and `scripts-test` checks check more); bgblackmore (reviewer). No AWS, no ruleset change, no new required check |
+
+---
+
+## Introduction / Purpose
+
+This document designs the Module 9 deliverable (`docs/curriculum.md:403-429`). Flux installs kube-prometheus-stack (Prometheus, Alertmanager, Grafana and helpers) through a `HelmRelease` in `platform/infrastructure/base/monitoring/`. Two dashboards are provisioned from ConfigMaps, an alert fires when sample-api's error rate passes a threshold, and `docs/observability.md` explains it all to an on-call engineer who doesn't exist yet (`:429`). sample-api has no metrics today, so the design gives it some (D2). It also answers bgblackmore's review of PR #22 (carry-overs A1-A4).
+
+All seven decisions (D1-D7) were decided by CK on 2026-11-05 (L3): D1 C, D2 A, D3 C, D4 C, D5 B, D6 A, D7 A; numbering starts at D1. Labels below, each defined in its own table: **AS** assumption, **F** finding, **U** unverified item, **A/B/C** carry-overs, **D** decision, **P** phase, **R** risk, **Q** open question, **L** log row. **OK** marks an outward action that needs CK's explicit OK.
+
+## Backlog Story Number / Incident Number
+
+**Curriculum Module 9, week 10** (no tracker ID). `main` is `102966f4` (PR #22's merge, 2026-11-03 21:22:56 UTC); its tree equals `631e1fc`, the commit this design read (the compare API shows 0 files changed). Carry-overs are tracked under Findings.
+
+## What Problem Are We Trying to Solve?
+
+| Today | So |
+|---|---|
+| sample-api serves only `GET /health` (`Acme/apps/sample-api/main.go:58-62`) and logs a request only at debug, without its status (`:49`) | Nobody can say how often it fails. "Production breaks → engineer knows" (`:94`) is a delay with no end |
+| No Prometheus, Grafana or alert: `Acme/platform/infrastructure/base/kustomization.yaml:4` is `resources: []` | The feedback loop from production back to engineers (`:416`) doesn't exist |
+| PR #22's review: the render tests need the network without saying so, and nothing pins the renderer | The render-in-a-test pattern would carry into Helm renders with both gaps |
+
+## Background
+
+Short primers, only for what this design uses.
+
+- **Monitoring vs observability (`:412`).** Monitoring watches for failures you predicted: one panel or alert per known way to break. Observability is being able to ask the running system a *new* question ("which requests fail, and since which release?") without shipping code. Dashboards are monitoring; querying the raw data in Grafana's Explore view is the observability half.
+- **The three pillars, and why the name misleads (`:407`).** Metrics (numbers over time), logs (event records), traces (one request's path across services). "Pillars" suggests three separate tools to stack up. They are three views of the same events, and useful questions cross them ("this error spike: which log lines?"). This platform gets metrics; logs stay `kubectl logs`; there are no traces.
+- **Prometheus's pull model and data model (`:408`).** Every scrape interval Prometheus sends `GET /metrics` to each target and stores the answer. A **time series** is a metric name plus **labels**, such as `http_requests_total{namespace="sample-api-dev",code="500"}`; each label combination is its own series. A **counter** only goes up; a **histogram** counts observations into cumulative buckets (`le`, "less than or equal") plus `_sum` and `_count`. Label values must come from a small set: a label holding a raw URL lets any client create series without end (**cardinality**).
+- **A little PromQL.** `rate(x[5m])` is the per-second increase over 5 minutes (a raw counter means little). `sum by (namespace) (…)` adds series up but keeps `namespace`. The 5xx rate divided by the total rate is the error ratio. `histogram_quantile(0.95, …)` estimates 95th-percentile latency from buckets.
+- **Recording and alerting rules (`:408`).** PromQL that Prometheus evaluates on a schedule. A recording rule saves its result as a new series. An alerting rule fires when its expression returns anything: first **pending**, then **firing** once it has held for `for:`, so a blip doesn't alert.
+- **Alertmanager.** Receives firing alerts from Prometheus, then groups, silences and routes them to **receivers** (Slack, email, a pager). With no real receiver an alert is visible only in its UI.
+- **prometheus-operator and its CRDs.** An operator that runs Prometheus from Kubernetes objects: `Prometheus` and `Alertmanager` describe the servers; a `ServiceMonitor` says "scrape the pods behind Services with these labels, on this port"; a `PodMonitor` targets pods directly; a `PrometheusRule` holds rules. Prometheus loads only the monitors and rules its **selectors** match.
+- **kube-prometheus-stack (`:410`).** One Helm chart with the operator and its 10 CRDs, Prometheus, Alertmanager, Grafana, kube-state-metrics (Kubernetes objects as metrics: readiness, restarts, requests), node-exporter (the node's CPU, memory, disk), monitors for the cluster's parts, 35 `PrometheusRule` objects and 29 dashboards (F1-F3). It does **not** give your app's metrics, alerts about your app, a receiver anyone reads, long-term storage, logs or traces.
+- **Grafana (`:409`).** A **data source** is a backend Grafana queries (here Prometheus). **Provisioning** loads data sources and dashboards from files instead of UI clicks, so they live in Git. The chart runs a **sidecar** that loads the JSON of every ConfigMap labelled `grafana_dashboard: "1"`; UI saves are off, so a change means editing the JSON in Git (F7).
+- **SLI, SLO, error budget (`:411`).** An **SLI** is a measured ratio of good events: here, requests that didn't return 5xx. An **SLO** is the target, say 99% over 28 days. The **error budget** is the 1% you may fail, about 6.7 hours of total failure in 28 days. A **burn rate** says how fast it's being spent; alerting on fast burn is the grown-up form of "error rate above a threshold" (SRE workbook).
+- **RED and USE.** For a service: **R**ate, **E**rrors, **D**uration. For a resource such as a node: **U**tilisation, **S**aturation (queued work, throttling), **E**rrors (Gregg, `:424`).
+- **Helm through Flux, beyond Module 8's primers.** A `HelmRelease` gets its chart from an `OCIRepository` (the chart as an OCI artifact, by `tag` or `digest`) or a `HelmRepository` (an HTTPS index). Values come inline or from a ConfigMap (`valuesFrom`). Helm installs a chart's CRDs once and never upgrades them; helm-controller's `install.crds`/`upgrade.crds` policies fix that (F4). **Drift detection** compares the live objects with the release by a server-side dry-run and patches differences back; `ignore` rules exempt fields another controller writes. A Flux `Kustomization` with `wait: true` counts a `HelmRelease` healthy only once it's Ready (F12).
+
+## Design Goals / Requirements
+
+### What Is It?
+
+```
+GitHub main ─(Flux, 1 m poll)─► Kustomization infrastructure (wait: true; timeout 5m → 10m, D1 = C)
+                                 ├─ ingress-nginx (unchanged)
+                                 └─ base/monitoring/: OCIRepository (chart by digest, D3) ─► HelmRelease ─► helm-controller
+                                      installs CRDs, operator, Prometheus, Alertmanager, Grafana + sidecar and the
+                                      chart's default dashboards (D4 = C), kube-state-metrics, node-exporter;
+                                      plus the values ConfigMap
+                              Kustomization monitoring-config (dependsOn: infrastructure, so the CRDs exist, F22)
+                                 └─ PrometheusRule sample-api (the alert), the sample-api dashboard ConfigMap
+                              Kustomizations apps-dev, apps-stage, apps-prod (dependsOn: infrastructure)
+                                 └─ sample-api Deployment (+ metrics port 8081), Service, ServiceMonitor (one per namespace)
+
+sample-api pods :8081/metrics ◄─ scrape 30 s ─ Prometheus ─ rules 30 s ─► Alertmanager ─► receiver "null" (CK reads its UI)
+kubelet/cAdvisor, kube-state-metrics, node-exporter ◄─ scrape ─┘   ▲
+dashboard ConfigMaps ─ sidecar ─► Grafana ─ queries ───────────────┘ ◄─ CK: kubectl port-forward (127.0.0.1)
+```
+
+| ID | Requirement |
+|---|---|
+| FR1 | kube-prometheus-stack runs in the kind cluster, installed by helm-controller from a `HelmRelease` in `Acme/platform/infrastructure/base/monitoring/` (`:429`, `:33`, `:52`) |
+| FR2 | sample-api exposes request counts by route, method and status code, and a latency histogram, on a metrics port (D2), scraped in all three namespaces |
+| FR3 | An alerting rule fires when an environment's sample-api 5xx ratio stays above 5% for 5 minutes (`:429`). `promtool test rules` tests it before merge; it is shown firing live |
+| FR4 | Two dashboards are provisioned as ConfigMaps (`:409`, `:429`; D4 = C): cluster health is one of the chart's default dashboards, named at P7; sample-api's is our own JSON in the repo |
+| FR5 | `docs/observability.md` explains each dashboard, each panel's question and the alert's first steps for an on-call engineer (`:429`, `:523`), proved by running its own command blocks |
+| FR6 | `docs/bootstrap.md` still rebuilds the cluster, monitoring included, well under 30 minutes (`:484`) |
+| FR7 | PR #22's findings are answered (A1-A3; D6, D7) |
+| NFR1 | The merge gate stays whole: no ruleset change, no new or renamed required check (Module 8 `module-8-gitops-flux.md:318`) |
+| NFR2 | No credential in Git: Grafana's admin password is generated in the cluster (F9); the no-Secret checks still pass |
+| NFR3 | Every image Flux deploys is `tag@digest`, the chart's included, and a test checks the rendered result (D3; Module 8 NFR3, `:93`) |
+| NFR4 | TDD with the order visible, one behaviour per commit, artifacts not prose; a test green on arrival is labelled characterisation and shown red by a recorded mutation (C1, C4, C6) |
+| NFR5 | No vendored chart, CRDs or community dashboards in the repo (CK's footprint preference) |
+
+**Curriculum mapping and deviations**
+
+| Curriculum line | How this design delivers it | Deviation, and why |
+|---|---|---|
+| `:407` three pillars | Primer; `docs/observability.md` says what's collected (metrics) and what isn't | Logs and traces aren't collected (Future Use Cases) |
+| `:408` pull, labels, recording and alerting rules | Primers; sample-api's `/metrics` (D2); the alert (P5) | No recording rule of our own (the chart ships many); one for the SLI is a Future Use Case |
+| `:409` dashboards as code, data sources | sample-api's dashboard JSON in Git, loaded by the sidecar; the cluster-health dashboard comes from the chart, so it's code at the chart's pinned digest; the chart provisions the data source | The cluster-health dashboard isn't ours (D4 = C): it changes with chart upgrades, and about 24 more defaults arrive with it |
+| `:410` what the chart gives and doesn't | Primer; F1-F10 | — |
+| `:411` SLIs, SLOs, error budgets, conceptually | Primer; the alert's SLI; a 99% SLO and its budget explained in the doc | No burn-rate alert (Defaults) |
+| `:412`, `:416-418` monitoring vs observability; the lens | Every panel answers a named question (D4); P10 debugs an unannounced fault | — |
+| `:422-425` resources | Cited in the primers and the doc (SRE book, Gregg's USE) | — |
+| `:429` `platform/infrastructure/base/monitoring/` via Flux's HelmRelease | §1-§2 (D1, D3) | Under `Acme/`, as every module since Module 1 |
+| `:429` two dashboards as ConfigMaps | §5 (D4) | — |
+| `:429` alerting rule on sample-api's error rate | §4: a `PrometheusRule` in `monitoring-config`, applied after the stack (F22) | Per environment (`by (namespace)`), because one cluster plays three (Module 8 D1 = F). The rule and our dashboard sit in `infrastructure/monitoring-config/`, not `base/monitoring/`, so they apply after the CRDs (F22) |
+| `:429` `docs/observability.md` | P8 | — |
+| `:33`, `:52`, `:67` | FR1; monitoring under `infrastructure/`; everything under `Acme/platform/`, which Flux owns | — |
+| `:523`, `:525` assessment | The doc explains each panel; P9 and P10 debug with it. A new app adds a `ServiceMonitor` in its base, with no special label | A new app's alert and dashboard still live once in `monitoring-config/` (AS2) |
+| `:9` minikube | kind | Recorded since Module 4 |
+| `:433-460` Module 10 | Not built here. Boundaries named: Grafana's credentials, a receiver's secret, a default-deny NetworkPolicy must allow scraping, node-exporter needs the `privileged` level (R11) | — |
+
+### If It Is an Existing Design, How Does It Work Before New Design?
+
+- **Cluster**, from Module 8's closing records (`module-8-gitops-flux.md:580-633`); not re-checked, because Docker Desktop was stopped on 2026-11-04 (F20). kind v0.33.0, one node `kindest/node:v1.35.8`, Flux 2.10.0 via the Operator v0.62.1, helm-controller v1.7.1 managing the Operator's release; dev on `0.1.4`, stage and prod on `0.1.3`; no `monitoring.coreos.com` CRDs.
+- **Infrastructure.** `base` is empty (`base/kustomization.yaml:4-10`). All four overlays include it: `kind`, which Flux applies (`overlays/kind/kustomization.yaml:5-9`), and the three EKS ones CI renders but nothing applies (`overlays/{dev,stage,prod}/kustomization.yaml:4-8`). `infrastructure` has `wait: true` and `timeout: 5m`, and all three `apps-*` depend on it (`Acme/infra/bootstrap/platform.yaml:5-74`).
+- **sample-api.** Go, standard library only (`sample-api-ci.yml:109-111`), on `:8080` (`main.go:126`); probes hit `/health` every 5 s and 10 s (`base/deployment.yaml:55-67`); the Ingress sends `/` to the Service's port 80 (`base/ingress.yaml:13-19`).
+- **CI.** The `kustomize` job renders with the runner's `kubectl kustomize` and checks the output with kubeconform `-strict` against Kubernetes, Flux and Operator schemas only (`sample-api-ci.yml:215-271`). `scripts-test`'s render tests call `kubectl kustomize` too (`test_flux_layout.py:63-67`). Nothing pins kustomize (A2).
+
+### Why Do We Have It? / Why Should We Have It?
+
+- **The missing loop (`:416`).** Production state → metrics → rules → alert → engineer → fix → Git → Flux → production. Today the first half doesn't exist, so every other loop in the platform runs blind.
+- **Delays you can name.** Scrape (30 s) + rule evaluation (30 s) + the alert's `for` (5 m) + Alertmanager's grouping (30 s): about 6-8 minutes from the first errors to an alert (Quality Attributes). Shorter `for` means faster but noisier.
+- **A stock with an outflow.** Prometheus's database fills with every scrape and drains at its retention (2 days, Defaults). Questions about last week can't be answered: a limit, chosen on purpose.
+- **An open loop, said out loud.** Alerts route to a `null` receiver (F13), so "the page" is CK opening Alertmanager. That's the alert version of the lens's unwatched dashboard, and the doc says so (R5).
+- **A reinforcing loop to avoid.** Alerts that always fire teach people to ignore alerts, until a real one is missed. So targets that can't work on kind are off (Defaults) and idle-firing alerts are each handled (U3).
+- **Leverage.** An SLO is a goal of the system, high in Meadows' list; a threshold is a parameter, low. This week sets a threshold and explains the goal it stands for.
+
+## Assumptions / Prerequisites
+
+| # | Assumption / prerequisite | Basis | Affects |
+|---|---|---|---|
+| AS1 | Docker Desktop must be running for the cluster; it doesn't start with Windows, and the WSL VM has 15,596 MiB and 16 CPUs | F20 | U5, R3 |
+| AS2 | One kind cluster plays dev, stage and prod (Module 8 D1 = F), so one Prometheus and one Grafana serve all three, told apart by `namespace` | `platform.yaml:22-74` | §4, Defaults |
+| AS3 | Module 8's post-merge checks B1-B2 pass before PR 1 merges, and B3-B4 before PR 2 merges (re-scope, 2026-11-06) | CK runs them (carry-overs B) | P9 relies on the same drift detection |
+| AS4 | WSL has Helm v4.3.1, kubectl v1.36.0 (kustomize v5.8.1), flux v2.10.0 and the pytest venv. New one-time installs, each checksum-checked: kustomize v5.8.1 (if D7 = A) and promtool 3.16.0 (PR 2; it equals the Prometheus tag, which moved from 3.15.1 with chart 92.21.2, AS5) | `helm version`, `kubectl version --client` (2026-11-04) | P0c, P3b |
+| AS5 | The chart version is re-checked when P4 starts: 92.18.0 was hours old when this was written. **Re-checked at P4b (2026-11-06): five releases since; CK chose 92.21.2** (operator still v0.94.2; Prometheus v3.15.1 → v3.16.0, Grafana sub-chart 14.3.1 → 14.4.0, kube-webhook-certgen 1.11.0 → 1.11.1; the chart version no longer in the operator pod's labels) (L8) | F1 | Defaults |
+| AS6 | Nothing is built until this doc is approved | CK | All |
+
+## Findings
+
+| # | Finding | Evidence | Implication |
+|---|---|---|---|
+| F1 | **Now 92.21.2** (AS5, 2026-11-06): the same `appVersion`, `kubeVersion` and sub-charts except grafana 14.4.0. As first written: kube-prometheus-stack **92.18.0** (2026-11-04 12:50 UTC; 92.17.1 a day earlier; 8 releases since 2026-10-27). Apache-2.0; `appVersion` v0.94.2 (the operator); `kubeVersion: '>=1.25.0-0'`; sub-charts kube-state-metrics 9.0.0, prometheus-node-exporter 4.60.1, grafana 14.3.1 (from `oci://ghcr.io/grafana-community/helm-charts`), a local `crds` chart, windows-exporter | `gh api repos/prometheus-community/helm-charts/releases`; the pulled chart's `Chart.yaml:1-72` | Supports 1.35.8; a fast-moving pin (R2) |
+| F2 | The OCI chart (`oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack`) and the HTTPS index serve one tarball, sha256 `58d901b4…`; the OCI manifest is `sha256:bf0af6052d5e38a59118bb14f1cb5db1705a45d18799836d699e0a21d6ff5b76`. 92.21.2: manifest `sha256:4ae2ebc218308441449aa3e74b00271c9f8a3eb3df587438295c2bf1517c75bb`, tarball `5ee4dc16…88aa` | `helm pull` from both into empty scratch folders; `sha256sum` | D3; Defaults |
+| F3 | About 40,100 lines without CRDs; 10 CRDs, 76,852 lines; `values.yaml` 6,339 lines. Default render 7,047 lines (83,929 with CRDs): 35 `PrometheusRule`s, 13 `ServiceMonitor`s, 29 dashboard ConfigMaps (25 with the control plane and Windows off, `nodes-aix` and `nodes-darwin` among them). 92.21.2 (2026-11-06): default render 7,043 lines, the same 35, 13 and 29; with `values.yaml` as of P4b, 6,238 lines, 30 rules, 9 monitors, 25 dashboards | `wc -l`; `helm template --kube-version 1.35.8` with defaults and with §2's values | D3 E, D4 |
+| F4 | Helm installs a chart's CRDs once and never updates them (`README.md:80-90`). helm-controller's `install.crds` and `upgrade.crds` default to `Create`; `CreateReplace` replaces but never deletes (`helmreleases.md:1451-1502`, v1.7.1); sub-chart CRDs count (`internal/action/crds.go:71-95`). Uninstall leaves CRDs (`README.md:55-78`). The chart's CRD upgrade Job is "preview, off by default" (`values.yaml:35-40`). `prometheus-operator-crds` 32.0.x (appVersion v0.94.2) ships the same CRDs as templates | Sources at those versions; `helm pull` | Defaults; D1 E |
+| F5 | 11 image references, all **tag-only** by default: quay.io (operator, config-reloader, Prometheus, Alertmanager, node-exporter, k8s-sidecar, a Thanos default), docker.io (Grafana, a `bats` test), ghcr.io (kube-webhook-certgen), registry.k8s.io (kube-state-metrics). Compressed amd64 total about 707 MB; Grafana `13.3.0-distroless` alone 462 MB, Prometheus 108 MB (sizes at 92.18.0's tags; 92.21.2 has the same 11 references, with Prometheus v3.16.0 and certgen 1.11.1, all pinned in `values.yaml` at P4b) | The default render; registry API GETs of each index and amd64 manifest | NFR3; R3; U1 |
+| F6 | **Three digest conventions.** The parent chart and Grafana take `sha` without `sha256:` (`templates/prometheus-operator/deployment.yaml:53-54`; Grafana `_pod.tpl:122`); kube-state-metrics takes `sha` with it (`_helpers.tpl:153-157`); node-exporter takes `digest` and refuses `sha` (`_helpers.tpl:92-93`); Grafana's test image has no field (Grafana `values.yaml:137-147`). With placeholders in each, every reference rendered `tag@sha256:<64 hex>`. Prometheus's and Alertmanager's images sit in their objects' `spec.image`, and the config-reloader's in an operator argument | Chart source; a scratch `helm template` | D3: only a render shows the result; `container_images()` would miss three |
+| F7 | Prometheus selects monitors and rules labelled `release: <release>`, in every namespace (rendered selector; namespace selector `{}`); `*SelectorNilUsesHelmValues: false` drops the label filter (`values.yaml:4744-4839`; `README.md:272-285`). There are **five** such selectors, not three: `serviceMonitor`, `podMonitor`, `rule`, `probe` and `scrapeConfig` (92.21.2's render, 2026-11-06). The sidecar loads labelled ConfigMaps from ALL namespaces; the data source uid is `prometheus`; UI saves are off (`values.yaml:1570-1610`). Scrape and rule intervals default to 30 s (`crd-prometheuses.yaml:9284-9289`, `:4094-4098`) | Render; values; CRD | Defaults |
+| F8 | kind v0.33.0 uses kubeadm's v1beta3 template for 1.35, setting `bind-address` only for IPv6 (`pkg/cluster/internal/kubeadm/config.go:351-368`, `:676-680`). kubeadm v1.35.8 binds the controller-manager and scheduler to `127.0.0.1` (`phases/controlplane/manifests.go:327`, `:374`) and etcd's metrics to `http://127.0.0.1:2381` (`phases/etcd/local.go:265`); kube-proxy's metrics default to `127.0.0.1:10249` (`pkg/proxy/apis/config/v1alpha1/defaults.go:52-53`, `:147`). kind maps host ports on `0.0.0.0` when `listenAddress` is unset (`providers/docker/provision.go:395-398`) | Sources at those tags | The chart's four control-plane targets can't be scraped; Grafana access (Defaults) |
+| F9 | Grafana's admin password is unset in both charts (`values.yaml:1500-1502`; Grafana `values.yaml:639-640`); the sub-chart then generates 40 random characters and keeps them on upgrade by reading the existing Secret (`_helpers.tpl:131-138`, `_config.tpl:173-181`). Flux's example sets a public `adminPassword: flux` (F11) | Chart source | NFR2; Defaults |
+| F10 | The admission webhooks are on by default (`values.yaml:3082-3088`). The mutating one adds `prometheus-operator-validated: "true"` to every `PrometheusRule` (prometheus-operator v0.94.2 `pkg/admission/admission.go:43-44`, `:197`). With default values both render `failurePolicy: Ignore`, failing open (`mutatingWebhookConfiguration.yaml:14-24`); `caBundle` isn't in the manifest (`validatingWebhookConfiguration.yaml:40-41`) | Sources; render | Defaults; R9; U4 |
+| F11 | Flux's own example (`fluxcd/flux2-monitoring-example` at `7ab65dc8`): `monitoring-controllers` (`timeout: 10m`) and `monitoring-configs` (dependsOn); the chart from an `OCIRepository` by range `69.x`; CRDs `Create`/`CreateReplace`; drift detection ignoring that annotation; Alertmanager and default dashboards off; dashboards from a `configMapGenerator`; Flux's dashboards are 1,383 and 1,730 lines | `clusters/test/monitoring.yaml`; `monitoring/controllers/kube-prometheus-stack/release.yaml:1-42`; `monitoring/configs/kustomization.yaml` | Defaults; D1 B; D4 |
+| F12 | `wait: true` health-checks every applied object, `HelmRelease`s included; `dependsOn` waits for `Ready` (kustomize-controller v1.10.1 `kustomizations.md:273-325`, `:418-436`). A Helm action's timeout defaults to `5m0s`; the "Recommended settings" are an `OCIRepository`, drift detection, `RetryOnFailure` and `upgrade.crds: CreateReplace` (helm-controller v1.7.1 `helmreleases.md:1344-1350`, `:1362-1425`) | Specs at those tags | D1; Defaults |
+| F13 | Alertmanager's default config routes everything, `Watchdog` included, to a `null` receiver (`values.yaml:554-591`); single alerts can be turned off by name (`defaultRules.disabled`, `:322-324`); the overcommit alerts already exempt clusters with fewer than 3 control-plane nodes | Values; render | R5; U3 |
+| F14 | **Renderers.** kustomize-controller v1.10.1 pins kustomize v5.8.1 (api v0.21.1, `go.mod:60-64`). kubectl v1.37.1 and v1.37.2 bundle v5.8.1 (`staging/src/k8s.io/kubectl/go.mod:45`); v1.35.8 bundles v5.7.1 (`:44`, the reviewer's). Runner image `20261026.354.1` has kubectl 1.37.1, a standalone Kustomize 5.8.3 and **Helm 3.22.1** (`images/ubuntu/Ubuntu2404-Readme.md:11`, `:34`, `:86-87`); image `20261101.360` (2026-11-02) moves kubectl to 1.37.2. A label selects an OS, not an image version (`actions/runner-images` `README.md:96`, `:197`). The flux CLI v2.10.0 builds with kustomize api v0.21.2, unpinned (`go.mod:65-66`). helm-controller v1.7.1 embeds **Helm v4.3.1** (`go.mod:46`). CK's WSL kubectl reports kustomize v5.8.1 | `gh api` GETs at those tags; runner release notes | A2, D7; D3's Helm pin |
+| F15 | Standalone kustomize `v5.8.1` publishes `checksums.txt` (`isImmutable: false`); 5.8.3 is the latest (2026-10-08) | `gh release view` | D7 A |
+| F16 | sample-api has no 5xx path; its probes hit `/health` (`base/deployment.yaml:55-67`). `client_golang` v1.25.0 (2026-10-08, Apache-2.0) needs Go 1.26.0, the app's minimum, and lists 12 direct and 11 indirect modules; `VictoriaMetrics/metrics` v1.45.0 (MIT) lists 2 and 1 | `go.mod` at those tags | D2 |
+| F17 | ingress-nginx controller-v1.15.1: `--enable-metrics` defaults to `false` (`pkg/flags/flags.go:177`); its kind manifest (679 lines) sets no metrics flag and uses port 10254 only for probes (`deploy.yaml:457`, `:480`) | Source and manifest at that tag | D2 C; D6 C |
+| F18 | Kubernetes v1.35.8: a container's `image` "is optional to allow higher level config management to default or override" (`types_swagger_doc_generated.go:354`); `ephemeralContainers` "cannot be specified when creating a pod" (`:1889`) | Source at that tag | A3 |
+| F19 | Prometheus v3.15.1's release is immutable; its `sha256sums.txt` gives the linux-amd64 tarball (107 MiB) `6a726885328ad9efebbf36e876ce2fb6225468a71fd1e7ce3ba666d5f4d97a84`, which holds `promtool` (`.promu.yml:9-12`). prometheus-operator v0.94.2 publishes only `bundle.yaml` and `stripped-down-crds.yaml` (mutable). `datreeio/CRDs-catalog` commit `27233a506d` (2026-11-01) moved its `monitoring.coreos.com` schemas to v0.94.2 | `gh release view`; the checksum file; `gh api` | Defaults |
+| F20 | This machine: 31.2 GiB RAM, 16 logical CPUs; no `.wslconfig`, so the WSL VM has 15,596 MiB; Docker Desktop has `AutoStart: false`. At about 19:07 UTC on 2026-11-04 its WSL distro was stopped and the API refused connections, so nothing live was checked. Docker Hub allows 100 anonymous pulls per 6 h per IP | `Get-CimInstance`; `free -m`; Docker's `settings-store.json`; `wsl -l -v`; [Docker Hub usage](https://docs.docker.com/docker-hub/usage/) | AS1; R3; Module 8 U6 |
+| F22 | **A custom resource can't share a Flux apply with the `HelmRelease` that brings its CRD.** kustomize-controller v1.10.1 applies with `ApplyAllStaged` (`internal/controller/kustomization_controller.go:1039`; fluxcd/pkg `ssa` v0.83.0, `go.mod:35`). The stages are: CRDs, ClusterRoles and Namespaces; class kinds; `--custom-apply-stage-kinds` (empty by default, `main.go:137`); then everything else in one `ApplyAll` (`ssa/manager_apply.go:445-517`). `ApplyAll` dry-runs every object in an errgroup and returns at `g.Wait()` before applying any (`:257-418`, `:414-416`). A `PrometheusRule` beside the `HelmRelease` fails its dry-run ("no matches for kind"), so the `HelmRelease` is never applied and the CRD never arrives: `infrastructure` fails every retry, and through `dependsOn` all three `apps-*` stop. Read from source, not run (U13). Flux's example splits controllers and configs for this reason (F11). The chart's `additionalPrometheusRulesMap` (`values.yaml:339`, template `additionalPrometheusRules.yaml`) renders rules inside the release, which Helm applies after its CRDs | Sources at those tags | D1; §1, §4; P4a's guard |
+| F21 | Tests Module 9 must meet: the exact set of Flux Kustomizations (`test_flux_layout.py:275`); `ENTRY_POINTS` equals Flux's folders (`:293-300`); every Flux Kustomization in `platform.yaml` (`:303-314`); a field allow-list without `healthChecks` (`:85-93`); the render's `empty` guard (`:79`); no Secret in any `Acme/` YAML file or render (`:157`, `:444-453`); kubeconform with no `-ignore-missing-schemas` (`test_sample_api_ci_workflow.py:254`); `GUARDED` and the filters (`:25-76`) | The files | D1 = C changes three: the Kustomization set, `ENTRY_POINTS` and the `empty` guard (P4d); §6 |
+
+**Carry-overs A: bgblackmore's PR #22 review** (general comment `6608512594`, "Approved", two inline comments; "Neither blocks the merge")
+
+| # | Item | Verified | Status |
+|---|---|---|---|
+| A1 | The render tests need the network and don't say so (`test_flux_layout.py:63-67`; `components/ingress-nginx-kind/kustomization.yaml:8` fetches from `raw.githubusercontent.com`). Inline `4457063904` | True: Module 8 recorded the outage mutation (`module-8-gitops-flux.md:687`) and `docs/ci.md:94` mentions it; the test file doesn't | Open: D6 |
+| A2 | The renderer isn't pinned. Inline `4457064257` | True, and wider than written: the `kustomize` job also uses the runner's `kubectl kustomize` (`sample-api-ci.yml:215-228`, `docs/ci.md:93`), so nothing pins it. Today all agree on v5.8.1 only by the runner image (F14) | Open: D7 (and D3 for Helm) |
+| A3 | `container_images()` (`test_flux_layout.py:50-60`) has no guard and skips `ephemeralContainers` | A workload may lack `image` (F18), so the test would crash instead of reporting; `.get("image")` alone then raises `TypeError` at `:81`; `ephemeralContainers` can't be in a manifest (F18) | Open: P0a |
+| A4 | The `scripts` filter change (`8971625`) | Confirmed correct by the reviewer | No action |
+
+**Carry-overs B: Module 8's post-merge steps.** CK runs these, with predictions first; this design ran none of them. **Open** unless noted.
+
+| # | Step | Note for Module 9 |
+|---|---|---|
+| B1 | CI green on `main` at `102966f4` | — |
+| B2 | All five Kustomizations Ready at `102966f4` | — |
+| B3 | No workload pod rolls; Helm `flux-operator` stays at revision 2; the `HelmRelease` has `driftDetection: mode: enabled` (`4cb3564`) | — |
+| B4 | The drift proof on `deploy/flux-operator`, still unproved (`module-8-gitops-flux.md:614`, `:697`) | P9 relies on the same mechanism (FR5, `:87`). The comparison is a server-side dry-run (`helmreleases.md:920-937`), so edit a field the chart sets |
+| B5 | Record B1-B4 in Module 8's doc | PR 2, phase P0d (moved from PR 1 by the re-scope, 2026-11-06) |
+
+**Module 8 doc items still open**
+
+| Item | Source | In Module 9 |
+|---|---|---|
+| "Not shown": deploy key `168555567`'s first push | `module-8-gitops-flux.md:614` | Exercised by P2 (Flux's PR for `0.2.0`), not sought |
+| "Not shown": step 5's rollout wait on a slow pull | `:614` | Not exercised: no rebuild is planned (U8) |
+| The other "Not shown" items | `:614` | Not exercised |
+| U6 reboot survival; U7 GitHub throttling | `:209`, `:210` | U6: new fact, Docker Desktop doesn't auto-start (F20). U7: no new data |
+| R1 ingress-nginx archived; R2 Flux and Operator patches; R4 remote URLs by tag | `:487`, `:488`, `:490` | R1 matters only for D2 C or a Grafana Ingress; R2: D7's table moves with Flux; R4: D6 C/D would close it |
+| R11 one cluster; `infrastructure` holds back all `apps-*` | `:497` | Widened: under D1 = C the stack sits in `infrastructure` (R1 here) |
+| Charts pinned by tag; digest in Future Use Cases | `:444`, `:526` | This chart by digest (D3 = C); the Operator chart moves to a digest too (P0e, CK 2026-11-05), in PR 2 since the re-scope (2026-11-06) |
+| Future Use Case: `HelmRelease`s reuse helm-controller | `:529` | Delivered |
+| NFR3, D4 = D | `:93`, `:381` | D3 |
+| C14 `amd64` hard-coded | `:187` | Not Module 9 |
+
+**Carry-overs C: bgblackmore's standing practices** (C1-C13, `module-8-gitops-flux.md:173-187`; PRs #19-#21 had no comments, checked 2026-11-04)
+
+| # | Practice | Applied here |
+|---|---|---|
+| C1, C4 | One behaviour per commit; artifacts, not prose | One test per commit (Phases); run IDs and event times |
+| C2, C3 | Record the orchestration; an independent review is the gate | Log L1; a read-only hostile review before each PR opens, told to break FR3, NFR3 and D1's claims |
+| C5 | Which path has never executed | The first chart install with CRDs (P6, P9); the first firing alert (P9); the key's first push (P2) |
+| C6, C12 | Label characterisation tests; a check never seen red isn't a check | Every new check gets a recorded red |
+| C7 | A failing required check blocks a PR | Already proved (PR #21); no new required check (NFR1) |
+| C8 | Open a PR only when ready | After its phases and its review |
+| C9, C10 | The trigger and the trust move together; don't loosen rules | The kustomize and Helm pins move with `FLUX_VERSION` (D7); no ruleset change |
+| C11 | Behaviour, not string presence | The render test reads Helm's output; promtool runs the rule |
+| C13 | Docs describe what exists, written last | The doc is written last, proved on the rehearsal cluster, re-run live at P9 (a deviation like Module 8's, `:186`) |
+
+**Carry-overs D: bgblackmore's PR #23 review** (review "Commented", 2026-11-07, eight inline teaching notes; the values.yaml and bootstrap.md ones to fix before merge, the rest may ride with PR 2 if logged here). Each verified by Claude against the code before CK chose (L11)
+
+| # | Item | Verified | Status |
+|---|---|---|---|
+| D1 | Kind-only sizing in `base/monitoring/values.yaml` (inline `4499622006`), against §1's rule | True: `retention: 2d` and 200m/400Mi; dev, stage and prod include base verbatim. The chart's own default is `10d` on `emptyDir`, so EKS still loses history on a restart (Future Use Cases) | **Done** `21e0623`: a second values ConfigMap in `overlays/kind`, appended to `valuesFrom` by a JSON 6902 patch |
+| D2 | Step 5 of `docs/bootstrap.md` said "give them a minute" (inline `4499622008`) | True. The suggested `rollout status` fails at once on a StatefulSet not yet created, so `wait --for=create` goes first. The rehearsal showed the operator creates them during the install, not after it | **Done** `f76316c`, run unchanged on `mon-test` (L11) |
+| D3 | `monitoring_objects()` keyed by kind (inline `4499622022`; L10's deferred Low) | True, and D1's fix adds the second ConfigMap now | **Done** `b06a277` |
+| D4 | `IMAGE_REFERENCE` can't see a tag-less reference; assert the expected set (inline `4499622011`) | True: a blind spot, not a failure, at 92.21.2 | Open: PR 2 |
+| D5 | `driftDetection`, both `timeout: 10m` and `retention: 2d` unasserted (inline `4499622013`) | True. Reopens L6's cycles 4-5 with new input; CK conceded a laptop-sizing test in L11 | Open: PR 2 |
+| D6 | `infrastructure`'s `timeout: 10m` equals the HelmRelease's; the outer clock should be longer (inline `4499622017`) | True (`platform.yaml:13`, `release.yaml:16`) | Open: PR 2 |
+| D7 | The install steps are copied (`sample-api-ci.yml:225`, `:317`, and Helm's); one tested script (inline `4499622019`) | True | Open: PR 2 |
+| D8 | The two pin tests are one test, parametrized (inline `4499622027`) | True; PR 2's promtool pin would make a third | Open: PR 2 |
+
+**Unverified (each with the part that's unknown)**
+
+| # | Unknown | Settled by |
+|---|---|---|
+| U1 | Whether the pinned chart (92.21.2 since AS5) installs and goes Ready on kind 1.35.8 under Docker Desktop with §2's values, and how long a first install takes with ~0.7 GB to pull (against 10 m timeouts) | P6 (time to Ready); P9 live. **Settled (L9):** Ready in 1 min 56 s on first install; P9 re-checks live |
+| U2 | Whether node-exporter starts with the host's root mounted. On Docker Desktop it has failed with "path / is mounted on / but it is not a shared or slave mount" ([helm-charts#467](https://github.com/prometheus-community/helm-charts/issues/467)); kind wasn't tested there | P6. Fallback: `prometheus-node-exporter.hostRootFsMount.enabled: false`. **Settled (L9):** node-exporter Running, target up; fallback not needed |
+| U3 | Which default alerts fire on this idle one-node cluster, besides `Watchdog` | P6: each one fixed, disabled by name (F13), or accepted and documented. **Settled (L9):** only `Watchdog` fires (`InfoInhibitor` fires only while an info alert does); nothing to disable |
+| U4 | Whether drift detection stays quiet: the `PrometheusRule` annotation is ignored (F10, F11); the hook Jobs and the webhooks' `caBundle` patch weren't tried | P9: helm-controller's events over one interval; an `ignore` rule if needed |
+| U5 | The stack's real memory and CPU here | P6: `container_memory_working_set_bytes{namespace="monitoring"}`. **Settled (L9):** Prometheus 216 MiB working set at ~5 min; the node container 2.63 GiB |
+| U6 | Whether kustomize-controller re-applies sample-api's `PrometheusRule` every reconcile because the webhook adds an annotation Git lacks (Module 8 U4 saw a hand-added annotation removed). Under D1 = C kustomize-controller owns the rule, so this applies | P6: `monitoring-config`'s events over two intervals; if it churns, `kustomize.toolkit.fluxcd.io/ssa: IfNotPresent` on the rule or turning the webhook off (Defaults' alternative) |
+| U7 | Whether the kubelet and cAdvisor targets (HTTPS, self-signed) scrape cleanly on kind | P6: `up{job="kubelet"}`. **Settled (L9):** all 3 kubelet targets up |
+| U8 | Rebuild time with monitoring (was about 4 minutes) | The next rebuild; not planned this module |
+| U9 | Whether kind's `0.0.0.0` port 80 is reachable from the LAN through Docker Desktop and Windows' firewall | Only matters for a Grafana Ingress (not the Default) |
+| U10 | `VictoriaMetrics/metrics`' histogram format against Prometheus's `le` buckets | Only for D2 = A′: its README at v1.45.0 |
+| U11 | That middleware wrapping the mux can read the matched pattern (`Request.Pattern`) after the handler returns | P1a's test |
+| U12 | Module 8's post-merge results (B1-B4) | CK's checks |
+| U13 | That F22's batch failure happens as read, and that D1's chosen layout avoids it | P6's Flux rehearsal (a plain `helm install` can't see it). **Settled (L9):** no "no matches for kind"; `infrastructure` Ready (`monitoring-config` is PR 2) |
+| U14 | Whether `healthChecks` can wait on CRDs the Kustomization didn't apply (D1 A′) | Only for A′: the rehearsal |
+| U15 | Whether the kustomize image (`registry.k8s.io/kustomize/kustomize:v5.8.1@sha256:899fcd3b…`, a single-platform manifest) runs `kustomize build` as its entrypoint | Only for D7 F: one `docker run` |
+| U16 | Whether moving the Operator chart's `OCIRepository` from `ref.semver` to `ref.digest` (P0e), the same bytes, makes helm-controller upgrade the release (Helm revision 3) or replace the Operator pod | After the PR that carries P0e merges (PR 2): `helm history -n flux-system flux-operator` and the Operator pod's age, predicted first |
+
+## Quality Attributes
+
+| Quality Attribute | Source | Stimulus | Artifact | Env | Response | Measure |
+|---|---|---|---|---|---|---|
+| Detection latency | sample-api in dev | Starts returning 5xx on most requests | `ServiceMonitor`, the rule, Alertmanager | kind, `main` | Pending, then firing, then in Alertmanager | First 5xx → in Alertmanager: expected about 6-8 min (30 s scrape, 30 s evaluation, 5 m `for`, 30 s grouping); measured in P9 |
+| Alert correctness | Engineer | Changes the rule or its threshold | The `PrometheusRule` and its promtool tests | CI | A wrong rule fails before merge | `promtool test rules` red on each recorded mutation, green on the real rule (P5) |
+| Supply chain | Upstream, or anyone who can push a tag | Moves an image tag or the chart's tag | `values.yaml`, the `OCIRepository` | CI, kind | The runtime keeps the pinned bytes | The render test finds 0 tag-only references; live, every `monitoring` pod's image has `@sha256:` (P9) |
+| Isolation | The chart | An upgrade fails | `HelmRelease`, `infrastructure` | kind | With D1 = C, apps keep running and their changes, and `monitoring-config`'s, wait for a fix or a revert | Seen only if it happens: `flux get kustomizations` names the waiting ones |
+| Recoverability | Operator | Rebuilds the cluster | `docs/bootstrap.md`, `base/monitoring/` | New kind cluster | Monitoring returns with no extra hand step | Well under 30 min (`:484`; was about 4 min, `module-8-gitops-flux.md:221`), plus ~0.7 GB of pulls; next rebuild (U8) |
+| Usefulness (`:416-418`) | On-call engineer (CK in the role) | A fault they didn't predict | Both dashboards, `docs/observability.md` | kind | Found with the dashboards and the doc alone | P10's time to the right diagnosis |
+| Footprint | — | — | The repo | — | No vendored chart, CRDs or community dashboards | Lines added under `Acme/`: expected under ~1,500, mostly dashboard JSON |
+
+## Architecture
+
+### Overview
+
+The diagram under "What Is It?" is the overview. Flux applies `base/monitoring/` with the rest of `infrastructure`. helm-controller installs the chart by digest with values from the repo. Once `infrastructure` is Ready, and with it the CRDs, Flux applies `monitoring-config`: the alert rule and the sample-api dashboard. Prometheus scrapes sample-api in each namespace and evaluates one rule across them, and Grafana shows the chart's cluster-health dashboard and ours, both from ConfigMaps. The apps' Kustomizations still wait for `infrastructure` (D1 = C).
+
+### Context
+
+| Boundary | Who changes it | What enforces it |
+|---|---|---|
+| `base/monitoring/`, `monitoring-config/` and sample-api's `ServiceMonitor` | A merged PR | The merge gate; Flux applies it; P3-P7's tests |
+| The chart's bytes and images | prometheus-community and the image publishers | The digests in Git (D3) and the render test |
+| Objects in `monitoring` | helm-controller (cluster-admin, Module 8 F23) for the chart's; kustomize-controller for `monitoring-config`'s | Drift detection reverts hand edits to the chart's, with one ignore; kustomize-controller reverts edits to the rule and our dashboard every interval |
+| Grafana | Anyone with a kubeconfig, who can read the generated password | Port-forward only (127.0.0.1); provisioned dashboards can't be saved from the UI |
+| Alert routing | Alertmanager's config in `values.yaml` | The `null` receiver; a real one needs a secret (Module 10) |
+
+**Credentials.** None new in Git. The Grafana password is generated in the cluster (F9), and helm-controller runs as cluster-admin, as it does for the Operator (`module-8-gitops-flux.md:244`).
+
+### Components
+
+#### 1. Layout (D1 = C)
+
+```
+Acme/platform/infrastructure/base/kustomization.yaml   resources: [monitoring]   (today [])
+Acme/platform/infrastructure/base/monitoring/
+  kustomization.yaml           namespace, chart, release; configMapGenerator: kube-prometheus-stack-values from
+                               values.yaml (no hash, watch label). No monitoring.coreos.com object: F22
+  namespace.yaml               Namespace monitoring
+  chart.yaml                   OCIRepository: ref.tag 92.21.2 + ref.digest sha256:4ae2ebc2… (D3 = C)
+  release.yaml                 HelmRelease kube-prometheus-stack (§2)
+  values.yaml                  Not a manifest. Image digests and the Defaults (default dashboards on, D4 = C);
+                               read by Flux and the render test
+Acme/platform/infrastructure/monitoring-config/      a new Flux entry point; not listed by base or any overlay
+  kustomization.yaml           namespace monitoring; resources: sample-api-alerts.yaml; configMapGenerator:
+                               the sample-api dashboard (label grafana_dashboard: "1")
+  sample-api-alerts.yaml       PrometheusRule sample-api: SampleApiHighErrorRate (§4)
+  sample-api-alerts.test.yaml  promtool unit tests for that rule; not listed, never applied
+  dashboards/sample-api.json
+Acme/infra/bootstrap/platform.yaml             infrastructure: timeout 5m → 10m; + Kustomization monitoring-config
+                                               (path above, dependsOn: infrastructure, wait: true, prune, Orphan)
+Acme/infra/bootstrap/flux-operator.yaml        the Operator chart's OCIRepository gains ref.digest (P0e)
+Acme/platform/apps/sample-api/base/            + servicemonitor.yaml; Deployment and Service gain port metrics (8081);
+                                               env FAULT_INJECTION from the ConfigMap (optional key)
+Acme/platform/apps/sample-api/overlays/dev/    FAULT_INJECTION=enabled in its ConfigMap merge
+Acme/apps/sample-api/                          metrics.go (D2 = A, client_golang); main.go: a second listener and /fault;
+                                               go.mod + go.sum
+```
+
+The EKS overlays render `base/monitoring/` too (CI validates it; nothing applies it). No value in it is kind-only; kind's own values (Prometheus's retention and requests, Defaults) are in `overlays/kind/monitoring-values.yaml`, a second ConfigMap that a JSON 6902 patch appends to the `HelmRelease`'s `valuesFrom`, so it merges after base's (D1 in Carry-overs D), keeping PR #5's rule. `monitoring-config/` isn't part of any overlay: Flux applies it directly, like `Acme/infra/bootstrap`, so it joins `ENTRY_POINTS` and the CI render loop (P4d).
+
+#### 2. The HelmRelease and its values (D3)
+
+`release.yaml`: `chartRef` to the `OCIRepository`; `valuesFrom` the generated ConfigMap; `install.crds: Create`, `upgrade.crds: CreateReplace`; `RetryOnFailure` for both; `timeout: 10m`; `interval: 30m`; `driftDetection: enabled` with one ignore (Defaults). No inline `values` or `postRenderers`: either would beat the file the tests check (Module 8's third review, finding 2, `module-8-gitops-flux.md:750-751`). `values.yaml` sets the Defaults below and all 10 digests in their three conventions (F6). It holds no rule of ours: the sample-api rule is a plain `PrometheusRule` in `monitoring-config` (§4, F22). CK reads each with `docker buildx imagetools inspect <image>:<tag> --format '{{.Manifest.Digest}}'`.
+
+#### 3. sample-api's metrics (D2 = A) and the fault switch
+
+- `metrics.go`, with `client_golang` v1.25.0 (F16): a `CounterVec` `http_requests_total` keyed by `route`, `method` and `code`, and a `HistogramVec` `http_request_duration_seconds`, on the app's own registry, which also carries the library's Go runtime and process collectors. Middleware wraps the mux. `route` is the mux's matched pattern, or `unmatched`, so client input can't add series (R8, U11). `promhttp.HandlerFor` serves them.
+- The app's first third-party modules (23, F16): `go.mod` gains them and a `go.sum`; `sample-api-ci.yml:109-111`'s stdlib-only comment and setup-go's `cache: false` are revisited; the Dockerfile downloads modules before building, if its current steps don't; Trivy scans the modules from now on, so an upstream CVE can fail `build-scan` (R13). The repo's other Go module, `Acme/infra/terraform/test/` (Terratest, about 120 modules), is test-only and never ships.
+- A second listener on `:8081` serves only `/metrics`, so the Ingress (`/` → port 80 → 8080) never exposes it. SIGTERM drains both servers.
+- `GET /fault` returns 500, registered only when `FAULT_INJECTION=enabled`, which only dev's overlay sets (R7). A curl loop through dev's Ingress drives the live proof.
+- Released as **`v0.2.0`** (MINOR: a new endpoint) through Module 8's path: CI → `v*` tag → Flux's PR for dev → promotion PRs (`docs/ci.md:148-153`).
+
+#### 4. Scraping, the alert and the SLO
+
+- `servicemonitor.yaml` in sample-api's base: Services labelled `app: sample-api`, port `metrics`, path `/metrics`. Each overlay's namespace gets its own, which scrapes only its namespace, and it needs no `release` label (Defaults). The `job` label is the Service's name.
+- **The alert** lives once, as the `PrometheusRule` `sample-api` in `monitoring-config`, because one Prometheus serves three environments (AS2), and a rule in sample-api's base would run three times. It sits in its own Kustomization, which depends on `infrastructure`, because a `PrometheusRule` beside the `HelmRelease` would block the whole apply (F22); this is Flux's own controllers-then-configs split (F11). kubeconform checks it against the CRD's schema (P3a), and promtool reads the file directly (P5). The expression is in Defaults; `namespace` names the environment in every alert. The ServiceMonitor is safe in the app's base for the same reason: `apps-*` apply only once `infrastructure`, and with it the CRDs, is Ready.
+- **SLO, conceptually** (`:411`): the doc frames the SLI as non-5xx requests over all requests, an SLO of 99% over 28 days, and a budget of about 6.7 hours. A 5% threshold for 5 minutes is a crude fast-burn alarm (a 5× burn rate). The SRE workbook's multi-window burn-rate alerts are the next step (Future Use Cases).
+
+#### 5. Dashboards (D4 = C)
+
+`docs/observability.md` explains the two on-call dashboards panel by panel. The chart's switch `grafana.defaultDashboardsEnabled` (`values.yaml:1415`) turns all its defaults on or off together, so about 25 arrive (F3); the doc names the one used for cluster health and says the rest exist but aren't on the on-call path.
+
+- **Cluster health: one of the chart's defaults,** chosen at P7 after looking at them on `mon-test`. Candidates: "Kubernetes / Compute Resources / Cluster" and "Node Exporter / Nodes". The questions it must answer: Is the node short of CPU or memory? Is a disk filling? Which pods aren't Ready, or restarting? It changes with chart upgrades, so the doc's panel notes are re-read at each upgrade (Upkeep).
+- **sample-api, our own (RED + USE, an environment variable):** How much traffic, and which codes? Is the error ratio above the alert's line? How slow is it (p50, p95, p99)? Which version runs in each pod? (kube-state-metrics' image) Are pods Ready and stable? Is it starved? (CPU against request and limit, CPU throttling, memory against limit) The Go runtime metrics (D2 = A) can add a goroutines and memory row.
+- **Unpredicted questions** go to Grafana's Explore view. The doc includes PromQL starters for it. That's the observability half of `:412`.
+
+#### 6. CI (no new job, NFR1)
+
+- **`kustomize` job:** one more `-schema-location`, `datreeio/CRDs-catalog` at a fixed commit, so `ServiceMonitor` and `PrometheusRule` pass `-strict` without `-ignore-missing-schemas`. With D7 = A, the pinned kustomize renders (PR 1). The render loop gains `Acme/platform/infrastructure/monitoring-config` (D1 = C), which the existing test that every entry point is rendered enforces.
+- **`scripts-test`:** promtool 3.16.0 (PR 2) and Helm 4.3.1 (PR 1, done) installed and checksum-checked before pytest. pytest gains the layout tests (P4), the render test (D3), the rule tests (P5) and the dashboard checks (P7).
+- **Filters.** The `app` and `scripts` filters already match all of `Acme/platform/` (`sample-api-ci.yml:80`, `:85`). `GUARDED` gains a dashboard `.json` and `values.yaml`, so a filter regression shows (`test_sample_api_ci_workflow.py:25-63`).
+- **A name that would overclaim.** `test_every_container_flux_deploys_has_a_tag_and_digest` (`test_flux_layout.py:70-82`) reads kustomize renders only, so it can't see a chart's containers. P4b's render test covers them, and the old test's comment should point to it (the third review's lesson about names, `eec3515`). Done in `53d8550`.
+
+#### 7. Decisions (all decided by CK, 2026-11-05)
+
+Each keeps its full table. The recommendation lines are the architect's (L1, L2); the **Decided** lines are CK's (L3).
+
+**D1. Where does monitoring sit in Flux's order, and where does the rule live?** Every option must keep a `PrometheusRule` out of the apply that carries the `HelmRelease` (F22).
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Inside `infrastructure`**; the rule in the chart's `additionalPrometheusRulesMap`; `infrastructure`'s `timeout` 5m → 10m (**recommended**) | The curriculum's folder, applied by the Flux object it already has (`:52`); F21's first five tests, `ENTRY_POINTS` and `bootstrap.md`'s waits stay as they are; the rule is part of the release, so Helm creates the CRDs first, drift detection covers it, and promtool reads it from `values.yaml`; the apps apply after the CRDs exist, so sample-api's `ServiceMonitor` lives in the app's base; nothing ships blind | **R11 widens:** while the chart is unhealthy, all three environments stop receiving changes (pods keep running); a first install (~0.7 GB, F5) must fit the timeout; the rule is YAML inside values, not an object kubeconform sees (the render test and promtool see it); a rule change is a Helm upgrade |
+| A′. A, with `infrastructure`'s `wait: true` replaced by `healthChecks` naming ingress-nginx's controller and the `servicemonitors` CRD | The apps wait for the CRD and the ingress webhook, not for the whole stack's health, so R11 stays as in Module 8 | Module 8's FR3 relies on `wait` for the webhook race (`module-8-gitops-flux.md:85`), and a hand-kept list replaces it (Module 8 listed this as its alternative, `:451`); `healthChecks` isn't on the allow-list (F21); whether it can wait on CRDs it didn't apply is untried (U14) |
+| B. Its own Flux Kustomization `monitoring` (`dependsOn: infrastructure`), the rule in the values as in A; apps don't wait for it | A broken monitoring never holds back an app change; its own timeout and status line; can be suspended alone | F21's tests change (the set, `ENTRY_POINTS`, the `empty` guard), and so does `bootstrap.md` step 5; an app-owned `ServiceMonitor` hits "no matches for kind" on a fresh cluster and blocks the app's whole apply (F22), so it moves into the values too (`prometheus.additionalServiceMonitors`, `values.yaml:5421`) or apps depend on `monitoring`, which restores A's coupling; the EKS overlays lose monitoring |
+| C. Flux's example's split: the stack in `infrastructure`, plus a second Kustomization `monitoring-config` (`dependsOn: infrastructure`) holding the rule as its own `PrometheusRule` and the dashboards | The rule stays a plain object that kubeconform and Flux's inventory see; the pattern Flux documents (F11); apps don't wait for the config | A new entry point and F21's test changes, as B; `bootstrap.md` waits for one more; two places to look; the apps still wait for the stack, as A |
+| D. The rule in sample-api's base, one per namespace, with Prometheus's `enforcedNamespaceLabel` (`crd-prometheuses.yaml:4042-4050`) scoping each copy | Each environment owns its rule and can set its own threshold or severity in an overlay; applied by `apps-*` after the CRDs exist, so no batch failure; the cleanest story for `:525` | The label also scopes the chart's own rules and monitors, so they need excluding (`excludedFromEnforcement`), which is untried; three copies to keep alike; more to learn |
+| E. CRDs split out: the `prometheus-operator-crds` chart (F4) in `infrastructure`; the stack (`crds.enabled: false`) and the rule in their own Kustomization that apps don't wait for | The CRDs exist before the rule's Kustomization runs, so a standalone rule is safe; a broken stack never blocks apps; CRD upgrades are plain Helm upgrades | Two charts whose versions must move together; B's test and doc changes; the most to learn; about +1 h |
+
+Recommendation: **A**, still. It's the curriculum's path with the smallest change, the rule sits inside the release that brings its CRD, and the app keeps its own scrape config. The wider R11 shows in `flux get` and is undone by a revert. C is the choice if CK wants the rule to stay a plain object, at the cost of an entry point. D or E fit once environments get their own clusters.
+
+**Decided (CK, 2026-11-05): C.** CK challenged A: C's main cost, one entry point, is about 0.5 h, and C is the pattern Flux documents. Claude conceded that the recommendation had weighed that small cost too heavily, and moved it to C. C keeps the rule a plain object that kubeconform validates and Flux's inventory lists; a rule change applies one object instead of upgrading the whole release; promtool reads the file directly; kustomize-controller reverts edits by default. A's one remaining edge, the webhook's annotation under kustomize-controller, is U6, settled by the rehearsal. The apps still wait for the stack, as under A (R1).
+
+**D2. Where does sample-api's error-rate signal come from?**
+
+| Option | Pros | Cons |
+|---|---|---|
+| A. The official Go client, `prometheus/client_golang` v1.25.0 (a variant: OpenTelemetry's Go SDK with a Prometheus exporter, more modules) | What Go teams use at work; middleware gives counters and latency histograms in a few lines, plus Go runtime and process metrics for free; a tested exposition format | The app's first third-party code (the repo's only other Go module, Terratest's tests, has about 120 but never ships): 23 modules (F16), a `go.sum`, module downloads in CI and in the Docker build, and `sample-api-ci.yml:109-111`'s stdlib-only reasoning reversed. Trivy then scans those modules, so an upstream CVE can fail `build-scan`. Dependency bumps join the upkeep |
+| A′. A smaller library, such as `VictoriaMetrics/metrics` v1.45.0 (MIT) | Most of A's convenience with 3 modules | Less common; its histogram format may differ from `le` buckets (U10); still a `go.sum` and a scan surface |
+| **B. Standard library only:** a hand-written `/metrics` with counters and one histogram (**recommended**) | No new dependency, `go.sum`, scan surface or download; CK learns the data model from the inside (`# TYPE`, labels, cumulative buckets), which is `:408`'s concept; every line reviewable | About 100 lines of Go and tests to own; concurrency must be right (the race detector runs, `sample-api-ci.yml:185-186`); no runtime metrics unless written; reinvents a library |
+| C. ingress-nginx's metrics (`nginx_ingress_controller_requests`, with status and ingress labels) | No app change; real traffic as users see it; 5xx on demand with no code (scale dev to 0 and the Ingress answers 503) | Metrics are off in v1.15.1 (F17), so both components need a patch (args, a metrics port); ties the SLI to an archived controller due for replacement (Module 8 R1); misses traffic that skips the Ingress; Flux reverts a hand `kubectl scale` within 10 m |
+| D. Synthetic probes: the blackbox exporter probing `/health` through the Ingress (`Probe` CRD, already present) | No app change; tests the whole user path; works for any future app | A synthetic success rate, not the real error rate; another chart to pin and upgrade; coarse |
+| E. A component that sees traffic without app changes: a service mesh (such as Linkerd) or eBPF instrumentation | No app change; every future app gets RED metrics (`:525`) | The largest footprint: CRDs, sidecars or a privileged DaemonSet, certificates; collides with Module 10's pod security; several extra hours (⚠️ budget) |
+| F. Logs: the app logs each response's status, and Loki plus an agent turn them into a rate | Uses the pillar the app has (`slog`, `main.go:107`); shows the pillars overlap (`:407`) | Still an app change (no status logged today, `main.go:49`); a second storage system and two charts; the alert becomes a Loki rule, a deviation from `:429`'s "Prometheus alerting rule" |
+
+Recommendation: **B**. It keeps the supply chain this repo has guarded since Module 6 exactly as it is, and it teaches the data model the curriculum names. A is the right choice if CK wants the library used at work; its costs are real but routine.
+
+**Decided (CK, 2026-11-05): A, `client_golang`.** The library teams use at work, with Go runtime metrics for free. Accepted costs: 23 modules in the image, a `go.sum`, Trivy scanning them (R13) and dependency bumps in the upkeep. The Defaults for D2 (the `:8081` listener, the bounded `route` label, `/fault` in dev only, `v0.2.0`) stand.
+
+**D3. How are the chart and its images pinned and checked (NFR3)?**
+
+| Option | Pros | Cons |
+|---|---|---|
+| A. Each image's digest in `values.yaml`; a file test per known key; one recorded `helm template` (Module 8's P2 pattern); chart by exact tag | No network and no new tool in CI; the pins are reviewed in PRs | With three conventions (F6), a file test can pass while an image renders tag-only; an image added by a chart upgrade goes unseen; the templates follow the tag, so a re-pushed `92.18.0` applies new templates as cluster-admin with no PR (Module 8 accepted this for the Operator, `:444`) |
+| B. A's pins plus a render test: pinned Helm v4.3.1 renders the chart with `values.yaml`, and every image reference (containers, init containers, `spec.image`, the operator's image arguments) must be `tag@sha256`; chart by exact tag | Checks what helm-controller will apply, not the files (Module 8's L17 lesson); a new image fails the PR; Helm v4.3.1 is the one helm-controller embeds (F14), the reviewer's "pin the verifier" applied to Helm; CK already has it | Helm in `scripts-test`; the render needs GHCR, so an outage fails a required check (D6's message applies); the chart tag can still move under CI and the cluster |
+| **C. B, plus the chart pinned by digest:** the `OCIRepository` has `ref.digest` (which beats `ref.tag`, Module 8 F22), and the test pulls that digest and checks its `Chart.yaml` version equals `ref.tag` (**recommended**) | The bytes CI rendered are the bytes Flux installs; a re-pushed tag changes nothing; the version stays readable and is checked | One more 64-hex value per chart upgrade (weekly releases, F1); departs from Module 8's tag pin for the Operator chart (`:444`) |
+| C′. Pin through the `HelmRelease`'s `postRenderers` (a kustomize `images` list, one `newTag` + `digest` format for every image) instead of the chart's fields | One format instead of three; the pins sit beside the release | It breaks Module 8's rule that nothing on a `HelmRelease` overrides the file the tests check (`module-8-gitops-flux.md:750-751`); the config-reloader and Thanos images are operator arguments, which kustomize `images` can't rewrite, so they still need the chart's fields; the render test must replay the post-render to see what runs |
+| D. The chart's images on tags, recorded as a deviation from NFR3 | Least work; no digest upkeep | A moved tag changes what runs; breaks the rule every other Flux image follows |
+| E. Vendor the chart (`helm pull --untar`; a `GitRepository`-sourced `HelmRelease`) | Every template and default reviewed in PRs; no registry at reconcile time | About 117,000 lines including CRDs (F3), the footprint CK avoids; upgrades are huge diffs |
+
+Recommendation: **C**. Only a render shows whether three different pin formats worked, and the digest closes the "re-pushed tag, new templates, no PR" path for a chart with cluster-admin rights.
+
+**Decided (CK, 2026-11-05): C.** CK also chose to give the Operator's chart the same digest pin, in PR 1 (P0e), so both charts follow one rule. The re-scope (2026-11-06, D5) moves P0e to PR 2; this chart's digest pin stays in PR 1.
+
+**D4. Which two dashboards?**
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Two small dashboards of our own** (§5); the chart's defaults off (**recommended**) | Each panel answers a question the doc can explain (`:416`, `:523`); a few hundred lines of JSON each; CK learns PromQL, RED and USE by building them; nothing upstream to track | About 2 h to build; no deep dives for unpredicted questions, which Explore covers |
+| B. Our two, plus the chart's defaults on | Deep, maintained dashboards free; upgrade with the chart | 25 more dashboards (F3), most unused, which the lens warns about; two are empty on Linux |
+| C. Our sample-api dashboard; two of the chart's built-in ones serve as "cluster health" | Saves about 0.75 h; maintained upstream; they are ConfigMaps the sidecar loads | Not ours to explain panel by panel; 25 arrive, not one; "dashboards as code" (`:409`) holds only through the chart version; panels change with upgrades |
+| D. A community dashboard from grafana.com (such as "Node Exporter Full") vendored for cluster health | Rich and widely used | Thousands of vendored lines (the footprint CK avoids); not ours to explain; tracked by hand |
+| E. Dashboards generated from code (Grafonnet/Jsonnet, or Grafana's foundation SDK) | Reviewable source and reusable panels: where dashboards-as-code is heading | A new toolchain this week; the generated JSON must still be committed and kept in step by a test |
+| F. Grafana Operator `GrafanaDashboard` objects over our ConfigMaps | Dashboards as Kubernetes objects with status | Another operator and CRDs for two dashboards the sidecar already loads |
+
+Recommendation: **A**, because the lens asks for dashboards someone uses to answer a real question, and building them is the lesson.
+
+**Decided (CK, 2026-11-05): C.** One of the chart's defaults serves as cluster health and we build the sample-api one, so CK learns both how the defaults work and how to build a dashboard. Checked before the choice (chart 92.18.0): one switch, `grafana.defaultDashboardsEnabled` (`values.yaml:1415`), turns all defaults on or off, so about 25 arrive, not one. Two alternatives were offered and not chosen: copying one rendered default into the repo, and A with the defaults studied only on `mon-test`. Which default is named is settled at P7.
+
+**D5. How many PRs, and where do PR #22's fixes and Module 8's records go?**
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Three:** (1) a Module 8 follow-up with A1-A3 and B5; (2) `mod9`: sample-api's metrics, released as `0.2.0`; (3) `mod9-monitoring`: the stack, scraping, alert, dashboards, docs (**recommended**) | One module per branch (the reviewer's value); the fixes land before the render-test pattern grows to Helm, as the reviewer asked; `0.2.0` is in GHCR before PR 3, so the rehearsal and live proof use the real image; small reviews | Three reviews and merges; PR 1 is Module 8 work in Module 9's week |
+| B. Two: (1) `mod9` with A1-A3 as P0 plus the app; (2) monitoring | Module 8's own precedent (its P0 held Module 7's K1-K6, `module-8-gitops-flux.md:189-198`); one review fewer | Two modules in one branch |
+| C. Two: (1) the Module 8 follow-up; (2) all of Module 9 | Module 9 reviewed as one story | The app and monitoring land together, so nothing is shown against the real image before merge; the biggest review |
+| D. One PR | The fewest merges | Mixes modules; C's live-proof problem; the largest review |
+
+Recommendation: **A**, because each PR then proves something before the next one depends on it.
+
+**Decided (CK, 2026-11-05): B.** PR 1 is `mod9`: PR #22's fixes, Module 8's records and the Operator chart pin (P0a-P0e), then sample-api's metrics and the `v0.2.0` release (P1-P2). PR 2 is `mod9-monitoring` (P3-P10). Recorded deviation: the reviewer prefers one module per branch, and PR 1 mixes Module 8 and Module 9 work, as Module 8's P0 held Module 7's follow-ups; PR 1's description says so. The order still holds: the render fixes land before the Helm render test copies the pattern, and `0.2.0` is live in every environment before PR 2.
+
+**Changed (CK, 2026-11-06): B, re-scoped.** CK asked to get Prometheus and Grafana running as soon as possible. Claude offered three ways: a throwaway `helm install` preview; the stack first, through Flux, as this design builds it; or the same without the digest pins. **CK chose the second.** PR 1 (`mod9`) is now P0a-P0c, then kube-prometheus-stack through Flux: P4a, P3b's Helm half, P4b, a trimmed P6 (no `/fault`, no alert timing), a trimmed P8 (`docs/bootstrap.md` and `docs/ci.md` only), CK's B1-B2 before merge, and a trimmed P9 after it. PR 2 takes everything else: P0d, P0e, P1a-P1e, P2, P3a, P3b's promtool half, P4c, P4d, P5, P7, the rest of P8, and P10. What PR 1 delivers: Prometheus, Alertmanager and Grafana in the kind cluster, managed by Flux, with the chart's default dashboards, watching the cluster. It can't see inside sample-api, which has no `/metrics` until P1. **CK accepted that Module 9's deliverable (`docs/curriculum.md:430`) isn't complete until PR 2:** no sample-api dashboard, no error-rate alert, no `docs/observability.md`. Why each deferral is safe: after PR 1 the repo holds no `monitoring.coreos.com` object (the chart creates its own in the cluster, out of kustomize's sight), so P3a's schemas and P4d's `monitoring-config` have nothing to carry; P4c, P5 and P7 need P1's metrics, and a `ServiceMonitor` before them would show down targets and fire the chart's `TargetDown`. PR 1 still mixes Module 8 and Module 9 work (P0a-P0c), so its description names that deviation, the re-scope and the deferred list. The order this decision protected changes: the render fixes still land before the Helm render test, but `0.2.0` no longer reaches every environment before scraping starts (Q9).
+
+**D6. PR #22 finding 1 (A1): the render tests need the network**
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Say why, and fail clearly:** on a render failure, check whether `raw.githubusercontent.com` answers, then fail naming the network or the kustomize error (**recommended**) | Keeps "Fail, don't skip … a skipped test proves nothing" (`sample-api-ci.yml:300`); tells "config wrong" from "internet down", the reviewer's principle; no new switch | An outage still reddens `scripts-test`, as it already does `kustomize` |
+| B. Skip locally with no egress, fail in CI: `REQUIRE_NETWORK=1`, mirroring `REQUIRE_REGISTRY` (`test_release_tag.py:11`, `:128-138`) | The reviewer's other fix; an offline laptop gets a clean, named skip; the repo already has this pattern | A local skip proves nothing; two code paths; CI behaves as A |
+| C. Remove the need: vendor the two ingress manifests (kind's is 679 lines, F17) | Renders work offline; also closes Module 8 R4 | Upstream YAML in the repo; updated by hand |
+| D. A, plus fetch by commit `0a5901f3…` instead of the tag | Closes R4's moved-tag half without vendoring | Still needs the network; longer URLs in two components |
+
+Recommendation: **A**. It answers the reviewer without adding a skip. D is a cheap add-on if CK wants R4 closed now.
+
+**Decided (CK, 2026-11-05): A.** The same message covers D3's chart pull from GHCR.
+
+**D7. PR #22 finding 2 (A2): the renderer isn't pinned.** One correction to the review's premise: it says the `kustomize` job pins v5.8.1, but that job also renders with the runner's `kubectl kustomize` (A2). So any fix must cover both jobs.
+
+| Option | Pros | Cons |
+|---|---|---|
+| **A. Pin standalone kustomize v5.8.1**, the version kustomize-controller v1.10.1 pins (F14), sha256-checked, in both jobs; renders become `kustomize build`; a test ties the pin to `FLUX_VERSION` through a small table (`{"2.10.0": "5.8.1"}`) cited to the controller's `go.mod` (**recommended**) | The verifier renders as Flux's controller does; runner updates (kubectl moved on 2026-11-02) can't change it; a Flux bump fails until the pin is looked up, so trigger and pin move together (C9) | A download in two jobs; a one-time local install; the release is mutable (F15), so the hash comes from the release it checks; a hand-kept table |
+| B. Pin `kubectl` (sha256) and keep `kubectl kustomize` | Commands unchanged | A ~50 MB download to fix a kustomize version; the bundled version must still be looked up; CK's kubectl differs |
+| C. Write down the assumption (test comment, `docs/ci.md`) and print the version in the log | The reviewer's other fix; nothing new | The next runner image can change the renderer under a required check silently; the assumption is unchecked |
+| D. Assert the runner's version: fail unless kubectl reports kustomize v5.8.1 | No download; a change is loud | A runner update can turn a required check red with no commit here, which `test_sample_api_ci_workflow.py:222` was written to prevent |
+| E. Render with `flux build kustomization --dry-run` (flux CLI v2.10.0) | Flux's own build code; CK has it | Built with kustomize api v0.21.2, not the controller's v0.21.1 (F14), so not the controller's renderer either; needs each Kustomization as a file |
+| F. kustomize's container image, `registry.k8s.io/kustomize/kustomize:v5.8.1`, pinned by digest (`sha256:899fcd3b…`, registry tags list and manifest GET, 2026-11-04) | A digest can't be re-pointed, unlike the mutable release asset (F15); the same bytes in CI and locally | `docker run` in both jobs and inside pytest (a local Docker dependency for the tests); the entrypoint is untried (U15) |
+
+Recommendation: **A**, because it pins exactly the version Flux's controller pins and does so in both consumers. D3's render test pins Helm the same way (v4.3.1, helm-controller's), not the runner's Helm 3.22.1.
+
+**Decided (CK, 2026-11-05): A.**
+
+#### 8. Defaults
+
+Cheap to change later. CK can override any in review.
+
+| Choice | Default | Alternatives | Why |
+|---|---|---|---|
+| Namespace | `monitoring` | `observability` | Flux's example's name (F11) |
+| Chart source | `OCIRepository` with Module 8's `layerSelector` (`flux-operator.yaml:19-31`) | `HelmRepository` over HTTPS (the same bytes, F2) | helm-controller's recommended setup (F12) |
+| Chart version | `92.21.2` (was `92.18.0`; re-checked at P4b, AS5) | An older 92.x; a range such as `92.x` | A range lets Flux upgrade with no PR |
+| CRD policy | `install.crds: Create`, `upgrade.crds: CreateReplace` | `Skip` with D1 E; the chart's preview Job; `kubectl apply` by hand per major | Flux's example; CRDs move with the chart in one PR (F4) |
+| Failure handling | `RetryOnFailure` for install and upgrade; `timeout: 10m` | Helm's defaults (`RemediateOnFailure`, `5m0s`) | Recommended settings (F12); ~0.7 GB to pull (F5) |
+| Drift detection | `enabled`, ignoring `/metadata/annotations/prometheus-operator-validated` on `PrometheusRule` | `warn`; off | As the Operator's (`4cb3564`); the ignore is Flux's example's (F10, F11) |
+| Values | `valuesFrom` ConfigMap generated from `values.yaml` (key `values.yaml`, no hash, watch label) | Inline `values` | One file for Flux and the render test; Module 8's pattern (`Acme/infra/bootstrap/kustomization.yaml:13-21`) |
+| Control-plane targets | `kubeControllerManager`, `kubeScheduler`, `kubeEtcd`, `kubeProxy` off; that alone drops their rule groups and dashboards, so no `defaultRules` switch is needed (P4b) | Bind them to `0.0.0.0` with `kubeadmConfigPatches` (a rebuild; exposes them on the node's network) | Bound to `127.0.0.1` on kind (F8), hidden on EKS; down targets would fire forever |
+| Windows; Grafana's test hook | Off; `grafana.testFramework.enabled: false` | Pin the test image by the tag trick | No Windows nodes; the test image has no pin field (F6) |
+| Selectors | All five `*SelectorNilUsesHelmValues: false` (F7), set in PR 2 with P4c, when the first unlabelled object arrives (L8) | A `release` label on every object | Otherwise an unlabelled `ServiceMonitor` is silently never scraped (F7) |
+| Storage, retention | `emptyDir`, `retention: 2d`, in `overlays/kind` (the EKS overlays get the chart's `10d`) | A PVC on kind's `standard` class; `10d` | Enough to debug a regression on a laptop; a rebuild wipes either (R4) |
+| Resources | Prometheus requests `cpu: 200m`, `memory: 400Mi`, in `overlays/kind`, no limits; others at chart defaults | Limits everywhere | Fits the VM (AS1); U5 measures it |
+| Intervals | 30 s scrape and evaluation (F7) | 15 s | 10 samples in the alert's window |
+| Alertmanager | On, with the chart's `null` receiver (F13) | Off; a webhook receiver; Slack or email (a secret: Module 10) | Its UI shows the alert; R5 names the gap |
+| Grafana access | `kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80` | An Ingress at `grafana.localhost` | kind's port 80 listens on all interfaces (F8, U9) |
+| Grafana admin | The chart's generated password, read from Secret `kube-prometheus-stack-grafana` | `admin.existingSecret`, hand-made each rebuild; anonymous Viewer; an ExternalSecret (Module 10) | Nothing in Git, nothing to re-create (F9) |
+| Admission webhooks | On (fail open, F10) | Off: one image and two hook Jobs fewer | A malformed rule is refused at apply time |
+| node-exporter | On, chart defaults | `hostRootFsMount.enabled: false` if U2 fails | Node USE panels. On kind the "node" is a container, which the doc explains |
+| App metrics (D2) | `http_requests_total{route,method,code}`; `http_request_duration_seconds` (buckets 5 ms-2.5 s); `route` = the mux pattern or `unmatched` | The raw path as a label | Bounded labels (R8) |
+| Metrics port | A second listener on `:8081`, port `metrics` | `/metrics` on `:8080` | The Ingress would expose 8080's paths; 9090 is Prometheus's own port, which would confuse the doc |
+| Errors on demand | `GET /fault` returns 500 when `FAULT_INJECTION=enabled`, set only in dev | A bad release; scaling to 0 (needs D2 C or D); a fault rate on `/health` (fails the probes) | A curl loop drives the live proof; stage and prod can't be switched on by accident (R7) |
+| The alert | `SampleApiHighErrorRate`: `sum by (namespace) (rate(http_requests_total{job="sample-api",code=~"5.."}[5m])) / sum by (namespace) (rate(http_requests_total{job="sample-api"}[5m])) > 0.05`, `for: 5m`, `severity: warning` | Per-environment rules (prod `critical`); multi-window burn rate on a 99% SLO | `:429`'s "some threshold"; burn rate explained, not built |
+| Where things live | `ServiceMonitor` in sample-api's base; the alert and the sample-api dashboard once each, in `monitoring-config/` (D1 = C) | The alert in `values.yaml`'s `additionalPrometheusRulesMap` (D1 A; Claude rendered 92.18.0 with a sample rule there on 2026-11-04 and got one `PrometheusRule` in the release namespace, labelled `release`); the app's base with `enforcedNamespaceLabel` (D1 D) | One Prometheus serves three environments (AS2); a standalone rule beside the `HelmRelease` blocks the apply (F22) |
+| Dashboard ConfigMaps | The chart's defaults on (`grafana.defaultDashboardsEnabled: true`, D4 = C); ours by `configMapGenerator` from `dashboards/sample-api.json` | ConfigMaps with the JSON inline | Plain JSON diffs and reviews better |
+| `monitoring-config` Kustomization | `dependsOn: infrastructure`, `wait: true`, `prune: true`, `deletionPolicy: Orphan`, `interval: 10m`, `retryInterval: 2m`, `timeout: 5m` | No `wait` | The same fields as the `apps-*` (Module 8 Defaults), all on the allow-list (F21) |
+| Monitoring schemas in CI | `datreeio/CRDs-catalog` at `27233a506d…` (F19) | Generated from the chart's CRDs in CI; committed schemas | Same shape as the Kubernetes schemas pinned by commit (`sample-api-ci.yml:268`) |
+| promtool | Prometheus 3.16.0's tarball (was 3.15.1's, sha256 `6a726885…`, F19; 3.16.0's checksum is read in PR 2) | The pinned Prometheus image via `docker run`; `go install` | The same version as the server it tests |
+| Rehearsal | A throwaway kind cluster `mon-test` (no host ports) running the Operator and Flux from a throwaway branch `mod9-flux-test`, as Module 8's L10 did; both deleted after | Plain `helm install` of the chart, then our objects (−0.5 h); none (R12) | Only Flux's own staged apply shows F22's class of bug (U13), the CRD policy and drift detection; plain Helm can't. Settles U1-U7 and U13 with no change to the live cluster |
+| Promotion | Stage and prod move to `0.2.0` by PR right after P2, before PR 2 opens | After P9, accepting that `0.1.3` has no `:8081`, so their scrape targets are down and the chart's `TargetDown` fires until promotion | Every namespace's `ServiceMonitor` then finds a metrics port from its first scrape |
+| `container_images()` | `container.get("image", "")`; `ephemeralContainers` not walked, with a comment citing F18 | Walk it too | A string reads as unpinned; walking closes no path |
+
+#### 9. Phases
+
+CK makes every edit and runs every command; Claude coaches. One behaviour per commit; Conventional Commits; SemVer tags with the `v` prefix. Rows follow CK's decisions (L3); "a pushed run" is an **OK** each time.
+
+**Re-scope (CK, 2026-11-06; D5, L5).** The PR column follows it. PR 1 (`mod9`) is built in this order: P0a-P0c, P4a, P3b's Helm half, P4b, P6 trimmed (no `/fault`, no alert timing, so `monitoring-config` isn't there to check), P8 trimmed (`docs/bootstrap.md`: wait for the `HelmRelease`, the Grafana port-forward and login; `docs/ci.md`: Helm in `scripts-test` and the render test), CK's B1-B2, the PR, then P9 trimmed (`infrastructure` Ready within 10 m, no sample-api pod rolls, Grafana reachable, Grafana scaled to 0 and restored). About 5.5 h after P0c. Everything else is PR 2, about 7-8 h. Rows below still describe each phase in full; where a row names PR 2 work (`monitoring-config`, `/fault`, the alert, `0.2.0`), its PR 1 run skips that part.
+
+**Status (2026-11-07):** P0a done (`b284a48`), P0b done (`c060755`), P0c done (`c9441bb`, run `42266342080` green). P4a done (L6). P3b's Helm half done (L7, run `42299569659` green). P4b done (L8, run `42316618197` green). P6 trimmed and P8 trimmed done (L9). Pre-review and B1-B2 done (L10). PR 1 open as #23; bgblackmore's review answered (L11, Carry-overs D). Next: merge, then P9 trimmed.
+
+| # | PR | Delivers (traces to) | Test written first | Expected red, and why | Fix | Green evidence | h |
+|---|---|---|---|---|---|---|---|
+| P0a | 1 | `container_images()` guard (A3) | A container with no `image` is reported unpinned | `KeyError: 'image'` (`test_flux_layout.py:55`) | Defaults row | Red, then green | 0.25 |
+| P0b | 1 | Network failures say so (A1, D6) | Rendering a throwaway entry point with an unreachable URL fails with a message naming the URL and the network | A bare `CalledProcessError` | Wrap the render; probe egress | Red, then green; a recorded run with the network cut | 0.5 |
+| P0c | 1 | The renderer pinned (A2, D7) | Both jobs install `KUSTOMIZE_VERSION` with a sha256 check before rendering; renders call `kustomize build`; the version matches the table for `FLUX_VERSION` | No `KUSTOMIZE_VERSION` | One-time local install; one step per job | Red, then green; a pushed run logs v5.8.1 in both jobs; `FLUX_VERSION` bumped alone goes red | 1.0 |
+| P0d | 2 | Module 8's records (B5) | None: docs only | — | CK runs B1-B4, predictions first; records into Module 8's "Not shown" and Closing Evidence | B1-B4's results in Module 8's doc, each with its artifact | 0.25 |
+| P0e | 2 | The Operator chart by digest (D3 = C applied to Module 8's chart, CK 2026-11-05) | The `ResourceSet`'s chart `OCIRepository` template has `ref.digest: sha256:<64 hex>` beside its `ref.semver`, which stays equal to the `version` input. Module 8's assert that the template has no `digest` (its P2(d)) is replaced in the same commit | No `digest`, and the old assert forbids one | `ref.digest` set to the 0.62.1 chart's digest, read with `helm pull oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator@sha256:…` and its `Chart.yaml` version recorded. The digest-to-version check joins D3's chart test once Helm is in CI (P3b, P4b) | Red, then green; the digest removed goes red; after merge, U16's prediction checked | 0.5 |
+| P1a | 2 | Request counts (FR2) | Through the real mux: after `/health` and `/nope`, the metrics handler shows `…{code="200",method="GET",route="/health"} 1` and `…{code="404",…,route="unmatched"} 1`, with `# TYPE` | `/metrics` 404 | `metrics.go` with `client_golang` (D2 = A), middleware; `go.mod`, `go.sum` | `go test -race` red, then green | 1.0 |
+| P1b | 2 | Latency (FR2) | Buckets cumulative; `+Inf` equals `_count`; `_sum` grows | Missing series | A `HistogramVec` with fixed buckets | Red, then green | 0.5 |
+| P1c | 2 | Errors on demand | With the flag, `/fault` returns 500 and is counted `code="500"`; without it, 404 | 404 either way | Conditional route | Red, then green | 0.25 |
+| P1d | 2 | Metrics off the public port | `/metrics` answers on `:8081` only; SIGTERM drains both servers (extends `TestServeDrainsInFlightRequests`) | On `:8080` or nowhere | Second server | Red, then green | 0.5 |
+| P1e | 2 | Manifests (FR2, R7) | Only dev's render sets `FAULT_INJECTION=enabled`; the Deployment's `metrics` port exists in the Service (cross-file) | Dev lacks it. The "stage and prod don't" half is green on arrival, so it's labelled characterisation and shown red by a recorded mutation (C6) | Base port, optional env; dev's merge | Red, then green; predicted: every environment's pods roll once on their current image (a base change) | 0.5 |
+| — | 1 | PR 1 (`mod9`), after P8's trimmed half (re-scope) | — | — | — | CK's B1-B2 first (the live cluster healthy before the stack lands); the review; **OK** open (the description names D5's mixed-module deviation, the re-scope and the deferred list); **OK** merge; then P9's trimmed half | 0.75 |
+| P2 | — | `0.2.0` in dev, then stage and prod (C5) | Predictions: Flux's PR touches only dev's two lines; it is key `168555567`'s first push; U16 | — | **OK** tag `v0.2.0` on the merge commit of the PR carrying P1 (PR 2 since the re-scope; Q9); **OK** open and merge Flux's PR (a plain merge commit), then **OK** delete `flux/image-updates` (Module 8 Defaults, `:457-458`); **OK** promotion PRs for stage and prod (Defaults) | Each environment's `imageID` equals GHCR's `0.2.0`; `promtool check metrics` passes on dev's live output | 0.75 |
+| P3a | 2 | Monitoring kinds validated (FR1, C12) | The kubeconform command has a `datreeio/CRDs-catalog` location at a 40-hex commit | None there | One line, one env | Red, then green; a misspelt `ServiceMonitor` field fails kubeconform (recorded) | 0.5 |
+| P3b | 1 (Helm), 2 (promtool) | Verifiers pinned (D3) | `scripts-test` installs promtool and Helm, sha256-checked; promtool equals `values.yaml`'s Prometheus tag; Helm equals the table's | No step | One step; local promtool | Red, then green; a Prometheus tag bumped alone goes red | 0.75 |
+| P4a | 1 | The `HelmRelease` (FR1, D1, D3; F22) | `base` lists `monitoring`; the `OCIRepository` has `tag` and `digest`; the `HelmRelease` sets only §2's fields; CRDs; `valuesFrom` names the generated ConfigMap; and a guard for F22: no Flux entry point that holds a `HelmRelease` also renders a `monitoring.coreos.com` object | Files missing. The guard is green on arrival (characterisation, C6), shown red by a recorded mutation: a standalone `PrometheusRule` in `base/monitoring/` | §1's files; the timeout | Red, then green; inline `values` goes red | 1.25 |
+| P4b | 1 | Chart images pinned (NFR3) | The render test (D3 = C), plus: no monitor or rule for the four control-plane targets; the chart at `ref.digest` has the tagged version (kube-prometheus-stack only; the Operator chart's check goes with P0e in PR 2). The selectors check moved to PR 2 with P4c (L8) | 10 tag-only images (F5, with the test hook off) | The 10 digests (tag beside each), three conventions (F6); the four control-plane switches off; Prometheus's retention and requests (no test: P6 measures, U5) | Red, then green; one digest removed goes red | 1.25 |
+| P4c+ | 2 | Prometheus reads our objects (F7) | Prometheus's rendered selectors select sample-api's `ServiceMonitor` and our `PrometheusRule` (which carry no `release` label) | The five selectors filter on `release` | The five `*SelectorNilUsesHelmValues: false` | Red, then green | (in P4c) |
+| P4c | 2 | sample-api scraped (FR2) | Its `ServiceMonitor` selects `app: sample-api` on port `metrics`, which the Service has | Missing | `servicemonitor.yaml` | Red, then green | 0.25 |
+| P4d | 2 | The `monitoring-config` entry point (D1 = C; F21) | The expected Kustomization set and `ENTRY_POINTS` include `monitoring-config`; it `dependsOn: infrastructure`; the CI render loop covers it; the render's `empty` guard skips it (it holds no containers) | The set test names the missing Kustomization | The `platform.yaml` entry (Defaults), the `ENTRY_POINTS` line, the render-loop path | Red, then green; `dependsOn` removed goes red | 0.5 |
+| P5 | 2 | The alert (FR3) | `promtool test rules` on `monitoring-config/sample-api-alerts.yaml`: 10% 5xx in dev → pending, then firing at 5 m with `namespace="sample-api-dev"`; 1% → none; no traffic → none; stage only → stage only | No rule file | The rule (Defaults) | Red, then green; threshold `0.5` and `for: 1m` go red; P4a's F22 guard stays green with the rule in `monitoring-config` | 1.0 |
+| P6 | — | Flux rehearsal (U1-U7, U13; R12) | Predictions for U1-U7 and U13 | — | **OK** push throwaway branch `mod9-flux-test`; **OK** create `mon-test`, install the Operator, apply a `FluxInstance` syncing that branch, let Flux install everything, drive `/fault`; **OK** delete the cluster and the branch | `infrastructure` and `monitoring-config` Ready with no "no matches for kind" (U13); time to Ready; idle alerts, each handled; node-exporter, kubelet up; memory; `monitoring-config`'s events (U6); pending and firing times | 1.75 |
+| P7 | 2 | Dashboards (FR4, D4 = C) | Our sample-api JSON parses; unique `uid`; data source `prometheus`; every query valid PromQL (variables substituted, then `promtool check rules`); the sidecar label; `grafana.defaultDashboardsEnabled` is on and the render holds the named default's ConfigMap | File missing | Built in `mon-test`'s Grafana (§5), exported, trimmed; the cluster-health default chosen there | Red, then green; a broken query goes red | 1.25 |
+| P8 | 1 (trimmed), 2 | Docs, last (FR5, FR6, C13) | None: proved by running their blocks | — | `docs/observability.md`; `docs/bootstrap.md` (wait for the `HelmRelease` and `monitoring-config`, Grafana login); `docs/ci.md` | Each block run on `mon-test`, recorded; the review; **OK** open PR 2 | 1.25 |
+| P9 | — | Live (C5, B4's mechanism) | Predictions: `infrastructure` Ready within 10 m, then `monitoring-config`; no sample-api pod rolls; every namespace's target up (all on `0.2.0`); the alert fires 6-8 min into a fault loop | — | **OK** merge PR 2; **OK** the fault loop; **OK** scale Grafana to 0 and watch it reverted | Event times; Alertmanager and both dashboards show the alert; all Ready; the doc's blocks re-run live | 1.0 |
+| P10 | — | Game day (`:418`, `:523`) | None | — | Claude writes a script that applies one of several faults to dev without saying which; CK runs it (**OK**) and diagnoses from the dashboards and the doc; Flux reverts it within 10 m | Time to the right diagnosis; doc gaps fixed after | 0.75 |
+
+**Total: ⚠️ about 17.75 h, over the 8-12 h budget, accepted by CK (Q8, 2026-11-05): nothing deferred.** Against L2's 17.5 h: +0.5 for P0e (the Operator chart pin), +0.5 for P4d (D1 = C's entry point), −0.75 for P7 (D4 = C builds one dashboard). 2.5 h of PR 1 is Module 8's carry-over (P0a-P0e). The re-scope (2026-11-06) moves hours between the PRs but not the total: PR 1 is P0a-P0c (1.75 h) plus about 5.5 h; PR 2 is about 7-8 h; P0d and P0e (0.75 h) move to PR 2.
+
+## Risks / Constraints
+
+Failure modes included: what breaks, what happens, and the response.
+
+| # | Risk | Mitigation |
+|---|---|---|
+| R1 | (D1 = C, as under A) Monitoring health gates app delivery: while the `HelmRelease` isn't Ready, `infrastructure` isn't, and `apps-dev`, `apps-stage`, `apps-prod` and `monitoring-config` stop applying changes (Module 8 R11, widened); pods keep running. Worst case, a custom resource placed beside the `HelmRelease` stops `infrastructure` for good (F22) | 10 m timeouts and `RetryOnFailure`; upgrades only by PR, undone by revert; P4a's guard keeps custom resources out of that apply; D1 A′, B or E would narrow the coupling |
+| R2 | Weekly chart releases; `CreateReplace` replaces CRDs on upgrade, and a major version can need manual steps (`README.md:80-100`) | Digest pin (D3 = C); upgrades on CK's cadence after reading UPGRADE.md; the render test names new unpinned images |
+| R3 | A first install and every rebuild pull about 0.7 GB, Grafana 462 MB (F5); Docker Hub limits anonymous pulls (F20) | Timeouts and retries; one Docker Hub image; measured in P6 (U1, U8) |
+| R4 | History lives in `emptyDir` for 2 days: a Prometheus pod restart or a rebuild loses it | Accepted on kind; a PVC is one value |
+| R5 | **An open loop:** alerts go to the `null` receiver, so "the page" is CK opening Alertmanager. An unseen alert is the lens's unwatched dashboard (`:416`) | The doc says so and says where to look; `Watchdog` proves the pipeline; a real receiver waits for Module 10's secrets |
+| R6 | New network needs in required checks: the chart from GHCR and the schemas from `raw.githubusercontent.com`, on top of the ingress manifest (Module 8 R4) | Pinned by digest and commit; D6's message tells an outage from a regression |
+| R7 | Fault-injection code ships in every image, off by default; a wrong overlay could enable it in prod | P1e's render test fails if any environment but dev enables it |
+| R8 | Cardinality: a label from client input creates series without bound | `route` from the mux pattern (P1a) |
+| R9 | The webhooks fail open (F10): with the operator down, a malformed `PrometheusRule` is accepted | `promtool test rules` in CI is the gate (P5); the chart's `PrometheusRuleFailures` alert |
+| R10 | node-exporter may fail on Docker Desktop (U2); drift detection may fight a hook (U4) | Rehearsal first; a one-value fallback; an `ignore` rule |
+| R11 | Module 10 (`:442-443`): a default-deny NetworkPolicy would stop Prometheus scraping sample-api, and the `restricted` pod security level would refuse node-exporter (host network, PID, paths) | Named for Module 10: allow `monitoring` to port `metrics`; label `monitoring` `privileged` |
+| R12 | No branch flip (Module 8 R12): the live cluster first applies the stack after PR 1 merges (PR 2 before the re-scope, 2026-11-06). Ordering bugs such as F22 show only under Flux's staged apply, never under plain Helm or a render | The Flux rehearsal (P6, Defaults) runs the same Kustomizations from a throwaway branch first; P9's predictions; revert PR 1 if `infrastructure` stays not Ready |
+| R13 | (D2 = A) The image now carries 23 third-party modules. Trivy fails `build-scan` on a fixable HIGH or CRITICAL CVE in any of them, so a disclosure upstream can block every sample-api PR with no change here | Bump the module (`go get`, a new `go.sum`) in its own PR; `go.sum` pins each module's hash, so a re-published version fails the build rather than ships |
+
+## Ongoing / Recurring Support / Maintenance / License Costs
+
+- **Money: $0.** Local kind cluster, public repo, public images.
+- **Upkeep.** A chart upgrade, on CK's cadence (upstream releases weekly): a new digest and tag, then the render test names every image whose tag moved and CK re-reads those digests. promtool moves with Prometheus (tested), the schema commit with the operator, and D7's kustomize and Helm pins with Flux (tested). About 30 minutes an upgrade, plus re-reading the cluster-health default's panels against `docs/observability.md` (D4 = C). The Operator chart's digest moves with each Operator upgrade (P0e). `client_golang` and its modules are bumped like any dependency, and at once when Trivy flags one (R13).
+- **Licences.** The charts, Prometheus, Alertmanager, the operator, kube-state-metrics and node-exporter are Apache-2.0; k8s-sidecar is MIT; Grafana is AGPL-3.0, run unmodified and not distributed. D2 A adds Apache-2.0 modules; A′ is MIT.
+
+## Other Designs Considered
+
+Only options that fail a hard requirement. Every workable option is in a decision table.
+
+| Design | Fails |
+|---|---|
+| A hosted service (Grafana Cloud, a managed Prometheus) | `:429`: kube-prometheus-stack via Flux's `HelmRelease`; also a credential (NFR2) |
+| Prometheus without the operator (the `prometheus` chart), or VictoriaMetrics | `:429` names kube-prometheus-stack |
+| `helm install` by hand | `:429`: "via Flux's HelmRelease" |
+| Pinning the runner image (D7) | A GitHub-hosted label selects an OS, not an image version (F14) |
+| Argo CD | Module 11's ADR (`:475`), as in Module 8 |
+
+## Dependencies
+
+kube-prometheus-stack 92.21.2 (operator v0.94.2, Prometheus v3.16.0, Alertmanager v0.34.2, Grafana 13.3.0, kube-state-metrics v2.20.0, node-exporter v1.12.1, k8s-sidecar 2.14.3, kube-webhook-certgen 1.11.1), installed by helm-controller v1.7.1 (Helm v4.3.1) of Flux 2.10.0; kind v0.33.0 with `kindest/node:v1.35.8`; in CI, kubeconform v0.8.0 with `datreeio/CRDs-catalog` at `27233a506d`, promtool 3.16.0, Helm v4.3.1 and (D7 = A) kustomize v5.8.1. sample-api gains `prometheus/client_golang` v1.25.0 and its 22 further modules (D2 = A, F16). The Operator chart `flux-operator` 0.62.1 is now fetched by digest (P0e). Module 8's rulesets are unchanged.
+
+## Future Use Cases for This Design
+
+- **Close the loop:** a real receiver (Slack or email) once Module 10 can hold its secret; multi-window burn-rate alerts and a recording rule for the SLI (SRE workbook).
+- **Watch the platform itself:** a `PodMonitor` for Flux's controllers and Flux's dashboards (F11), so the GitOps loop's own delays show.
+- **More pillars:** logs (Loki) and traces (OpenTelemetry, Tempo), joined to these metrics.
+- **More clusters:** one Prometheus per environment, or `enforcedNamespaceLabel`, so each app's rule can live in its base; D1 D or E.
+- **Kind and EKS:** control-plane metrics via `kubeadmConfigPatches`; a PVC and longer retention; Grafana behind a Gateway API controller once ingress-nginx is replaced (Module 8 R1); EKS values in its overlays.
+- **Supply chain:** vendor or commit-pin the ingress manifests (D6 C/D); dashboards generated from code (D4 E).
+
+## Internal Documentation
+
+- `docs/curriculum.md:403-429` (Module 9), `:9`, `:13`, `:33`, `:52`, `:67`, `:94`, `:433-460` (Module 10), `:484`, `:523`, `:525`
+- `docs/design/module-8-gitops-flux.md` (carry-overs, R11, Defaults `:444`, Closing Evidence), `docs/bootstrap.md`, `docs/ci.md`
+- bgblackmore's review of [PR #22](https://github.com/kerinschristopher/Curriculum/pull/22): comments `6608512594`, `4457063904`, `4457064257`
+- External, at the versions used: [kube-prometheus-stack 92.21.2](https://github.com/prometheus-community/helm-charts/releases/tag/kube-prometheus-stack-92.21.2), [HelmRelease spec, helm-controller v1.7.1](https://github.com/fluxcd/helm-controller/blob/v1.7.1/docs/spec/v2/helmreleases.md), [Kustomization spec, kustomize-controller v1.10.1](https://github.com/fluxcd/kustomize-controller/blob/v1.10.1/docs/spec/v1/kustomizations.md), [flux2-monitoring-example](https://github.com/fluxcd/flux2-monitoring-example/tree/7ab65dc8b90f7a6751d88f18bbb4e1bee33bf334), [prometheus-operator v0.94.2 admission](https://github.com/prometheus-operator/prometheus-operator/blob/v0.94.2/pkg/admission/admission.go), [Prometheus: metric types](https://prometheus.io/docs/concepts/metric_types/), [naming](https://prometheus.io/docs/practices/naming/), [unit testing rules](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/), [exposition formats](https://prometheus.io/docs/instrumenting/exposition_formats/), [Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/), [SRE book: monitoring](https://sre.google/sre-book/monitoring-distributed-systems/), [SLOs](https://sre.google/sre-book/service-level-objectives/), [SRE workbook: alerting on SLOs](https://sre.google/workbook/alerting-on-slos/), [the USE method](https://www.brendangregg.com/usemethod.html), [Docker Hub usage](https://docs.docker.com/docker-hub/usage/), [runner images](https://github.com/actions/runner-images)
+
+### Review and Orchestration Log
+
+| # | Date | Who / tool | Instruction | Given | Result |
+|---|---|---|---|---|---|
+| L1 | 2026-11-04 | Architect agent (Claude), run from the main session; read-only except this doc; no git, cluster, Helm or GitHub writes, no installs; Module 8's post-merge checks not run | Write the Module 9 design from the curriculum and the repo in the house style: complete option sets with pros and cons, a Defaults table, a curriculum mapping, TDD phases with hours, carry-overs with statuses, cite only committed files and pinned upstream sources | `docs/curriculum.md`; `Acme/**`; the CI workflow and tests; `docs/ci.md`, `docs/bootstrap.md`; Module 8's doc; PR #22's comments and PRs #19-#21 (`gh api` GETs); upstream source at pinned tags (the chart via `helm pull` and `helm template` into a scratch folder; helm-controller, kustomize-controller, flux2, kubectl, kubeadm, kind, prometheus-operator, ingress-nginx, the runner images); registry API GETs; web docs. The cluster was stopped (F20), so nothing live was read | 7 decisions with recommendations (A, B, C, A, A, A, A); F1-F21; U1-U12; carry-overs A1-A4, B1-B5, C1-C13 and Module 8's open items, with statuses; the instruction's "public default password" found out of date for this chart (F9); A2's premise corrected (the `kustomize` job isn't pinned either); ⚠️ about 16.75 h |
+| L2 | 2026-11-04 | Claude (main session), read-only review of L1's draft; CK approved sending the fixes; the architect agent made them, writing only this doc | One High (D1 A, B and C deadlock: a `PrometheusRule` in the same apply as the `HelmRelease` fails its dry-run, so the CRD never arrives) and four Lows (a `healthChecks` variant for D1, `postRenderers` for D3, kustomize's image for D7, stage and prod scraped before promotion) | The review; kustomize-controller v1.10.1 and fluxcd/pkg `ssa/v0.83.0` source; the chart's values; registry.k8s.io tags and manifest GETs | **The High held, read from source and not run (U13).** F22 added; D1 rewritten so each option places the rule (A now carries it in `additionalPrometheusRulesMap`; new A′, C and D; old C folded into B); recommendation unchanged (A). D3 C′ and D7 F added, recommendations unchanged. The rehearsal Default moved to Flux on a throwaway branch; promotion moved to right after P2. P4a gains an F22 guard. ⚠️ about 17.5 h |
+| L3 | 2026-11-05 | CK decided, walked through by Claude (main session); Claude made these doc edits at CK's request | Walk through D1-D7 one at a time (primer, table, recommendation, CK's choice), then the budget, then record it all | This doc (L2); for D2, the repo's two `go.mod` files; for D4, chart 92.18.0's `values.yaml:1415` and its dashboard templates; Claude's render of `additionalPrometheusRulesMap` with a sample rule | **Decided:** D1 C (CK challenged A; Claude conceded it had weighed one entry point, about 0.5 h, too heavily, and moved to C), D2 A (CK asked whether libraries were already in use: only Terratest's test module, which never ships), D3 C, with the Operator chart pinned by digest too (P0e), D4 C (CK understood all ~25 defaults arrive under one switch), D5 B, D6 A, D7 A. **Q8:** the budget is accepted as is, ⚠️ about 17.75 h, nothing deferred. Edits: Status Approved; layout, §1-§6, Defaults, Phases (P0e, P4d added; PR numbers for two PRs), R1, R12, R13 added, U6 and U16, Dependencies, Upkeep, Open Questions |
+| L4 | 2026-11-05 to 2026-11-06 | CK edited and ran; Claude coached and read each diff | Build P0a-P0c on `mod9` (from `main` at `102966f4`), test first, one behaviour per commit | PR #22's review; `test_flux_layout.py`; `sample-api-ci.yml`; kustomize v5.8.1's `checksums.txt` | **P0a `b284a48`:** red `KeyError: 'image'`, then green. **P0b `c060755`:** two offline tests (an `.invalid` probe, a local server); with Wi-Fi off, 3 failed naming the network and 33 passed; online, 36 passed. **P0c `c9441bb`:** `KUSTOMIZE_VERSION` 5.8.1 with its sha256 in both jobs, renders by `kustomize build`; reds recorded for no pin, no install step, `FLUX_VERSION` 2.11.0 alone and the pin at 5.8.3 (throwaway copies). CK challenged two planned tests: a fake-binary test that guarded only a test helper, and the `scripts-test` half of the install-order test, which repeated another; Claude conceded both. The runner image ships its own kustomize 5.8.3. `mod9` pushed (**OK**); run `42266342080` green: both jobs log v5.8.1, pytest 75 passed, kubeconform 127 resources valid. Locally 69 passed, 6 skipped (release-tag tests with no registry) |
+| L5 | 2026-11-06 | CK decided; Claude offered the options; Claude made these doc edits at CK's request on 2026-11-06 | "Focus on getting Prometheus and Grafana up and running asap" | This doc's Phases | **CK chose the stack first, through Flux, as designed** (not a throwaway `helm install`, not the stack without digest pins). D5 and the Phases changed (D5's Changed paragraph): PR 1 gains P4a, P3b's Helm half, P4b and trimmed P6, P8 and P9; P0d, P0e, P1, P2 and the rest move to PR 2. CK accepted that Module 9's deliverable is incomplete until PR 2. Q9 opened |
+| L6 | 2026-11-06 | CK edited and ran; Claude coached and read each diff; Claude made this row's doc edit at CK's request | Build P4a test first, one commit per cycle (CK asked to split the planned single commit) | Chart 92.18.0's digest, re-read with Helm v4.3.1 (`helm pull`, unchanged: `sha256:bf0af605…5b76`); helm-controller v1.7.1's `InstallStrategy` and `UpgradeStrategy` types (`api/v2/helmrelease_types.go:692-706`, `:981-995`) | **Cycle 1 `9f5d802`:** `test_the_release_installs_the_pinned_chart` reads the kind overlay's render: `chartRef` names the `OCIRepository`, whose `ref` is exactly a tag and a digest. CK challenged the planned first test (the namespace and release exist) as checking the program, not the product; Claude conceded: its first two asserts repeated what the later render tests catch, so the `chartRef` check moved into this test. Red `AssertionError: []`. **Cycle 2 `08f5fdf`:** `test_the_release_reads_its_values_from_values_yaml`: the rendered ConfigMap carries `values.yaml`'s text, `valuesFrom` names the rendered name (so a hash suffix fails), and the watch label. Red `AssertionError: ['HelmRelease', 'Namespace', 'OCIRepository']`. `values.yaml` holds only a header until P4b. **Cycle 3 `21030e8`:** `test_the_release_sets_only_known_fields`: an allow-list of spec fields; `install` and `upgrade` exactly `crds` plus `RetryOnFailure`. Red `AssertionError: None` on `install`. The allow-list was green on arrival (characterisation, C6); **mutation: inline `values` appended to the `HelmRelease` went red** (`assert ['values'] == []`), then green once restored (`cmp` unchanged). CK challenged the planned `timeout: 10m` assert; Claude conceded: a short timeout only delays a self-healing retry. `timeout: 10m` stays as a Default, checked by P6's time to Ready (U1). Suite 72 passed, 6 skipped. **Cycle 4 `db003ba`:** `driftDetection: enabled` with its one ignore, **no test**: CK dropped the planned `test_the_release_reverts_hand_edits` (it reads the setting, not the behaviour); Claude defended it (a removal or `warn` goes uncaught and doesn't heal itself) and CK kept the decision. The behaviour is proved live instead: P9's Grafana scale-to-0 restore, and P6 checks that the chart's rules aren't corrected over and over. **Cycle 5 `e368d13`:** `infrastructure`'s `timeout` 5m → 10m, **no test**: a too-short timeout heals itself on retry (a false failure, and the apps held back for up to one 2m `retryInterval`); P6's time to Ready (U1) checks it. **Cycle 6 `0db3cd7`:** `test_no_flux_apply_holds_a_release_and_a_monitoring_object`, the F22 guard: no entry point whose render holds a `HelmRelease` also renders a `monitoring.coreos.com` object. Green on arrival (characterisation, C6); **mutation: a standalone `PrometheusRule` `mutation` listed in `base/monitoring/` went red** (`assert [('Acme/platform/infrastructure/overlays/kind', 'PrometheusRule', 'mutation')] == []`), then removed (`git status` clean). Kept although kubeconform fails on any `monitoring.coreos.com` object today (no schema): that cover ends when P3a adds the schemas. Suite 73 passed, 6 skipped |
+| L7 | 2026-11-06 | CK edited and ran; Claude coached and read each diff; Claude made this row's doc edit at CK's request | Build P3b's Helm half test first (promtool stays with P5 in PR 2) | helm-controller v1.7.1's `go.mod:46` (Helm v4.3.1); `get.helm.sh/helm-v4.3.1-linux-amd64.tar.gz.sha256sum` | **`234dc3a`:** workflow `env` `HELM_VERSION: "4.3.1"` and `HELM_SHA256` `0403a88a…fe54b`; `test_helm_pin_matches_the_flux_version` against the table `HELM_FOR_FLUX = {"2.10.0": "4.3.1"}`. Red `assert 'None' == '4.3.1'`, then green. **`bf711f4`:** `test_renders_use_the_pinned_helm` reads `helm version` on PATH. Green locally on arrival (WSL already has v4.3.1), so the red was shown in CI (CK chose this over a local mutation): run `42299047972` failed only that test, `assert 'v3.22.1' == 'v4.3.1'` (the runner's Helm), 1 failed, 80 passed; kubeconform `143 … Valid: 143`. **`0fc45d2`:** an `Install Helm` step in `scripts-test` (sha256-checked); run `42299569659` all green, `v4.3.1`, 81 passed. No install-order test, as in P0c |
+| L8 | 2026-11-06 | CK edited and ran; Claude coached and read each diff; Claude made this row's doc edit at CK's request | Build P4b test first, one commit per cycle | Chart 92.21.2 pulled by digest (`helm show chart`, `helm template --kube-version 1.35.8` into a scratch folder); each image's index digest (`docker buildx imagetools inspect`, cross-checked with `skopeo`) | **AS5:** five releases since 92.18.0; CK chose 92.21.2. Claude first said it moved the operator to v0.95.1; wrong (that was the sibling CRD and webhook charts), corrected before CK acted on it: the operator stays v0.94.2. **Refactor `043b10b`:** `fail_naming_the_cause` shared by `rendered()` and the chart pull (D6); 42 passed. **Cycle 1 `f75d9e4`:** fixtures `chart` (pull by `ref.digest`) and `chart_render`; `test_the_chart_at_the_digest_is_the_tagged_version`: green on 92.18.0, red with the tag alone moved (`'92.18.0' == '92.21.2'`), green with the new digest; 43 passed. **Cycle 2 `9ede147`:** `test_every_image_the_chart_runs_is_pinned`, a text scan (`IMAGE_REFERENCE`) plus `container_images()`, with a guard that Prometheus's image is seen (CK chose the scan over named fields). Red listed 11 references (the Grafana `bats` test image among them); fix: tag and digest for 10 images (CK chose tag beside digest, so a chart bump can't move a tag off its digest) and `grafana.testFramework.enabled: false`; green 44 passed; **mutation: node-exporter's digest removed listed only it.** **Cycle 3 `a576466`:** `test_nothing_watches_the_control_plane_kind_hides`: no `ServiceMonitor` name and no rule `expr` matches the four (F8). Red listed the 4 monitors (1 failed, 44 passed); fix: the four `enabled: false` (no `defaultRules` switch needed); green 45 passed. **Cycle 4 moved to PR 2:** CK challenged `test_prometheus_selects_unlabelled_monitors_and_rules` as checking a switch CK had just set; Claude conceded (in PR 1 nothing depends on the selectors) and offered moving it: CK chose to move the test and the five switches to P4c, where the test can check that the selectors match our objects' labels. **Cycle 5 `53d8550`:** `retention: 2d`, requests `200m`/`400Mi`, no test (tuning; P6 measures, U5), and §6's comment on `test_every_container_flux_deploys_has_a_tag_and_digest`. Suite 78 passed, 6 skipped. Mid-session CK asked to rehearse on the live cluster instead of `mon-test`, then withdrew it: P6 stays as designed |
+| L9 | 2026-11-07 | CK ran each block (cluster and branch steps with **OK**); Claude coached, ran read-only checks and proved P8's blocks; Claude made this row's doc edit at CK's request | P6 trimmed, then P8 trimmed | Throwaway branch `mod9-flux-test` (`2eb4e45`: `mod9` plus the `FluxInstance` `ref`); throwaway cluster `mon-test` (kind v1.35.8, no host ports); Prometheus and Grafana APIs through port-forwards; `docker stats` | **P6:** predictions given first. The `FluxInstance` was applied at 00:35:30 UTC; the HelmRelease was Ready at 00:37:24 and `infrastructure` at 00:37:26 (U1: **1 min 56 s**, predicted 4-7 min; helm-controller waits for the pods, and all 6 were Running with 0 restarts). No "no matches for kind" (U13). 14/14 targets up, node-exporter and the 3 kubelet targets among them, and no control-plane job (U2, U7, F8). Only `Watchdog` firing (U3; `InfoInhibitor` predicted wrongly). Prometheus 216 MiB, the node 2.63 GiB (U5). Helm revision 1, chart `92.21.2+4ae2ebc21830`, 0 drift log lines. Grafana 13.3.0 login with the generated password, 25 dashboards, none for the control plane. Nothing to fix. **P8 `ef3cf94`:** `docs/bootstrap.md` step 5 (no separate `HelmRelease` wait: `infrastructure`'s `wait: true` covers it, Ready 2 s after the release), step 6 (Helm history and pods), "Open Grafana"; `docs/ci.md` `scripts-test` row (Helm, the chart render, ghcr.io). The new blocks were run unchanged against `mon-test` through a temp kubeconfig; CK logged in to Grafana by hand. Then `mon-test` and the branch were deleted (**OK**) |
+| L10 | 2026-11-07 | The code-reviewer agent (Claude), read-only; Claude checked each finding against the code; CK chose each fix and made the edits | Pre-review of `main..mod9` at `61efad2` before PR 1; then B1-B2 | `git diff main..mod9`; the chart pulled at its digest and rendered with `values.yaml`; upstream `checksums.txt` and `.sha256sum`; each image tag resolved with `skopeo`; helm-controller v1.7.1 and kustomize-controller v1.10.1 `go.mod`; the local suite | **No High or Medium.** Checksums, the chart digest and all 10 image pins match upstream; the render has 9 ServiceMonitors and 30 PrometheusRules, none for the control plane. Four Lows, CK's choices: (1) the chart pull probed GitHub raw, so a ghcr.io outage blamed the chart reference: fixed without a test (CK's choice), `6ba8efe` (`CHART_PROBE`, `https://ghcr.io/v2/`), shown by calling the helper with ghcr.io and with an unreachable host; (2) `monitoring_objects()` keys by kind only: **deferred to PR 2**; (3) step 5 of `docs/bootstrap.md` promised the chart's pods were running at `infrastructure` Ready, but the operator starts Prometheus and Alertmanager after Helm's wait (plausible, not provable without a cluster): wording softened, `b7a464c`; (4) the `kustomize` job doesn't compare `kustomize version`: left, since `scripts-test` checks the same runner. Suite 78 passed, 6 skipped. **B1:** `main` at `102966f4`, sample-api-ci `41721293082` green (Go tests on 1.26 and 1.27, `scripts-test` 69 passed, kubeconform 127 valid, Trivy and push green), terraform-plan `41721293196` green. **B2:** all five live Kustomizations Ready at `102966f4` |
+| L11 | 2026-11-07 | CK chose and edited (Claude made cycle 0's edits at CK's request); Claude verified each comment, coached, read each diff and ran read-only checks; CK ran each block (branch and cluster steps with **OK**); Claude made this row's doc edit at CK's request | Answer bgblackmore's PR #23 review before merge, mainly the layering | PR #23's eight inline comments; chart 92.21.2 rendered with `values.yaml` (`Prometheus` and `Alertmanager` names; the chart's `retention: 10d`, `storageSpec: {}`) | All eight verified true (Carry-overs D). **CK's choices:** fix D1, D2 and the D3 they force, the rest to PR 2; the second ConfigMap (over inline values or a component); rehearse before merge. **Cycle 0 `b06a277`** (refactor): `monitoring_objects()` by `(kind, name)`; 78 passed, 6 skipped before and after; **mutation:** `disableNameSuffixHash` removed failed at the lookup, naming `kube-prometheus-stack-values-cm6g5f7fhd`. **Cycle 1 `21e0623`:** CK challenged a planned `test_laptop_sizing_reaches_only_kind` (the other overlay differences have no test, and nothing applies the EKS overlays); Claude conceded, so retention's guard stays with D5. The existing values test now expects both ConfigMaps, base first: red (no kind ConfigMap; 1 failed, 77 passed), green 78 passed, 6 skipped; the dev overlay's `valuesFrom` lists base only. **Cycle 2 `f76316c`:** step 5 waits for each StatefulSet to exist, then its rollout. **Rehearsal** on throwaway `mon-test` syncing throwaway `mod9-flux-test` (`b1ab9b2`), both deleted after: step 5 run unchanged, exit 0 in 26 s; `infrastructure` Ready 2 min 15 s after the `FluxInstance`; the `Prometheus` object has `retention: 2d` and 200m/400Mi, and `helm get values` holds base's image tags too (merged); revision 1. **Prediction wrong:** the StatefulSets were created at 06:36:08, 78 s before the HelmRelease was Ready (Grafana, Ready 06:37:15, held Helm's wait), so step 5's paragraph was reworded before commit; the not-yet-created case wasn't exercised |
+
+## Open Questions
+
+| # | Question | Owner | Status |
+|---|---|---|---|
+| Q1 | D1: where monitoring sits in Flux's order, and where the rule lives | CK | **Decided (CK, 2026-11-05): C**, the stack in `infrastructure` and the rule and our dashboard in `monitoring-config` (L3) |
+| Q2 | D2: where the error-rate signal comes from | CK | **Decided (CK, 2026-11-05): A**, `client_golang` |
+| Q3 | D3: how the chart and its images are pinned and checked | CK | **Decided (CK, 2026-11-05): C**; the Operator chart gets a digest too (P0e) |
+| Q4 | D4: which two dashboards | CK | **Decided (CK, 2026-11-05): C**, a chart default for cluster health (named at P7) and our own sample-api dashboard |
+| Q5 | D5: how many PRs, and where PR #22's fixes and Module 8's records go | CK | **Decided (CK, 2026-11-05): B**, `mod9` then `mod9-monitoring`. **Changed (CK, 2026-11-06):** PR 1 carries kube-prometheus-stack through Flux; the rest moves to PR 2 (D5, L5) |
+| Q6 | D6: how the render tests handle the network | CK | **Decided (CK, 2026-11-05): A** |
+| Q7 | D7: how the renderer is pinned | CK | **Decided (CK, 2026-11-05): A** |
+| Q8 | The budget: which deferrals, if any (Phases) | CK | **Decided (CK, 2026-11-05): none**, ⚠️ about 17.75 h accepted |
+| Q9 | PR 2 holds both sample-api's metrics (P1, released as `0.2.0` only after PR 2 merges) and its `ServiceMonitor` (P4c). Merged together, every namespace's target is down until `0.2.0` reaches it, and the chart's `TargetDown` fires (the Promotion Default assumed `0.2.0` was everywhere first). Split PR 2 (the app and `0.2.0` first, then scraping), or accept the alert for that window? | CK | Open: decide before PR 2 starts (L5) |
