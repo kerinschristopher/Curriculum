@@ -81,8 +81,9 @@ flux create secret git flux-image-updates --namespace=flux-system \
 **5. Wait for everything to be Ready.** The block stops at the first wait that fails. An `apps-*` Kustomization is Ready
 once its objects are applied, not once its pods run, so the last lines wait for the pods: on a fresh cluster the image pull
 can take a few minutes. Each timeout is a limit, not a delay. `infrastructure` also installs the monitoring chart,
-kube-prometheus-stack (Prometheus, Alertmanager and Grafana), and waits for it, so its Ready means the chart's pods are
-running. The first install took about 2 minutes on a laptop; the 10-minute limit leaves room for a slow image pull.
+kube-prometheus-stack (Prometheus, Alertmanager and Grafana), and waits for the install. Prometheus and Alertmanager are
+started by the chart's operator just after, so give them a minute before step 6. The first install took about 2 minutes on
+a laptop; the 10-minute limit leaves room for a slow image pull.
 
 ```bash
 (
