@@ -514,6 +514,20 @@ def test_operator_resourceset_generates_only_the_release_and_its_source():
     assert sorted(spec) == ["chartRef", "driftDetection", "interval", "releaseName", "valuesFrom"], sorted(spec)
 
 
+def test_the_operator_chart_at_the_digest_is_the_input_version(tmp_path):
+    # Flux pulls the digest; people and the image-tag check read the version. An upgrade that bumps the
+    # version but not the digest would keep installing the old chart beside the new image (Module 9 P0e).
+    resourceset, templates = operator_resourceset()
+    inputs = resourceset["spec"]["inputs"][0]
+    reference = f"{templates['OCIRepository']['spec']['url']}@{inputs['digest']}"
+    pull = subprocess.run(["helm", "pull", reference, "--destination", str(tmp_path)], capture_output=True, text=True)
+    if pull.returncode:
+        fail_naming_the_cause(f"Pulling {reference}", "the chart digest", pull.stderr, probe=CHART_PROBE)
+    (tgz,) = tmp_path.glob("*.tgz")
+    show = subprocess.run(["helm", "show", "chart", str(tgz)], capture_output=True, text=True, check=True)
+    assert yaml.safe_load(show.stdout)["version"] == inputs["version"]
+
+
 def test_operator_resourceset_is_applied_and_never_pruned():
     resources = yaml.safe_load((BOOTSTRAP / "kustomization.yaml").read_text())["resources"]
     assert "flux-operator.yaml" in resources, resources
