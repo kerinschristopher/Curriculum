@@ -49,6 +49,13 @@ MONITORING = REPO / "Acme" / "platform" / "infrastructure" / "base" / "monitorin
 IMAGE_REFERENCE = re.compile(rf"[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?/[a-z0-9._/-]+:[\w.-]+(?:@{DIGEST.pattern})?")
 # The control-plane parts kind hides on loopback (Module 9 design, F8): a monitor for them only ever sees "down".
 CONTROL_PLANE = re.compile(r"kube-controller-manager|kube-scheduler|etcd|kube-proxy")
+# What helm-controller reads, by (kind, name): kind's overlay adds a second values ConfigMap, and PR 2 a
+# dashboards one, so the kind alone no longer names one object.
+RELEASE = ("HelmRelease", "kube-prometheus-stack")
+CHART_SOURCE = ("OCIRepository", "kube-prometheus-stack")
+BASE_VALUES = ("ConfigMap", "kube-prometheus-stack-values")
+
+
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -551,9 +558,9 @@ def test_nothing_flux_applies_is_a_secret():
 
 
 def monitoring_objects():
-    """{kind: object} of what Flux's infrastructure Kustomization applies to the monitoring namespace."""
+    """{(kind, name): object} of what Flux's infrastructure Kustomization applies to the monitoring namespace."""
     return {
-        doc["kind"]: doc
+        (doc["kind"], doc["metadata"]["name"]): doc
         for doc in rendered(KIND_INFRASTRUCTURE)
         if doc["metadata"].get("namespace") == "monitoring"
         or (doc["kind"] == "Namespace" and doc["metadata"]["name"] == "monitoring")
@@ -564,8 +571,8 @@ def test_the_release_installs_the_pinned_chart():
     # Module 9 (D1 = C, D3 = C): Flux's infrastructure Kustomization installs kube-prometheus-stack,
     # and which chart it installs can't change without a PR.
     objects = monitoring_objects()
-    assert {"HelmRelease", "OCIRepository"} <= set(objects), sorted(objects)
-    release, source = objects["HelmRelease"], objects["OCIRepository"]
+    assert {RELEASE, CHART_SOURCE} <= set(objects), sorted(objects)
+    release, source = objects[RELEASE], objects[CHART_SOURCE]
     # A wrong name leaves helm-controller no chart: the release never goes Ready, infrastructure fails
     # its wait, and every apps-* stops receiving changes (R11). kubeconform doesn't check names.
     assert release["spec"]["chartRef"] == {"kind": "OCIRepository", "name": source["metadata"]["name"]}, release["spec"]
@@ -583,14 +590,14 @@ def test_the_release_reads_its_values_from_values_yaml():
     # values.yaml is what P4b's render test checks (image digests, selectors), so it must be what
     # helm-controller installs with; otherwise the chart runs on its defaults, tag-only images included.
     objects = monitoring_objects()
-    assert "ConfigMap" in objects, sorted(objects)
-    configmap = objects["ConfigMap"]
+    assert BASE_VALUES in objects, sorted(objects)
+    configmap = objects[BASE_VALUES]
     assert configmap["data"] == {"values.yaml": (MONITORING / "values.yaml").read_text()}, sorted(configmap["data"])
     # The rendered name, not the generator's: kustomize doesn't rewrite valuesFrom, so a hash suffix would
     # leave it naming a ConfigMap that doesn't exist.
-    assert objects["HelmRelease"]["spec"].get("valuesFrom") == [
+    assert objects[RELEASE]["spec"].get("valuesFrom") == [
         {"kind": "ConfigMap", "name": configmap["metadata"]["name"], "valuesKey": "values.yaml"}
-    ], objects["HelmRelease"]["spec"]
+    ], objects[RELEASE]["spec"]
     # helm-controller acts on a values change at once instead of at its 30m interval.
     assert configmap["metadata"].get("labels", {}).get("reconcile.fluxcd.io/watch") == "Enabled", configmap["metadata"]
 
@@ -599,7 +606,7 @@ def test_the_release_sets_only_known_fields():
     # Inline values or postRenderers would beat values.yaml, the file the tests check (Module 8's third
     # review, finding 2). A new field fails here until a test covers it.
     # Characterisation (C6) for this first assert: green on arrival; inline values turn it red (recorded).
-    spec = monitoring_objects()["HelmRelease"]["spec"]
+    spec = monitoring_objects()[RELEASE]["spec"]
     allowed = {"chartRef", "driftDetection", "install", "interval", "timeout", "upgrade", "valuesFrom"}
     assert sorted(set(spec) - allowed) == [], sorted(spec)
     # Helm alone installs a chart's CRDs once and never updates them (F4): CreateReplace moves them with the
@@ -629,7 +636,7 @@ def test_no_flux_apply_holds_a_release_and_a_monitoring_object():
 @pytest.fixture(scope="session")
 def chart(tmp_path_factory):
     """The chart the HelmRelease installs, pulled by its digest as Flux pulls it (D3 = C)."""
-    ref = monitoring_objects()["OCIRepository"]["spec"]["ref"]
+    ref = monitoring_objects()[CHART_SOURCE]["spec"]["ref"]
     reference = f"{KUBE_PROMETHEUS_STACK}@{ref['digest']}"
     folder = tmp_path_factory.mktemp("chart")
     pull = subprocess.run(["helm", "pull", reference, "--destination", str(folder)], capture_output=True, text=True)
@@ -643,7 +650,7 @@ def test_the_chart_at_the_digest_is_the_tagged_version(chart):
     # Flux installs the digest; people read the tag. An upgrade that changes one line of the two makes
     # the PR say one version while the cluster runs another, and nothing else compares them.
     show = subprocess.run(["helm", "show", "chart", str(chart)], capture_output=True, text=True, check=True)
-    tag = monitoring_objects()["OCIRepository"]["spec"]["ref"]["tag"]
+    tag = monitoring_objects()[CHART_SOURCE]["spec"]["ref"]["tag"]
     assert yaml.safe_load(show.stdout)["version"] == tag
 
 
@@ -651,7 +658,7 @@ def test_the_chart_at_the_digest_is_the_tagged_version(chart):
 def chart_render(chart):
     """The chart's manifests as helm-controller renders them: values.yaml, the release's name and namespace,
     and the kind node's Kubernetes version. Hooks included, because Helm renders them too."""
-    release = monitoring_objects()["HelmRelease"]["metadata"]
+    release = monitoring_objects()[RELEASE]["metadata"]
     cluster = yaml.safe_load((REPO / "Acme" / "platform" / "kind" / "sample-api-cluster.yaml").read_text())
     kube_version = re.search(r":v(\d+\.\d+\.\d+)@", cluster["nodes"][0]["image"]).group(1)
     render = subprocess.run(
