@@ -159,6 +159,13 @@ func TestServeDrainsInFlightRequests(t *testing.T) {
 	}
 }
 
+// scrape returns what Prometheus would read from m's metrics handler.
+func scrape(m *metrics) string {
+	rec := httptest.NewRecorder()
+	m.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	return rec.Body.String()
+}
+
 // The counter's labels come from the mux's pattern, never the raw path, so a client can't add series (R8).
 func TestRequestsAreCounted(t *testing.T) {
 	m := newMetrics()
@@ -173,9 +180,7 @@ func TestRequestsAreCounted(t *testing.T) {
 		_ = resp.Body.Close()
 	}
 
-	rec := httptest.NewRecorder()
-	m.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	body := rec.Body.String()
+	body := scrape(m)
 
 	for _, want := range []string{
 		"# TYPE http_requests_total counter",
@@ -185,5 +190,38 @@ func TestRequestsAreCounted(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
 		}
+	}
+}
+
+// The method comes from the client too, so a made-up one must not add series (R8).
+func TestUnknownMethodsAreCountedAsOther(t *testing.T) {
+	m := newMetrics()
+	app := httptest.NewServer(m.instrument(newMux("1.2.3", discard)))
+	defer app.Close()
+
+	for _, method := range []string{"FOO", http.MethodPost} {
+		req, err := http.NewRequest(method, app.URL+"/health", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s /health: %v", method, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	body := scrape(m)
+
+	for _, want := range []string{
+		`http_requests_total{code="405",method="other",route="unmatched"} 1`,
+		`http_requests_total{code="405",method="POST",route="unmatched"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, `method="FOO"`) {
+		t.Errorf("a client-chosen method became a label value\n--- output ---\n%s", body)
 	}
 }

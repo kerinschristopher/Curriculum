@@ -37,7 +37,7 @@ func (m *metrics) instrument(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
 		mux.ServeHTTP(rec, r)
-		m.requests.WithLabelValues(routeOf(mux, r), r.Method, strconv.Itoa(rec.code)).Inc()
+		m.requests.WithLabelValues(routeOf(mux, r), methodOf(r), strconv.Itoa(rec.code)).Inc()
 	})
 }
 
@@ -52,6 +52,17 @@ func routeOf(mux *http.ServeMux, r *http.Request) string {
 		return path
 	}
 	return pattern
+}
+
+// methodOf is the request's method if HTTP defines it, or "other". The client picks the method,
+// and Go's server accepts any token, so a made-up one must not add series (R8).
+func methodOf(r *http.Request) string {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return r.Method
+	}
+	return "other"
 }
 
 // statusRecorder remembers the status a handler sent; one that never calls WriteHeader sent 200.
