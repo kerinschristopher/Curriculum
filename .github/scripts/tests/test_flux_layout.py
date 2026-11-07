@@ -30,8 +30,10 @@ SAMPLE_API_IMAGE = "ghcr.io/kerinschristopher/sample-api"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 # name:tag@digest. The tag has no `/`, so a registry port like host:5000/name@sha256:... does not count.
 TAG_AND_DIGEST = re.compile(rf":[^/:@]+@{DIGEST.pattern}$")
-# Where every remote resource we render comes from today: if it doesn't answer, a failed render is the network.
+# Where the remote resources kustomize renders come from: if it doesn't answer, a failed render is the network.
 EGRESS_PROBE = "https://raw.githubusercontent.com/"
+# Where the chart comes from: if ghcr.io doesn't answer, a failed chart pull is the network.
+CHART_PROBE = "https://ghcr.io/v2/"
 APPS_ENTRY_POINTS = REPO / "Acme" / "platform" / "apps" / "overlays"
 BOOTSTRAP = REPO / "Acme" / "infra" / "bootstrap"
 # Any indentation or list dash, because an indented Secret still reaches the cluster. A future
@@ -85,10 +87,10 @@ def test_a_container_without_an_image_reads_as_unpinned():
     assert [image for image in images if not TAG_AND_DIGEST.search(image)] == [""]
 
 
-def egress_works():
-    """Whether EGRESS_PROBE answers at all. Any HTTP status means the network is up; only no answer means it's down."""
+def egress_works(probe):
+    """Whether `probe` answers at all. Any HTTP status means the network is up; only no answer means it's down."""
     try:
-        with urllib.request.urlopen(urllib.request.Request(EGRESS_PROBE, method="HEAD"), timeout=10):
+        with urllib.request.urlopen(urllib.request.Request(probe, method="HEAD"), timeout=10):
             return True
     except urllib.error.HTTPError:
         return True
@@ -96,12 +98,13 @@ def egress_works():
         return False
 
 
-def fail_naming_the_cause(action, suspect, stderr):
-    """Fail, blaming the network if EGRESS_PROBE doesn't answer, otherwise `suspect` (PR #22 finding 1, D6)."""
-    if egress_works():
-        cause = f"{EGRESS_PROBE} answers, so the cause is {suspect}"
+def fail_naming_the_cause(action, suspect, stderr, probe=None):
+    """Fail, blaming the network if `probe` (default EGRESS_PROBE) doesn't answer, else `suspect` (PR #22 finding 1, D6)."""
+    probe = probe or EGRESS_PROBE
+    if egress_works(probe):
+        cause = f"{probe} answers, so the cause is {suspect}"
     else:
-        cause = f"the network is down ({EGRESS_PROBE} doesn't answer)"
+        cause = f"the network is down ({probe} doesn't answer)"
     pytest.fail(f"{action} failed: {cause}.\n{stderr}")
 
 
@@ -631,7 +634,7 @@ def chart(tmp_path_factory):
     folder = tmp_path_factory.mktemp("chart")
     pull = subprocess.run(["helm", "pull", reference, "--destination", str(folder)], capture_output=True, text=True)
     if pull.returncode:
-        fail_naming_the_cause(f"Pulling {reference}", "the chart reference", pull.stderr)
+        fail_naming_the_cause(f"Pulling {reference}", "the chart reference", pull.stderr, probe=CHART_PROBE)
     (tgz,) = folder.glob("*.tgz")
     return tgz
 
