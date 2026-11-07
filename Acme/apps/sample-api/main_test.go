@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -155,5 +156,34 @@ func TestServeDrainsInFlightRequests(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("serve did not return after the in-flight request finished")
+	}
+}
+
+// The counter's labels come from the mux's pattern, never the raw path, so a client can't add series (R8).
+func TestRequestsAreCounted(t *testing.T) {
+	m := newMetrics()
+	app := httptest.NewServer(m.instrument(newMux("1.2.3", discard)))
+	defer app.Close()
+
+	for _, path := range []string{"/health", "/nope"} {
+		resp, err := http.Get(app.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+	}
+
+	rec := httptest.NewRecorder()
+	m.handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+
+	for _, want := range []string{
+		"# TYPE http_requests_total counter",
+		`http_requests_total{code="200",method="GET",route="/health"} 1`,
+		`http_requests_total{code="404",method="GET",route="unmatched"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
+		}
 	}
 }
