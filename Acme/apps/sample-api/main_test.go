@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -378,5 +379,35 @@ func TestMetricsOnlyOnTheMetricsServer(t *testing.T) {
 	}
 	if want := `http_requests_total{code="200",method="GET",route="/health"} 1`; !strings.Contains(body, want) {
 		t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
+	}
+}
+
+// If one server stops on its own, serveAll must shut the others down and return its error, so the
+// process exits and Kubernetes restarts the pod instead of leaving it half up.
+func TestServeAllStopsWhenOneServerFails(t *testing.T) {
+	healthy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = broken.Close() // its Serve fails at once, as a crashed server would
+
+	served := make(chan error, 1)
+	go func() {
+		served <- serveAll(context.Background(), discard, 5*time.Second, // no SIGTERM
+			listening{srv: newServer(http.NotFoundHandler()), ln: healthy},
+			listening{srv: newServer(http.NotFoundHandler()), ln: broken})
+	}()
+
+	select {
+	case err := <-served:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("serveAll() = %v, want the broken server's error (net.ErrClosed)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveAll kept waiting after a server failed: the healthy one was never shut down")
 	}
 }

@@ -133,12 +133,17 @@ type listening struct {
 	ln  net.Listener
 }
 
-// serveAll runs each server with serve, so a cancelled ctx (SIGTERM) drains them all,
-// and returns only once every one has stopped, with their errors joined.
+// serveAll runs each server with serve, so a cancelled ctx (SIGTERM) drains them all, as does any
+// one server stopping on its own; it returns only once every one has stopped, with their errors joined.
 func serveAll(ctx context.Context, logger *slog.Logger, timeout time.Duration, servers ...listening) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	errs := make(chan error, len(servers))
 	for _, s := range servers {
-		go func() { errs <- serve(ctx, s.srv, s.ln, logger, timeout) }()
+		go func() {
+			errs <- serve(ctx, s.srv, s.ln, logger, timeout)
+			cancel() // one server stopping, for any reason, drains the rest
+		}()
 	}
 	var all []error
 	for range servers {
