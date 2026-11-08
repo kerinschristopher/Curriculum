@@ -179,13 +179,21 @@ func main() {
 }
 
 // run is split out of main so its deferred stop() runs before main calls os.Exit.
+// The app listens on :8080 (the Service and Ingress), metrics on :8081 (Prometheus only).
 func run(logger *slog.Logger, faults bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	ln, err := net.Listen("tcp", ":8080")
+	appLn, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		return err
 	}
-	return serve(ctx, newServer(newMux(version, logger, faults)), ln, logger, shutdownTimeout)
+	metricsLn, err := net.Listen("tcp", ":8081")
+	if err != nil {
+		return err
+	}
+	appSrv, metricsSrv := newServers(version, logger, faults)
+	return serveAll(ctx, logger, shutdownTimeout,
+		listening{srv: appSrv, ln: appLn},
+		listening{srv: metricsSrv, ln: metricsLn})
 }

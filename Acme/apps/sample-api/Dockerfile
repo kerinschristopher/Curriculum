@@ -19,6 +19,6 @@ RUN --mount=type=cache,id=go-build-${TARGETARCH},target=/root/.cache/go-build \
 
 FROM scratch
 COPY --from=builder /server /server
-EXPOSE 8080
+EXPOSE 8080 8081
 USER 65532:65532
 ENTRYPOINT ["/server"]
