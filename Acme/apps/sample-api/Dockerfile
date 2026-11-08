@@ -9,6 +9,8 @@
 FROM golang:1.27.3-alpine@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e5b16ed69dbc00fba4 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
+# Its own step, so Docker reuses the downloaded modules until go.mod or go.sum changes, not on every code change.
+RUN go mod download
 COPY *.go ./
 # Set by BuildKit; declared here so the stage can read it (the cache mount's id).
 ARG TARGETARCH
