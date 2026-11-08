@@ -190,8 +190,15 @@ func run(logger *slog.Logger, faults bool) error {
 	}
 	metricsLn, err := net.Listen("tcp", ":8081")
 	if err != nil {
+		appLn.Close() // nothing serves it yet, so close it here
 		return err
 	}
+	return serveOn(ctx, logger, faults, appLn, metricsLn)
+}
+
+// serveOn serves the app on appLn and /metrics on metricsLn until ctx ends. Split from run so a test
+// can hand it two listeners and check each answers with the right server.
+func serveOn(ctx context.Context, logger *slog.Logger, faults bool, appLn, metricsLn net.Listener) error {
 	appSrv, metricsSrv := newServers(version, logger, faults)
 	return serveAll(ctx, logger, shutdownTimeout,
 		listening{srv: appSrv, ln: appLn},

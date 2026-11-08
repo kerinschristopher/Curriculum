@@ -411,3 +411,48 @@ func TestServeAllStopsWhenOneServerFails(t *testing.T) {
 		t.Fatal("serveAll kept waiting after a server failed: the healthy one was never shut down")
 	}
 }
+
+func TestServeOnPairsEachListenerWithItsServer(t *testing.T) {
+	// run() opens :8080 for the Service and Ingress and :8081 for Prometheus. Paired the wrong way round,
+	// /metrics would be public and the probes would get 404, and no other test would notice.
+	appLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- serveOn(ctx, discard, false, appLn, metricsLn) }()
+
+	for _, tc := range []struct {
+		name string
+		ln   net.Listener
+		path string
+		want int
+	}{
+		{"app", appLn, "/health", http.StatusOK},
+		{"app", appLn, "/metrics", http.StatusNotFound},
+		{"metrics", metricsLn, "/metrics", http.StatusOK},
+		{"metrics", metricsLn, "/health", http.StatusNotFound},
+	} {
+		resp, err := http.Get("http://" + tc.ln.Addr().String() + tc.path)
+		if err != nil {
+			t.Fatalf("GET %s on the %s listener: %v", tc.path, tc.name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Errorf("GET %s on the %s listener = %d, want %d", tc.path, tc.name, resp.StatusCode, tc.want)
+		}
+	}
+
+	// The client keeps spare connections open; on shutdown the server waits up to 5 s for one that
+	// hasn't sent a request, so close them first.
+	http.DefaultClient.CloseIdleConnections()
+	cancel() // as SIGTERM would
+	if err := <-served; err != nil {
+		t.Errorf("serveOn returned %v after cancel, want nil", err)
+	}
+}
