@@ -190,7 +190,7 @@ func run(logger *slog.Logger, faults bool) error {
 	}
 	metricsLn, err := net.Listen("tcp", ":8081")
 	if err != nil {
-		appLn.Close() // nothing serves it yet, so close it here
+		_ = appLn.Close() // nothing serves it yet, so close it here
 		return err
 	}
 	return serveOn(ctx, logger, faults, appLn, metricsLn)

@@ -352,7 +352,7 @@ func TestMetricsOnlyOnTheMetricsServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatalf("reading %s: %v", path, err)
@@ -442,7 +442,7 @@ func TestServeOnPairsEachListenerWithItsServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET %s on the %s listener: %v", tc.path, tc.name, err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode != tc.want {
 			t.Errorf("GET %s on the %s listener = %d, want %d", tc.path, tc.name, resp.StatusCode, tc.want)
 		}
