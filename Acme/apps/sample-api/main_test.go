@@ -310,3 +310,16 @@ func TestFaultRoute(t *testing.T) {
 		}
 	}
 }
+
+// The library's Go runtime and process collectors ride on the app's own registry (design §3).
+func TestRuntimeMetricsAreExported(t *testing.T) {
+	body := scrape(newMetrics())
+	for _, want := range []string{
+		"go_goroutines ",             // Go runtime collector
+		"process_cpu_seconds_total ", // process collector
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
+		}
+	}
+}
