@@ -55,6 +55,7 @@ RELEASE = ("HelmRelease", "kube-prometheus-stack")
 CHART_SOURCE = ("OCIRepository", "kube-prometheus-stack")
 BASE_VALUES = ("ConfigMap", "kube-prometheus-stack-values")
 KIND_VALUES = ("ConfigMap", "kube-prometheus-stack-values-kind")
+SAMPLE_API_ENVS = ("dev", "stage", "prod")
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -68,6 +69,23 @@ def test_every_env_overlay_pins_sample_api_by_digest():
         if "newTag" not in image or not DIGEST.fullmatch(image.get("digest", "")):
             unpinned.append(path.parent.name)
     assert unpinned == []
+
+
+def sample_api_objects(env):
+    """What Flux applies for `env`'s apps entry point, keyed by (kind, name)."""
+    return {(doc["kind"], doc["metadata"]["name"]): doc for doc in rendered(f"Acme/platform/apps/overlays/{env}")}
+
+
+def test_the_service_exposes_the_metrics_port_the_app_listens_on():
+    # P1e (FR2): the app serves /metrics on :8081 (main.go, P1d), and Prometheus reaches it through the
+    # Service's `metrics` port (P4c's ServiceMonitor names it). A named targetPort is looked up in the container.
+    for env in SAMPLE_API_ENVS:
+        objects = sample_api_objects(env)
+        [container] = objects[("Deployment", "sample-api")]["spec"]["template"]["spec"]["containers"]
+        ports = {port["name"]: port["containerPort"] for port in container["ports"]}
+        assert ports.get("metrics") == 8081, (env, ports)
+        targets = {port["name"]: port["targetPort"] for port in objects[("Service", "sample-api")]["spec"]["ports"]}
+        assert ports.get(targets.get("metrics"), targets.get("metrics")) == 8081, (env, targets)
 
 
 def container_images(node):
