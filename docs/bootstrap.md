@@ -261,8 +261,8 @@ Afterwards the `ResourceSet` can still show Ready, up to an hour. That only mean
 
 - **A hand `helm upgrade` fails or doesn't last.** Once Flux has taken over, a plain `helm upgrade` fails on conflicts and
   leaves a `failed` revision. With `--force-conflicts` it succeeds, but Flux undoes it at its next reconcile, within 30 minutes.
-  Change the Operator by PR instead: `version` in `flux-operator.yaml`, `tag@digest` in `flux-operator-values.yaml`, CI's
-  Operator version and checksums, and the two Helm commands in this file.
+  Change the Operator by PR instead: `version` and the chart `digest` in `flux-operator.yaml`, `tag@digest` in
+  `flux-operator-values.yaml`, CI's Operator version and checksums, and the two Helm commands in this file.
 - **`helm history` mixes time zones.** Revisions from the CLI print in local time, and Flux's in UTC.
 - **`apps-*` briefly not Ready after a merge.** Each one waits for `infrastructure` to reach the same commit, then retries.
 - **"skipped" in `flux-system`'s events.** If `flux-instance.yaml` or `flux-operator.yaml` leaves Git, Flux deletes nothing
