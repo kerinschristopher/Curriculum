@@ -35,6 +35,12 @@ spec:
                 configMapKeyRef:
                   name: sample-api-config
                   key: LOG_LEVEL
+            - name: FAULT_INJECTION
+              valueFrom:
+                configMapKeyRef:
+                  name: sample-api-config
+                  key: FAULT_INJECTION
+                  optional: true
           resources:
             requests:
               cpu: 50m

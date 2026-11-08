@@ -88,6 +88,28 @@ def test_the_service_exposes_the_metrics_port_the_app_listens_on():
         assert ports.get(targets.get("metrics"), targets.get("metrics")) == 8081, (env, targets)
 
 
+def env_value(objects, container, name):
+    """`name`'s value in `container`, following a configMapKeyRef into the rendered ConfigMap; None if unset."""
+    for var in container.get("env", []):
+        if var["name"] == name:
+            if "value" in var:
+                return var["value"]
+            ref = var["valueFrom"]["configMapKeyRef"]
+            return objects[("ConfigMap", ref["name"])].get("data", {}).get(ref["key"])
+    return None
+
+
+def test_only_dev_turns_fault_injection_on():
+    # P1e (R7): /fault answers 500 only where FAULT_INJECTION=enabled (main.go, P1c), so only dev may set it.
+    # The stage and prod half is characterisation (C6): green on arrival. The mutation is in the design log.
+    found = {}
+    for env in SAMPLE_API_ENVS:
+        objects = sample_api_objects(env)
+        [container] = objects[("Deployment", "sample-api")]["spec"]["template"]["spec"]["containers"]
+        found[env] = env_value(objects, container, "FAULT_INJECTION")
+    assert found == {"dev": "enabled", "stage": None, "prod": None}
+
+
 def container_images(node):
     """Every container's image under a rendered object, for any workload kind."""
     if isinstance(node, dict):
