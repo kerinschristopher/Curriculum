@@ -84,14 +84,14 @@ image pull can take a few minutes. Each timeout is a limit, not a delay. `infras
 chart, kube-prometheus-stack (Prometheus, Alertmanager and Grafana), and is Ready once Helm has finished. Prometheus and
 Alertmanager aren't objects the chart creates: the chart's operator creates them while the install runs, so Helm
 finishing doesn't promise they're ready, and the last lines wait for each to exist and then to be ready. The first install
-took about 2 minutes on a laptop; the 10-minute limit leaves room for a slow image pull.
+took about 2 minutes on a laptop; the 15-minute limit leaves room for a slow image pull.
 
 ```bash
 (
 set -eu
 for name in infrastructure apps-dev apps-stage apps-prod; do
   kubectl -n flux-system wait "kustomization/$name" --for=create --timeout=5m \
-    && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=10m \
+    && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=15m \
     || exit 1
 done
 kubectl -n flux-system wait helmrelease/flux-operator --for=create --timeout=5m \

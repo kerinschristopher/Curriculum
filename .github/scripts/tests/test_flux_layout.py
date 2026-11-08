@@ -433,6 +433,25 @@ def test_platform_applies_infrastructure_then_each_env():
         assert spec.get("deletionPolicy") == "Orphan", name
 
 
+def seconds(duration):
+    """A Go duration as Flux writes it ("10m", "1h30m", "5m0s"), in seconds; anything else fails."""
+    parts = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", duration)
+    assert duration and parts, duration
+    return sum(int(value or 0) * unit for value, unit in zip(parts.groups(), (3600, 60, 1)))
+
+
+def test_infrastructure_outlasts_every_helm_attempt_it_waits_on():
+    # Carry-overs D6: infrastructure (wait: true) waits for each HelmRelease it applies to be Ready, and its
+    # clock starts before Helm's attempt does. If it isn't longer, a slow but healthy install marks
+    # infrastructure failed and holds back every apps-* (dependsOn) until its next retry.
+    outer = seconds(flux_kustomizations()["infrastructure"]["timeout"])
+    releases = [doc for doc in rendered(KIND_INFRASTRUCTURE) if doc["kind"] == "HelmRelease"]
+    assert releases, KIND_INFRASTRUCTURE
+    # helm-controller's default timeout is 5m.
+    inner = {doc["metadata"]["name"]: seconds(doc["spec"].get("timeout", "5m")) for doc in releases}
+    assert {name: limit for name, limit in inner.items() if limit >= outer} == {}, (outer, inner)
+
+
 def test_ci_renders_exactly_the_folders_flux_applies():
     # ENTRY_POINTS is kept by hand, and the render loop and digest tests trust it: a folder Flux
     # applies but the list misses deploys unrendered and unchecked (third C3 review, finding 3).
