@@ -702,6 +702,15 @@ def test_the_release_reverts_hand_edits():
     assert ignore in drift.get("ignore", []), drift
 
 
+def test_kind_prometheus_keeps_two_days():
+    # Carry-overs D5: kind's Prometheus stores its samples in emptyDir, which a restart wipes, so longer
+    # history only costs the laptop memory and disk. Losing this line brings back the chart's 10d with no
+    # failure, on a VM sized for 2d (P6 measured 216 MiB). The values test proves the release reads this file.
+    # Characterisation (C6): green on arrival; the mutation is in the design log.
+    values = yaml.safe_load(monitoring_objects()[KIND_VALUES]["data"]["values.yaml"])
+    assert values["prometheus"]["prometheusSpec"].get("retention") == "2d", values["prometheus"]["prometheusSpec"]
+
+
 def test_no_flux_apply_holds_a_release_and_a_monitoring_object():
     # F22: Flux dry-runs a Kustomization's objects in one batch before applying any. A PrometheusRule
     # beside the HelmRelease that brings its CRD fails that dry-run, so the release is never applied and
