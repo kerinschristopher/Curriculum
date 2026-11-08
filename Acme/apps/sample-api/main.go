@@ -66,10 +66,19 @@ func healthHandler(version string, logger *slog.Logger) http.HandlerFunc {
 	}
 }
 
+// faultHandler always fails, so the error-rate alert can be proven with real 500s.
+func faultHandler(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "fault injected", http.StatusInternalServerError)
+}
+
 // newMux holds all route wiring, so tests exercise the real paths rather than calling handlers directly.
-func newMux(version string, logger *slog.Logger) *http.ServeMux {
+// /fault exists only when faults is on, which only dev's overlay sets (R7).
+func newMux(version string, logger *slog.Logger, faults bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler(version, logger))
+	if faults {
+		mux.HandleFunc("GET /fault", faultHandler)
+	}
 	return mux
 }
 
@@ -115,15 +124,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	faults, err := parseFaultInjection(os.Getenv("FAULT_INJECTION"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
 
 	// Emit at no lower than the configured level so the resolved level is always visible.
 	logger.Log(context.Background(), max(slog.LevelInfo, level), "starting",
-		"version", version, "log_level", level.String())
+		"version", version, "log_level", level.String(), "fault_injection", faults)
 
-	if err := run(logger); err != nil {
+	if err := run(logger, faults); err != nil {
 		logger.Error("server exited", "err", err)
 		os.Exit(1)
 	}
@@ -131,7 +145,7 @@ func main() {
 }
 
 // run is split out of main so its deferred stop() runs before main calls os.Exit.
-func run(logger *slog.Logger) error {
+func run(logger *slog.Logger, faults bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
@@ -139,5 +153,5 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	return serve(ctx, newServer(newMux(version, logger)), ln, logger, shutdownTimeout)
+	return serve(ctx, newServer(newMux(version, logger, faults)), ln, logger, shutdownTimeout)
 }

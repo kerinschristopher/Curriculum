@@ -93,7 +93,7 @@ func TestHealthHandler(t *testing.T) {
 
 // Goes through the real mux, so a wrong route path fails here (PR #6 review).
 func TestRoutes(t *testing.T) {
-	srv := httptest.NewServer(newMux("1.2.3", discard))
+	srv := httptest.NewServer(newMux("1.2.3", discard, false))
 	defer srv.Close()
 
 	cases := []struct {
@@ -186,17 +186,17 @@ func scrape(m *metrics) string {
 }
 
 // instrumentedApp serves the real mux through a fresh metrics middleware until the test ends.
-func instrumentedApp(t *testing.T) (*metrics, *httptest.Server) {
+func instrumentedApp(t *testing.T, faults bool) (*metrics, *httptest.Server) {
 	t.Helper()
 	m := newMetrics()
-	app := httptest.NewServer(m.instrument(newMux("1.2.3", discard)))
+	app := httptest.NewServer(m.instrument(newMux("1.2.3", discard, faults)))
 	t.Cleanup(app.Close)
 	return m, app
 }
 
 // The counter's labels come from the mux's pattern, never the raw path, so a client can't add series (R8).
 func TestRequestsAreCounted(t *testing.T) {
-	m, app := instrumentedApp(t)
+	m, app := instrumentedApp(t, false)
 
 	for _, path := range []string{"/health", "/nope"} {
 		resp, err := http.Get(app.URL + path)
@@ -221,7 +221,7 @@ func TestRequestsAreCounted(t *testing.T) {
 
 // The method comes from the client too, so a made-up one must not add series (R8).
 func TestUnknownMethodsAreCountedAsOther(t *testing.T) {
-	m, app := instrumentedApp(t)
+	m, app := instrumentedApp(t, false)
 
 	for _, method := range []string{"FOO", http.MethodPost} {
 		req, err := http.NewRequest(method, app.URL+"/health", nil)
@@ -252,7 +252,7 @@ func TestUnknownMethodsAreCountedAsOther(t *testing.T) {
 
 // The histogram carries our edges and labels; client_golang does the bucket maths, so the test doesn't redo it.
 func TestRequestLatencyIsObserved(t *testing.T) {
-	m, app := instrumentedApp(t)
+	m, app := instrumentedApp(t, false)
 
 	resp, err := http.Get(app.URL + "/health")
 	if err != nil {
@@ -280,5 +280,33 @@ func TestRequestLatencyIsObserved(t *testing.T) {
 	want := []string{"0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "+Inf"}
 	if !slices.Equal(got, want) {
 		t.Errorf("bucket edges = %v, want %v\n--- output ---\n%s", got, want, body)
+	}
+}
+
+// /fault answers 500 only when switched on, and those 500s are counted like any route's: they are the alert's input.
+// Switched off, it is just an unknown path.
+func TestFaultRoute(t *testing.T) {
+	for _, tc := range []struct {
+		faults    bool
+		wantCode  int
+		wantCount string
+	}{
+		{true, http.StatusInternalServerError, `http_requests_total{code="500",method="GET",route="/fault"} 1`},
+		{false, http.StatusNotFound, `http_requests_total{code="404",method="GET",route="unmatched"} 1`},
+	} {
+		m, app := instrumentedApp(t, tc.faults)
+
+		resp, err := http.Get(app.URL + "/fault")
+		if err != nil {
+			t.Fatalf("faults=%v: GET /fault: %v", tc.faults, err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != tc.wantCode {
+			t.Errorf("faults=%v: GET /fault = %d, want %d", tc.faults, resp.StatusCode, tc.wantCode)
+		}
+		if body := scrape(m); !strings.Contains(body, tc.wantCount) {
+			t.Errorf("faults=%v: metrics output lacks %q\n--- output ---\n%s", tc.faults, tc.wantCount, body)
+		}
 	}
 }
