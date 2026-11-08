@@ -48,6 +48,23 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
+// Only "enabled" turns /fault on and only unset leaves it off; anything else fails startup,
+// so a typo can't silently leave it off (or on).
+func TestParseFaultInjection(t *testing.T) {
+	for raw, want := range map[string]bool{"": false, "enabled": true} {
+		got, err := parseFaultInjection(raw)
+		if err != nil || got != want {
+			t.Errorf("parseFaultInjection(%q) = %v, %v; want %v, nil", raw, got, err, want)
+		}
+	}
+
+	for _, raw := range []string{"Enabled", "true", "1", "on", "disabled", " enabled"} {
+		if _, err := parseFaultInjection(raw); err == nil {
+			t.Errorf("parseFaultInjection(%q) error = nil, want an error", raw)
+		}
+	}
+}
+
 // Salvaged from depmod6; the handler now takes a logger instead of a raw log-level string.
 func TestHealthHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)

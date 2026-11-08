@@ -39,6 +39,18 @@ func parseLogLevel(raw string) (slog.Level, error) {
 	return level, nil
 }
 
+// parseFaultInjection accepts only "enabled" (on) or unset (off) and rejects anything else,
+// so a typo fails startup instead of silently leaving /fault off, or on (R7).
+func parseFaultInjection(raw string) (bool, error) {
+	switch raw {
+	case "":
+		return false, nil
+	case "enabled":
+		return true, nil
+	}
+	return false, fmt.Errorf("invalid FAULT_INJECTION %q: must be \"enabled\", or unset to turn it off", raw)
+}
+
 type healthResponse struct {
 	Status  string `json:"status"`
 	Version string `json:"version"`
