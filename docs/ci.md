@@ -107,8 +107,8 @@ verified"). What that allows, and the gaps left open, are in `docs/iam.md` ("Git
     part is the race-instrumented standard library. The key is the OS, the Go version (or `go.mod` for `lint`) and a hash of
     `go.mod` and every `.go` file. On a code change the restore key falls back to the newest older cache, so only changed packages
     recompile. `-count=1` still runs every test: only compiled code is reused, never test results.
-  - **Not `setup-go`'s cache:** that one is keyed on `go.sum`, and this app has none (standard library only, nothing to
-    download).
+  - **Not `setup-go`'s cache:** it saves the build cache too, keyed on `go.sum` alone, so a code change would never
+    refresh it. The few modules in `go.sum` (`client_golang` and its dependencies) are downloaded each run instead.
   - **golangci-lint** keeps its own analysis cache (the action's default).
   - **`build-scan`'s image layers (BuildKit, `type=gha`, `scope=sample-api`, `mode=max`).** Every Dockerfile step whose inputs
     didn't change is reused (`CACHED` in the log). `mode=max` also saves the builder stage, where the compile runs; `mode=min`
