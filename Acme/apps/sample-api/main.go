@@ -93,6 +93,15 @@ func newServer(h http.Handler) *http.Server {
 	}
 }
 
+// newServers builds the app server (every request counted) and the metrics server (only /metrics),
+// sharing one registry. /metrics stays off the app's port, so the Ingress can never expose it.
+func newServers(version string, logger *slog.Logger, faults bool) (appSrv, metricsSrv *http.Server) {
+	m := newMetrics()
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", m.handler())
+	return newServer(m.instrument(newMux(version, logger, faults))), newServer(metricsMux)
+}
+
 // serve runs srv on ln until ctx is cancelled, then stops accepting connections and waits up to
 // timeout for in-flight requests to finish. Kubernetes sends SIGTERM when it stops a pod; readiness
 // takes the pod out of the Service, and this drain lets requests already in flight complete.

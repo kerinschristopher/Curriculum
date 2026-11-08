@@ -323,3 +323,48 @@ func TestRuntimeMetricsAreExported(t *testing.T) {
 		}
 	}
 }
+
+// /metrics is served only by the metrics server (:8081), so the Ingress (→ :8080) never exposes it,
+// and requests to the app server are counted in what the metrics server shows.
+func TestMetricsOnlyOnTheMetricsServer(t *testing.T) {
+	appSrv, metricsSrv := newServers("1.2.3", discard, false)
+	app := httptest.NewServer(appSrv.Handler)
+	t.Cleanup(app.Close)
+	mets := httptest.NewServer(metricsSrv.Handler)
+	t.Cleanup(mets.Close)
+
+	get := func(base, path string) (int, string) {
+		t.Helper()
+		resp, err := http.Get(base + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		return resp.StatusCode, string(body)
+	}
+
+	for _, tc := range []struct {
+		server, base, path string
+		want               int
+	}{
+		{"app", app.URL, "/health", http.StatusOK},
+		{"app", app.URL, "/metrics", http.StatusNotFound},
+		{"metrics", mets.URL, "/health", http.StatusNotFound},
+	} {
+		if got, _ := get(tc.base, tc.path); got != tc.want {
+			t.Errorf("%s server GET %s = %d, want %d", tc.server, tc.path, got, tc.want)
+		}
+	}
+
+	code, body := get(mets.URL, "/metrics")
+	if code != http.StatusOK {
+		t.Fatalf("metrics server GET /metrics = %d, want 200", code)
+	}
+	if want := `http_requests_total{code="200",method="GET",route="/health"} 1`; !strings.Contains(body, want) {
+		t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
+	}
+}
