@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -166,11 +168,18 @@ func scrape(m *metrics) string {
 	return rec.Body.String()
 }
 
-// The counter's labels come from the mux's pattern, never the raw path, so a client can't add series (R8).
-func TestRequestsAreCounted(t *testing.T) {
+// instrumentedApp serves the real mux through a fresh metrics middleware until the test ends.
+func instrumentedApp(t *testing.T) (*metrics, *httptest.Server) {
+	t.Helper()
 	m := newMetrics()
 	app := httptest.NewServer(m.instrument(newMux("1.2.3", discard)))
-	defer app.Close()
+	t.Cleanup(app.Close)
+	return m, app
+}
+
+// The counter's labels come from the mux's pattern, never the raw path, so a client can't add series (R8).
+func TestRequestsAreCounted(t *testing.T) {
+	m, app := instrumentedApp(t)
 
 	for _, path := range []string{"/health", "/nope"} {
 		resp, err := http.Get(app.URL + path)
@@ -195,9 +204,7 @@ func TestRequestsAreCounted(t *testing.T) {
 
 // The method comes from the client too, so a made-up one must not add series (R8).
 func TestUnknownMethodsAreCountedAsOther(t *testing.T) {
-	m := newMetrics()
-	app := httptest.NewServer(m.instrument(newMux("1.2.3", discard)))
-	defer app.Close()
+	m, app := instrumentedApp(t)
 
 	for _, method := range []string{"FOO", http.MethodPost} {
 		req, err := http.NewRequest(method, app.URL+"/health", nil)
@@ -223,5 +230,38 @@ func TestUnknownMethodsAreCountedAsOther(t *testing.T) {
 	}
 	if strings.Contains(body, `method="FOO"`) {
 		t.Errorf("a client-chosen method became a label value\n--- output ---\n%s", body)
+	}
+}
+
+// The histogram carries our edges and labels; client_golang does the bucket maths, so the test doesn't redo it.
+func TestRequestLatencyIsObserved(t *testing.T) {
+	m, app := instrumentedApp(t)
+
+	resp, err := http.Get(app.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	body := scrape(m)
+
+	for _, want := range []string{
+		"# TYPE http_request_duration_seconds histogram",
+		`http_request_duration_seconds_count{code="200",method="GET",route="/health"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
+		}
+	}
+
+	// Edges only, not per-bucket counts: those depend on how fast the request ran.
+	edge := regexp.MustCompile(`(?m)^http_request_duration_seconds_bucket\{code="200",method="GET",route="/health",le="([^"]+)"\}`)
+	var got []string
+	for _, match := range edge.FindAllStringSubmatch(body, -1) {
+		got = append(got, match[1])
+	}
+	want := []string{"0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "+Inf"}
+	if !slices.Equal(got, want) {
+		t.Errorf("bucket edges = %v, want %v\n--- output ---\n%s", got, want, body)
 	}
 }

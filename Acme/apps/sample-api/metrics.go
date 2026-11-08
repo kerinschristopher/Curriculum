@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -13,6 +14,7 @@ import (
 type metrics struct {
 	reg      *prometheus.Registry
 	requests *prometheus.CounterVec
+	latency  *prometheus.HistogramVec
 }
 
 func newMetrics() *metrics {
@@ -22,8 +24,14 @@ func newMetrics() *metrics {
 			Name: "http_requests_total",
 			Help: "HTTP requests handled, by route, method and status code.",
 		}, []string{"route", "method", "code"}),
+		// DefBuckets without 5 s and 10 s: anything slower than 2.5 s is "+Inf" for this API.
+		latency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "http_request_duration_seconds",
+			Help:    "Time to handle HTTP requests, by route, method and status code.",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
+		}, []string{"route", "method", "code"}),
 	}
-	m.reg.MustRegister(m.requests)
+	m.reg.MustRegister(m.requests, m.latency)
 	return m
 }
 
@@ -32,12 +40,17 @@ func (m *metrics) handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
 
-// instrument counts every request mux handles.
+// instrument counts and times every request mux handles.
 func (m *metrics) instrument(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+		start := time.Now()
 		mux.ServeHTTP(rec, r)
-		m.requests.WithLabelValues(routeOf(mux, r), methodOf(r), strconv.Itoa(rec.code)).Inc()
+		elapsed := time.Since(start).Seconds()
+
+		labels := []string{routeOf(mux, r), methodOf(r), strconv.Itoa(rec.code)}
+		m.requests.WithLabelValues(labels...).Inc()
+		m.latency.WithLabelValues(labels...).Observe(elapsed)
 	})
 }
 
