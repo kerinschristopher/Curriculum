@@ -690,6 +690,18 @@ def test_the_release_sets_only_known_fields():
     assert spec.get("upgrade") == {"crds": "CreateReplace", "strategy": {"name": "RetryOnFailure"}}, spec.get("upgrade")
 
 
+def test_the_release_reverts_hand_edits():
+    # Carry-overs D5, reopening L6's cycle 4: without `mode: enabled`, a kubectl edit of a chart object stays
+    # until the chart or values change, and nothing fails (`warn` only logs it). P9 proved the behaviour live
+    # (Grafana scaled to 0, put back); this guards the setting that gives it. The ignore stops every reconcile
+    # stripping the webhook's annotation from each PrometheusRule, and the webhook re-adding it (design F10).
+    # Characterisation (C6): green on arrival; the mutations are in the design log.
+    drift = monitoring_objects()[RELEASE]["spec"].get("driftDetection", {})
+    assert drift.get("mode") == "enabled", drift
+    ignore = {"paths": ["/metadata/annotations/prometheus-operator-validated"], "target": {"kind": "PrometheusRule"}}
+    assert ignore in drift.get("ignore", []), drift
+
+
 def test_no_flux_apply_holds_a_release_and_a_monitoring_object():
     # F22: Flux dry-runs a Kustomization's objects in one batch before applying any. A PrometheusRule
     # beside the HelmRelease that brings its CRD fails that dry-run, so the release is never applied and
