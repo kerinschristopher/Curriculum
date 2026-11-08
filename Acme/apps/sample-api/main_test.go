@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -121,60 +122,71 @@ func TestRoutes(t *testing.T) {
 	}
 }
 
-// A request already in flight when shutdown starts must still complete, and serve must wait for it.
+// Requests already in flight on both servers when shutdown starts must still complete, and serveAll
+// must wait for every server, not just the first to finish.
 func TestServeDrainsInFlightRequests(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	started := make(chan struct{})
-	release := make(chan struct{})
-	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(started)
-		<-release
-		_, _ = io.WriteString(w, "done")
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	served := make(chan error, 1)
-	go func() { served <- serve(ctx, newServer(slow), ln, discard, 5*time.Second) }()
-
 	type result struct {
 		status int
 		err    error
 	}
-	got := make(chan result, 1)
-	go func() {
-		resp, err := http.Get("http://" + ln.Addr().String())
+	var started sync.WaitGroup
+	var servers []listening
+	var releases []chan struct{}
+	for range 2 {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			got <- result{err: err}
-			return
+			t.Fatal(err)
 		}
-		_ = resp.Body.Close()
-		got <- result{status: resp.StatusCode}
-	}()
+		release := make(chan struct{})
+		started.Add(1)
+		slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			started.Done()
+			<-release
+			_, _ = io.WriteString(w, "done")
+		})
+		servers = append(servers, listening{srv: newServer(slow), ln: ln})
+		releases = append(releases, release)
+	}
 
-	<-started
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() { served <- serveAll(ctx, discard, 5*time.Second, servers...) }()
+
+	got := make(chan result, len(servers))
+	for _, s := range servers {
+		go func() {
+			resp, err := http.Get("http://" + s.ln.Addr().String())
+			if err != nil {
+				got <- result{err: err}
+				return
+			}
+			_ = resp.Body.Close()
+			got <- result{status: resp.StatusCode}
+		}()
+	}
+
+	started.Wait()
 	cancel() // what SIGTERM does in main
 
-	select {
-	case err := <-served:
-		t.Fatalf("serve returned (%v) while a request was still in flight", err)
-	case <-time.After(200 * time.Millisecond):
-	}
-
-	close(release)
-	if r := <-got; r.err != nil || r.status != http.StatusOK {
-		t.Fatalf("in-flight request: status %d, err %v; want 200, nil", r.status, r.err)
+	for i, release := range releases {
+		select {
+		case err := <-served:
+			t.Fatalf("serveAll returned (%v) with %d request(s) still in flight", err, len(releases)-i)
+		case <-time.After(200 * time.Millisecond):
+		}
+		close(release)
+		if r := <-got; r.err != nil || r.status != http.StatusOK {
+			t.Fatalf("in-flight request: status %d, err %v; want 200, nil", r.status, r.err)
+		}
 	}
 	select {
 	case err := <-served:
 		if err != nil {
-			t.Fatalf("serve() = %v, want nil after a clean drain", err)
+			t.Fatalf("serveAll() = %v, want nil after a clean drain", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serve did not return after the in-flight request finished")
+		t.Fatal("serveAll did not return after every in-flight request finished")
 	}
 }
 

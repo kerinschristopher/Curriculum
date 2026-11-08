@@ -127,6 +127,26 @@ func serve(ctx context.Context, srv *http.Server, ln net.Listener, logger *slog.
 	return nil
 }
 
+// listening pairs a server with the listener it serves on.
+type listening struct {
+	srv *http.Server
+	ln  net.Listener
+}
+
+// serveAll runs each server with serve, so a cancelled ctx (SIGTERM) drains them all,
+// and returns only once every one has stopped, with their errors joined.
+func serveAll(ctx context.Context, logger *slog.Logger, timeout time.Duration, servers ...listening) error {
+	errs := make(chan error, len(servers))
+	for _, s := range servers {
+		go func() { errs <- serve(ctx, s.srv, s.ln, logger, timeout) }()
+	}
+	var all []error
+	for range servers {
+		all = append(all, <-errs)
+	}
+	return errors.Join(all...)
+}
+
 func main() {
 	level, err := parseLogLevel(getEnvOrDefault("LOG_LEVEL", "info"))
 	if err != nil {
