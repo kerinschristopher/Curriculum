@@ -52,23 +52,25 @@ func (m *metrics) instrument(mux *http.ServeMux) http.Handler {
 		mux.ServeHTTP(rec, r)
 		elapsed := time.Since(start).Seconds()
 
-		labels := []string{routeOf(mux, r), methodOf(r), strconv.Itoa(rec.code)}
+		labels := []string{routeOf(r), methodOf(r), strconv.Itoa(rec.code)}
 		m.requests.WithLabelValues(labels...).Inc()
 		m.latency.WithLabelValues(labels...).Observe(elapsed)
 	})
 }
 
-// routeOf is the path half of the pattern the mux matched ("GET /health" → "/health"), or "unmatched".
+// routeOf is the route label: the path half of the pattern that served r ("GET /health" → "/health").
+// mux.ServeHTTP sets r.Pattern, so call it only after ServeHTTP. "unmatched" means no pattern served r:
+// an unknown path (404) or a known path with the wrong method (405, e.g. POST /health). A redirect to
+// the cleaned path (//health → 307) carries the pattern it redirects to.
 // It never uses the raw path, so a client sending random paths can't create new series (R8).
-func routeOf(mux *http.ServeMux, r *http.Request) string {
-	_, pattern := mux.Handler(r)
-	if pattern == "" {
+func routeOf(r *http.Request) string {
+	if r.Pattern == "" {
 		return "unmatched"
 	}
-	if _, path, found := strings.Cut(pattern, " "); found {
+	if _, path, found := strings.Cut(r.Pattern, " "); found {
 		return path
 	}
-	return pattern
+	return r.Pattern
 }
 
 // methodOf is the request's method if HTTP defines it, or "other". The client picks the method,
