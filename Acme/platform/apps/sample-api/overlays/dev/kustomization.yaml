@@ -6,8 +6,8 @@ resources:
   - ../../base
 images:
   - name: ghcr.io/kerinschristopher/sample-api
-    newTag: 0.1.4 # {"$imagepolicy": "flux-system:sample-api:tag"}
-    digest: sha256:e8f5683cd45391453bf59d297436e5c571ae144fe390d1935f91f6bcd3837588 # {"$imagepolicy": "flux-system:sample-api:digest"}
+    newTag: 0.2.0 # {"$imagepolicy": "flux-system:sample-api:tag"}
+    digest: sha256:f05d8f88a20e3d172a556c758cacdd5539ba329ec27d7464e6b52e8e59eeedc9 # {"$imagepolicy": "flux-system:sample-api:digest"}
 configMapGenerator:
   - name: sample-api-config
     behavior: merge
