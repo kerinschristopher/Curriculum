@@ -1,4 +1,5 @@
-# What Flux applies after itself (design doc §1, Defaults §7): ingress-nginx first, then each environment.
+# What Flux applies after itself (design doc §1, Defaults §7): infrastructure first (ingress-nginx, the
+# monitoring stack), then monitoring-config and each environment, which all wait on it.
 # prune: deleting from Git deletes from the cluster. deletionPolicy Orphan: deleting these Flux objects leaves
 # the workloads running.
 ---
@@ -17,6 +18,27 @@ spec:
     kind: GitRepository
     name: flux-system
   path: ./Acme/platform/infrastructure/overlays/kind
+  prune: true
+  deletionPolicy: Orphan
+  wait: true
+---
+# Module 9 D1 = C: what needs the monitoring chart's CRDs (the alert rule, our dashboard). It waits for
+# infrastructure to be Ready, so a PrometheusRule is never applied before the chart has installed its CRD (F22).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: monitoring-config
+  namespace: flux-system
+spec:
+  dependsOn:
+    - name: infrastructure
+  interval: 10m
+  retryInterval: 2m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./Acme/platform/infrastructure/monitoring-config
   prune: true
   deletionPolicy: Orphan
   wait: true

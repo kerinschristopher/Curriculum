@@ -243,6 +243,7 @@ jobs:
                      Acme/platform/apps/sample-api/overlays/* \
                      Acme/platform/apps/overlays/* \
                      Acme/platform/infrastructure/overlays/* \
+                     Acme/platform/infrastructure/monitoring-config \
                      Acme/infra/bootstrap; do
             echo "== $dir"
             kustomize build "$dir" > "$RUNNER_TEMP/rendered/${dir//\//_}.yaml"

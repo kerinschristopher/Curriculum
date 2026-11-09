@@ -236,7 +236,9 @@ def test_every_container_flux_deploys_has_a_tag_and_digest():
     for entry in ENTRY_POINTS:
         found[entry] = [image for doc in rendered(entry) for image in container_images(doc)]
     # Bootstrap holds no containers: test_operator_image_is_pinned_by_tag_and_digest covers its image.
-    empty = [entry for entry, images in found.items() if not images and entry != "Acme/infra/bootstrap"]
+    # monitoring-config holds only the alert rule and dashboard ConfigMaps (Module 9 D1 = C).
+    no_containers = {"Acme/infra/bootstrap", "Acme/platform/infrastructure/monitoring-config"}
+    empty = [entry for entry, images in found.items() if not images and entry not in no_containers]
     assert empty == []
     unpinned = sorted({i for images in found.values() for i in images if not TAG_AND_DIGEST.search(i)})
     assert unpinned == []
@@ -432,10 +434,16 @@ def test_platform_applies_infrastructure_then_each_env():
     kustomizations = flux_kustomizations()
     envs = sorted(path.parent.name for path in APPS_ENTRY_POINTS.glob("*/kustomization.yaml"))
     assert envs, APPS_ENTRY_POINTS
-    assert sorted(kustomizations) == sorted(["infrastructure"] + [f"apps-{env}" for env in envs])
+    assert sorted(kustomizations) == sorted(["infrastructure", "monitoring-config"] + [f"apps-{env}" for env in envs])
     assert kustomizations["infrastructure"]["path"] == "./Acme/platform/infrastructure/overlays/kind"
     # The ingress webhook must be running before any Ingress is applied.
     assert kustomizations["infrastructure"].get("wait") is True
+    # Module 9 D1 = C: the alert rule and our dashboard need the chart's CRDs, so they apply only after
+    # infrastructure is Ready (F22). wait: Ready means the rule is in the cluster, not just sent.
+    config = kustomizations["monitoring-config"]
+    assert config["path"] == "./Acme/platform/infrastructure/monitoring-config"
+    assert {"name": "infrastructure"} in config.get("dependsOn", [])
+    assert config.get("wait") is True
     for env in envs:
         spec = kustomizations[f"apps-{env}"]
         assert spec["path"] == f"./Acme/platform/apps/overlays/{env}", env

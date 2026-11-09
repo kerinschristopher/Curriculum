@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Its own Flux entry point (monitoring-config in Acme/infra/bootstrap/platform.yaml), applied once
+# infrastructure is Ready. No base or overlay lists this folder. Empty until P5 adds the alert rule.
+resources: []

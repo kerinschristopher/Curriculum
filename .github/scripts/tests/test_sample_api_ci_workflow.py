@@ -83,6 +83,7 @@ ENTRY_POINTS = [
     "Acme/platform/apps/overlays/prod",
     "Acme/infra/bootstrap",
     "Acme/platform/infrastructure/overlays/kind",
+    "Acme/platform/infrastructure/monitoring-config",
 ]
 
 # The kustomize each Flux release renders with: its kustomize-controller's go.mod replaces
