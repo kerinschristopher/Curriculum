@@ -296,6 +296,25 @@ func TestRequestLatencyIsObserved(t *testing.T) {
 	}
 }
 
+// A handler behind instrument() must reach the real writer's features (Flush, write deadlines) through
+// http.ResponseController, which finds them by calling Unwrap on each wrapper.
+func TestHandlersBehindInstrumentCanFlush(t *testing.T) {
+	var flushErr error
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /stream", func(w http.ResponseWriter, r *http.Request) {
+		flushErr = http.NewResponseController(w).Flush()
+	})
+	rec := httptest.NewRecorder()
+	newMetrics().instrument(mux).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/stream", nil))
+
+	if flushErr != nil {
+		t.Fatalf("Flush behind instrument() = %v, want nil", flushErr)
+	}
+	if !rec.Flushed {
+		t.Error("Flush returned nil but the real writer was never flushed")
+	}
+}
+
 // /fault answers 500 only when switched on, and those 500s are counted like any route's: they are the alert's input.
 // Switched off, it is just an unknown path.
 func TestFaultRoute(t *testing.T) {

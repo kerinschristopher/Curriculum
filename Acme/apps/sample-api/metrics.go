@@ -92,3 +92,7 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.code = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap lets http.ResponseController reach the real writer (Flush, deadlines). A type assertion such as
+// w.(http.Flusher) still fails on statusRecorder, so handlers use ResponseController.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
