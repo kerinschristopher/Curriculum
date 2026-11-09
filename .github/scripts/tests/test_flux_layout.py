@@ -88,6 +88,23 @@ def test_the_service_exposes_the_metrics_port_the_app_listens_on():
         assert ports.get(targets.get("metrics"), targets.get("metrics")) == 8081, (env, targets)
 
 
+def test_each_env_scrapes_its_own_sample_api_metrics_port():
+    # P4c (FR2): a ServiceMonitor in sample-api's base, so each env's namespace gets one. It must pick the
+    # Service by its labels and name its `metrics` port (8081, test above), and stay in its own namespace:
+    # with three envs, a namespaceSelector would scrape every env's pods three times over.
+    for env in SAMPLE_API_ENVS:
+        objects = sample_api_objects(env)
+        monitor = objects.get(("ServiceMonitor", "sample-api"))
+        assert monitor, (env, sorted(objects))
+        service = objects[("Service", "sample-api")]
+        selector = monitor["spec"]["selector"]["matchLabels"]
+        assert selector.items() <= service["metadata"]["labels"].items(), (env, selector)
+        endpoints = [(e.get("port"), e.get("path", "/metrics")) for e in monitor["spec"]["endpoints"]]
+        assert endpoints == [("metrics", "/metrics")], (env, endpoints)
+        assert "namespaceSelector" not in monitor["spec"], (env, monitor["spec"])
+        assert monitor["metadata"]["namespace"] == service["metadata"]["namespace"], env
+
+
 def env_value(objects, container, name):
     """`name`'s value in `container`, following a configMapKeyRef into the rendered ConfigMap; None if unset."""
     for var in container.get("env", []):
