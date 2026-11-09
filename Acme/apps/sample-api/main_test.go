@@ -19,6 +19,11 @@ import (
 
 var discard = slog.New(slog.DiscardHandler)
 
+// logLines is a test logger's output: each record arrives as one line on the channel.
+type logLines chan string
+
+func (l logLines) Write(p []byte) (int, error) { l <- string(p); return len(p), nil }
+
 // Written before parseLogLevel existed (PR #5 review: test-first, not a backfill).
 func TestParseLogLevel(t *testing.T) {
 	valid := []struct {
@@ -152,7 +157,7 @@ func TestServeDrainsInFlightRequests(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	served := make(chan error, 1)
-	go func() { served <- serveAll(ctx, discard, 5*time.Second, servers...) }()
+	go func() { served <- serveAll(ctx, discard, 5*time.Second, servers[0], servers[1]) }()
 
 	got := make(chan result, len(servers))
 	for _, s := range servers {
@@ -401,10 +406,40 @@ func TestMetricsOnlyOnTheMetricsServer(t *testing.T) {
 	}
 }
 
-// If one server stops on its own, serveAll must shut the others down and return its error, so the
-// process exits and Kubernetes restarts the pod instead of leaving it half up.
-func TestServeAllStopsWhenOneServerFails(t *testing.T) {
-	healthy, err := net.Listen("tcp", "127.0.0.1:0")
+// If the app server stops on its own there is nothing left to serve: serveAll must shut the metrics
+// server down and return the app's error, so the process exits and Kubernetes restarts the pod.
+func TestAppServerFailingStopsEverything(t *testing.T) {
+	broken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = broken.Close() // its Serve fails at once, as a crashed server would
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	served := make(chan error, 1)
+	go func() {
+		served <- serveAll(context.Background(), discard, 5*time.Second, // no SIGTERM
+			listening{srv: newServer(http.NotFoundHandler()), ln: broken},
+			listening{srv: newServer(http.NotFoundHandler()), ln: metricsLn})
+	}()
+
+	select {
+	case err := <-served:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("serveAll() = %v, want the app server's error (net.ErrClosed)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveAll kept waiting after the app server failed: the metrics server was never shut down")
+	}
+}
+
+// The metrics server is telemetry: if it stops, the app must keep serving and the failure must be logged
+// at Error. Prometheus already reports it (up == 0); stopping the app as well would turn that into an outage.
+func TestMetricsServerFailingLeavesTheAppServing(t *testing.T) {
+	appLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,20 +449,42 @@ func TestServeAllStopsWhenOneServerFails(t *testing.T) {
 	}
 	_ = broken.Close() // its Serve fails at once, as a crashed server would
 
+	lines := make(logLines, 16)
+	logger := slog.New(slog.NewJSONHandler(lines, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	served := make(chan error, 1)
 	go func() {
-		served <- serveAll(context.Background(), discard, 5*time.Second, // no SIGTERM
-			listening{srv: newServer(http.NotFoundHandler()), ln: healthy},
+		served <- serveAll(ctx, logger, 5*time.Second,
+			listening{srv: newServer(newMux("1.2.3", discard, false)), ln: appLn},
 			listening{srv: newServer(http.NotFoundHandler()), ln: broken})
 	}()
 
-	select {
-	case err := <-served:
-		if !errors.Is(err, net.ErrClosed) {
-			t.Fatalf("serveAll() = %v, want the broken server's error (net.ErrClosed)", err)
+	// Wait for the failure to be logged; serveAll returning first means the app went down with it.
+	for logged := false; !logged; {
+		select {
+		case line := <-lines:
+			logged = strings.Contains(line, `"level":"ERROR"`) && strings.Contains(line, "metrics server stopped")
+		case err := <-served:
+			t.Fatalf("serveAll returned (%v) when only the metrics server failed: the app went down with it", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("the metrics server's failure was never logged at Error")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("serveAll kept waiting after a server failed: the healthy one was never shut down")
+	}
+
+	resp, err := http.Get("http://" + appLn.Addr().String() + "/health")
+	if err != nil {
+		t.Fatalf("GET /health after the metrics server failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /health after the metrics server failed = %d, want 200", resp.StatusCode)
+	}
+
+	http.DefaultClient.CloseIdleConnections() // else shutdown waits up to 5 s on the idle connection
+	cancel()                                  // as SIGTERM would
+	if err := <-served; err != nil {
+		t.Errorf("serveAll() = %v after SIGTERM, want nil: the metrics failure was already logged", err)
 	}
 }
 

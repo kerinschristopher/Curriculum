@@ -133,23 +133,28 @@ type listening struct {
 	ln  net.Listener
 }
 
-// serveAll runs each server with serve, so a cancelled ctx (SIGTERM) drains them all, as does any
-// one server stopping on its own; it returns only once every one has stopped, with their errors joined.
-func serveAll(ctx context.Context, logger *slog.Logger, timeout time.Duration, servers ...listening) error {
+// serveAll runs the app server and the metrics server until ctx is cancelled (SIGTERM), then drains both
+// and returns once both have stopped, with their errors joined. The two aren't equal. The app server
+// stopping on its own ends the process: nothing is left to serve, so the metrics server drains too and the
+// app's error is returned. The metrics server stopping on its own is only logged at Error and the app keeps
+// serving: telemetry must never cause an outage, and Prometheus already reports a dead target (up == 0).
+func serveAll(ctx context.Context, logger *slog.Logger, timeout time.Duration, app, metrics listening) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errs := make(chan error, len(servers))
-	for _, s := range servers {
-		go func() {
-			errs <- serve(ctx, s.srv, s.ln, logger, timeout)
-			cancel() // one server stopping, for any reason, drains the rest
-		}()
-	}
-	var all []error
-	for range servers {
-		all = append(all, <-errs)
-	}
-	return errors.Join(all...)
+	appErr, metricsErr := make(chan error, 1), make(chan error, 1)
+	go func() {
+		appErr <- serve(ctx, app.srv, app.ln, logger, timeout)
+		cancel() // nothing left to serve: drain the metrics server too
+	}()
+	go func() {
+		err := serve(ctx, metrics.srv, metrics.ln, logger, timeout)
+		if ctx.Err() == nil { // it stopped on its own, not because of a shutdown
+			logger.Error("metrics server stopped; the app keeps serving", "err", err)
+			err = nil // already logged: a later clean shutdown still exits 0
+		}
+		metricsErr <- err
+	}()
+	return errors.Join(<-appErr, <-metricsErr)
 }
 
 func main() {
