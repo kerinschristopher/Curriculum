@@ -2,8 +2,8 @@
 # upgrades" example (operator-migration.md, v0.62.1) with an exact version instead of "*", values from the ConfigMap
 # kustomization.yaml generates from flux-operator-values.yaml, and no serviceAccountName (so the HelmRelease runs as
 # helm-controller). The HelmRelease adopts the release helm install made (same name and namespace) and reverts hand changes.
-# An Operator upgrade is one PR: the version here, the image tag@digest in flux-operator-values.yaml, and the
-# Operator version and checksums in sample-api-ci.yml.
+# An Operator upgrade is one PR: the version and the chart digest here, the image tag@digest in
+# flux-operator-values.yaml, and the Operator version and checksums in sample-api-ci.yml.
 apiVersion: fluxcd.controlplane.io/v1
 kind: ResourceSet
 metadata:
@@ -15,6 +15,7 @@ metadata:
 spec:
   inputs:
     - version: "0.62.1"
+      digest: "sha256:1135514a01cc11e206f5ff0b568ac30d9defd675022b7a9da88d4a3474fbdf13"
   resources:
     - apiVersion: source.toolkit.fluxcd.io/v1
       kind: OCIRepository
@@ -28,7 +29,9 @@ spec:
           mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
           operation: copy
         ref:
+          # Flux pulls the chart by digest; semver is ignored beside it and stays for people to read.
           semver: << inputs.version | quote >>
+          digest: << inputs.digest | quote >>
     - apiVersion: helm.toolkit.fluxcd.io/v2
       kind: HelmRelease
       metadata:

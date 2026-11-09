@@ -10,7 +10,9 @@ metadata:
 spec:
   interval: 10m
   retryInterval: 2m
-  timeout: 10m
+  # Longer than the kube-prometheus-stack HelmRelease's 10m: wait: true covers that release's install, which
+  # starts after this clock does (Module 9, Carry-overs D6).
+  timeout: 15m
   sourceRef:
     kind: GitRepository
     name: flux-system

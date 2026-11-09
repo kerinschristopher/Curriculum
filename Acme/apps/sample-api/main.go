@@ -39,6 +39,18 @@ func parseLogLevel(raw string) (slog.Level, error) {
 	return level, nil
 }
 
+// parseFaultInjection accepts only "enabled" (on) or unset (off) and rejects anything else,
+// so a typo fails startup instead of silently leaving /fault off, or on (R7).
+func parseFaultInjection(raw string) (bool, error) {
+	switch raw {
+	case "":
+		return false, nil
+	case "enabled":
+		return true, nil
+	}
+	return false, fmt.Errorf("invalid FAULT_INJECTION %q: must be \"enabled\", or unset to turn it off", raw)
+}
+
 type healthResponse struct {
 	Status  string `json:"status"`
 	Version string `json:"version"`
@@ -54,10 +66,19 @@ func healthHandler(version string, logger *slog.Logger) http.HandlerFunc {
 	}
 }
 
+// faultHandler always fails, so the error-rate alert can be proven with real 500s.
+func faultHandler(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "fault injected", http.StatusInternalServerError)
+}
+
 // newMux holds all route wiring, so tests exercise the real paths rather than calling handlers directly.
-func newMux(version string, logger *slog.Logger) *http.ServeMux {
+// /fault exists only when faults is on, which only dev's overlay sets (R7).
+func newMux(version string, logger *slog.Logger, faults bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler(version, logger))
+	if faults {
+		mux.HandleFunc("GET /fault", faultHandler)
+	}
 	return mux
 }
 
@@ -70,6 +91,15 @@ func newServer(h http.Handler) *http.Server {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+}
+
+// newServers builds the app server (every request counted) and the metrics server (only /metrics),
+// sharing one registry. /metrics stays off the app's port, so the Ingress can never expose it.
+func newServers(version string, logger *slog.Logger, faults bool) (appSrv, metricsSrv *http.Server) {
+	m := newMetrics()
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("GET /metrics", m.handler())
+	return newServer(m.instrument(newMux(version, logger, faults))), newServer(metricsMux)
 }
 
 // serve runs srv on ln until ctx is cancelled, then stops accepting connections and waits up to
@@ -97,8 +127,43 @@ func serve(ctx context.Context, srv *http.Server, ln net.Listener, logger *slog.
 	return nil
 }
 
+// listening pairs a server with the listener it serves on.
+type listening struct {
+	srv *http.Server
+	ln  net.Listener
+}
+
+// serveAll runs the app server and the metrics server until ctx is cancelled (SIGTERM), then drains both
+// and returns once both have stopped, with their errors joined. The two aren't equal. The app server
+// stopping on its own ends the process: nothing is left to serve, so the metrics server drains too and the
+// app's error is returned. The metrics server stopping on its own is only logged at Error and the app keeps
+// serving: telemetry must never cause an outage, and Prometheus already reports a dead target (up == 0).
+func serveAll(ctx context.Context, logger *slog.Logger, timeout time.Duration, app, metrics listening) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	appErr, metricsErr := make(chan error, 1), make(chan error, 1)
+	go func() {
+		appErr <- serve(ctx, app.srv, app.ln, logger, timeout)
+		cancel() // nothing left to serve: drain the metrics server too
+	}()
+	go func() {
+		err := serve(ctx, metrics.srv, metrics.ln, logger, timeout)
+		if ctx.Err() == nil { // it stopped on its own, not because of a shutdown
+			logger.Error("metrics server stopped; the app keeps serving", "err", err)
+			err = nil // already logged: a later clean shutdown still exits 0
+		}
+		metricsErr <- err
+	}()
+	return errors.Join(<-appErr, <-metricsErr)
+}
+
 func main() {
 	level, err := parseLogLevel(getEnvOrDefault("LOG_LEVEL", "info"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	faults, err := parseFaultInjection(os.Getenv("FAULT_INJECTION"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -109,9 +174,9 @@ func main() {
 
 	// Emit at no lower than the configured level so the resolved level is always visible.
 	logger.Log(context.Background(), max(slog.LevelInfo, level), "starting",
-		"version", version, "log_level", level.String())
+		"version", version, "log_level", level.String(), "fault_injection", faults)
 
-	if err := run(logger); err != nil {
+	if err := run(logger, faults); err != nil {
 		logger.Error("server exited", "err", err)
 		os.Exit(1)
 	}
@@ -119,13 +184,28 @@ func main() {
 }
 
 // run is split out of main so its deferred stop() runs before main calls os.Exit.
-func run(logger *slog.Logger) error {
+// The app listens on :8080 (the Service and Ingress), metrics on :8081 (Prometheus only).
+func run(logger *slog.Logger, faults bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 
-	ln, err := net.Listen("tcp", ":8080")
+	appLn, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		return err
 	}
-	return serve(ctx, newServer(newMux(version, logger)), ln, logger, shutdownTimeout)
+	metricsLn, err := net.Listen("tcp", ":8081")
+	if err != nil {
+		_ = appLn.Close() // nothing serves it yet, so close it here
+		return err
+	}
+	return serveOn(ctx, logger, faults, appLn, metricsLn)
+}
+
+// serveOn serves the app on appLn and /metrics on metricsLn until ctx ends. Split from run so a test
+// can hand it two listeners and check each answers with the right server.
+func serveOn(ctx context.Context, logger *slog.Logger, faults bool, appLn, metricsLn net.Listener) error {
+	appSrv, metricsSrv := newServers(version, logger, faults)
+	return serveAll(ctx, logger, shutdownTimeout,
+		listening{srv: appSrv, ln: appLn},
+		listening{srv: metricsSrv, ln: metricsLn})
 }

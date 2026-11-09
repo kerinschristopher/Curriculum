@@ -13,6 +13,7 @@ configMapGenerator:
     behavior: merge
     literals:
       - LOG_LEVEL=debug
+      - FAULT_INJECTION=enabled
 patches:
   - path: replicas.yaml
   - path: ingress-host.yaml

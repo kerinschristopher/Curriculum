@@ -476,7 +476,7 @@ CK makes every edit and runs every command; Claude coaches. Conventional Commits
 | P10 | 2 | Docs and PR 2 (`:399`; C3, C8, C13) | — | — | `docs/bootstrap.md` (from P6 and P9, with "don't push to `flux/image-updates`", §4, and the Operator upgrade PR, §2); `docs/ci.md` (releasing steps 4 and 5, with promotion as a PR copying dev's `newTag` and `digest` lines to stage or prod; rolling back; the `kustomize` row); `docs/iam.md` (a deploy-key row) | The C3 review; **OK**: open PR 2; **OK**: merge | 1 |
 | P11 | — | The first real image update (`:395`, C5) | Predictions: the time of each hop | — | **OK**: tag `v0.1.4` on PR 2's merge commit (PATCH: no app change); **OK**: open the PR from `flux/image-updates`; **OK**: merge | The running `imageID` equals GHCR's `0.1.4` digest; the hop times, including merge → pod, which also covers `:393` (L15) | 1 |
 
-**Phase status (2026-11-03):** P0-P6 and P8-P11 done; P7 dropped (L15). Step 6 and P3 merged in PR #17, P8-P10 in PR #18. The rebuild, the live drill, the key rotation, P11 and C7 all passed (L18). L17's digest gap is closed: one test renders every entry point and checks each container's image, and another, an allow-list since the third C3 review, keeps the fields that can change an image off Flux's Kustomizations (L18). The third C3 review's fixes are on `mod8-closing` (L18). Only the closing PR itself is left, then the Operator's drift proof after its merge.
+**Phase status (2026-11-03):** P0-P6 and P8-P11 done; P7 dropped (L15). Step 6 and P3 merged in PR #17, P8-P10 in PR #18. The rebuild, the live drill, the key rotation, P11 and C7 all passed (L18). L17's digest gap is closed: one test renders every entry point and checks each container's image, and another, an allow-list since the third C3 review, keeps the fields that can change an image off Flux's Kustomizations (L18). The third C3 review's fixes are on `mod8-closing` (L18). Only the closing PR itself is left, then the Operator's drift proof after its merge. The closing PR merged as `102966f4`; the post-merge checks passed on 2026-11-07 (Closing Evidence).
 
 ## Risks / Constraints
 
@@ -611,7 +611,18 @@ Afterwards: all five `True`, 1/1, 2/2, 3/3, health `200`, entitlement back, 18 C
 
 **Departures from the guide.** The rebuild ran from `mod8-closing`, not `main`, so the guide's update block was skipped: it would have left the branch. Read-only checks not in the guide were added: `flux-operator-entitlement`, the namespace conditions, the snapshots and `diff`. The reviewer asked for the step 6 fix to land before the rebuild. It landed on the branch, not on `main`: that misses the wording and meets the reason, a clean first run.
 
-**Not shown, or not run.** Whether any object was missing when a `wait --for=create` began, at step 5 or in the nudge. The "no matches for kind" retry. The rotation block's stop at its context check after `kind delete cluster`: shown only with an empty kubeconfig (`KUBECONFIG=/dev/null`). Step 5's rollout wait on a slow image pull: it was seen only on a 2 s pod swap. The `iam.md` limit with two deploy keys of one title. Deploy key `168555567`'s first push. Whether the `HelmRelease` would have waited an hour without the nudge. Flux committing on top of an existing `flux/image-updates` has been seen only in the C3 reviewer's harness. After a dev rollback, that Flux proposes the bad release again, and the digest-only PR's title, are from reading only. The `FluxInstance`-delete recovery ran only on `flux-test` (L10), before the image controllers existed. The rebuild and the drill ran before `4cb3564`, so drift detection on the Operator is proved only by the post-merge check. FR5's `reconcile: disabled` exception is from Flux's docs, not seen here.
+**After the closing PR's merge (PR #22, `102966f4`): the post-merge checks, recorded in Module 9 (P0d, L13).** All times UTC, 2026-11-07. Predictions came first, except B3's revision, seen in a status line beforehand.
+
+| Check | Result |
+|---|---|
+| B1: CI green on `main` at `102966f4` | sample-api-ci `41721293082`: Go tests on 1.26 and 1.27, `scripts-test` 69 passed, kubeconform 127 valid, Trivy and push success; terraform-plan `41721293196` success |
+| B2: all five Kustomizations Ready at `102966f4` | Ready, none suspended, at `main@sha1:102966f4` |
+| B3: no workload pod rolled; Helm `flux-operator` at revision 2; `driftDetection` live | All 6 sample-api pods created before the merge (latest 2026-11-03 06:28:23); revision 2, no revision 3; `{"mode":"enabled"}` |
+| B4: the Operator's drift proof | The label `app.kubernetes.io/version` on `deploy/flux-operator` set to `hand-edit` at 18:57:02 was reverted by helm-controller at its next reconcile, 19:17:40 (`DriftDetected`, `DriftCorrected`), revision still 2 |
+
+B4 edited a label because the Operator's chart doesn't set `spec.replicas`: helm-controller doesn't own the field, so scaling the Operator by hand is not drift and stays.
+
+**Not shown, or not run.** Whether any object was missing when a `wait --for=create` began, at step 5 or in the nudge. The "no matches for kind" retry. The rotation block's stop at its context check after `kind delete cluster`: shown only with an empty kubeconfig (`KUBECONFIG=/dev/null`). Step 5's rollout wait on a slow image pull: it was seen only on a 2 s pod swap. The `iam.md` limit with two deploy keys of one title. Deploy key `168555567`'s first push. Whether the `HelmRelease` would have waited an hour without the nudge. Flux committing on top of an existing `flux/image-updates` has been seen only in the C3 reviewer's harness. After a dev rollback, that Flux proposes the bad release again, and the digest-only PR's title, are from reading only. The `FluxInstance`-delete recovery ran only on `flux-test` (L10), before the image controllers existed. The rebuild and the drill ran before `4cb3564`, so drift detection on the Operator was proved by the post-merge check (B4, above); scaling the Operator by hand isn't covered, since its chart doesn't set `replicas`. FR5's `reconcile: disabled` exception is from Flux's docs, not seen here.
 
 **P11: `v0.1.4` on `3be9eb01`, PR #19's merge commit (PATCH, no app change).** P11's row planned PR 2's merge commit, but PR #19 had merged since.
 
@@ -694,7 +705,7 @@ Afterwards: all five `True`, 1/1, 2/2, 3/3, health `200`, entitlement back, 18 C
 
 **Mutations on the third review's fixes, 2026-11-03.** Claude ran them on throwaway copies of the tracked files, taken from the working tree, so the uncommitted test was included. Each proves the check catches that one change. Every new test was green on arrival (C6) except drift detection's, which was red first. A test was counted as caught only if the change really reached the input it reads: for the render tests, `kubectl kustomize` was first checked to output the object.
 
-**Drift detection, `4cb3564`.** Red first: `1 failed`, no `driftDetection` in the `HelmRelease` template. Green: 57 passed, 6 skipped. The behaviour, helm-controller patching a hand edit back, isn't shown before the merge: CK chose the post-merge proof over a throwaway-cluster rehearsal.
+**Drift detection, `4cb3564`.** Red first: `1 failed`, no `driftDetection` in the `HelmRelease` template. Green: 57 passed, 6 skipped. The behaviour, helm-controller patching a hand edit back, isn't shown before the merge: CK chose the post-merge proof over a throwaway-cluster rehearsal. Shown after the merge: B4 in Closing Evidence (2026-11-07).
 
 | Mutation, throwaway copy | Result | Failing |
 |---|---|---|

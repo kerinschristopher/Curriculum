@@ -84,14 +84,14 @@ image pull can take a few minutes. Each timeout is a limit, not a delay. `infras
 chart, kube-prometheus-stack (Prometheus, Alertmanager and Grafana), and is Ready once Helm has finished. Prometheus and
 Alertmanager aren't objects the chart creates: the chart's operator creates them while the install runs, so Helm
 finishing doesn't promise they're ready, and the last lines wait for each to exist and then to be ready. The first install
-took about 2 minutes on a laptop; the 10-minute limit leaves room for a slow image pull.
+took about 2 minutes on a laptop; the 15-minute limit leaves room for a slow image pull.
 
 ```bash
 (
 set -eu
 for name in infrastructure apps-dev apps-stage apps-prod; do
   kubectl -n flux-system wait "kustomization/$name" --for=create --timeout=5m \
-    && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=10m \
+    && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=15m \
     || exit 1
 done
 kubectl -n flux-system wait helmrelease/flux-operator --for=create --timeout=5m \
@@ -261,8 +261,8 @@ Afterwards the `ResourceSet` can still show Ready, up to an hour. That only mean
 
 - **A hand `helm upgrade` fails or doesn't last.** Once Flux has taken over, a plain `helm upgrade` fails on conflicts and
   leaves a `failed` revision. With `--force-conflicts` it succeeds, but Flux undoes it at its next reconcile, within 30 minutes.
-  Change the Operator by PR instead: `version` in `flux-operator.yaml`, `tag@digest` in `flux-operator-values.yaml`, CI's
-  Operator version and checksums, and the two Helm commands in this file.
+  Change the Operator by PR instead: `version` and the chart `digest` in `flux-operator.yaml`, `tag@digest` in
+  `flux-operator-values.yaml`, CI's Operator version and checksums, and the two Helm commands in this file.
 - **`helm history` mixes time zones.** Revisions from the CLI print in local time, and Flux's in UTC.
 - **`apps-*` briefly not Ready after a merge.** Each one waits for `infrastructure` to reach the same commit, then retries.
 - **"skipped" in `flux-system`'s events.** If `flux-instance.yaml` or `flux-operator.yaml` leaves Git, Flux deletes nothing

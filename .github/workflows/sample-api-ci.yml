@@ -114,8 +114,9 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: Acme/apps/sample-api/go.mod
-          # setup-go's cache is keyed on go.sum, and this app is stdlib only (no go.sum, no modules
-          # to download). The time goes into compiling, so the build cache is cached below instead.
+          # setup-go's cache would also restore the build cache, keyed on go.sum alone, so a code
+          # change would never refresh it. The build cache is cached below instead; the few modules
+          # in go.sum are downloaded each run.
           cache: false
 
       # Go's build cache: compiled packages, reused when their source hasn't changed. The key
@@ -176,7 +177,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ matrix.go }}
-          cache: false # keyed on go.sum, which this stdlib-only app doesn't have; see the next step
+          cache: false # it would restore the build cache keyed on go.sum alone; see the next step
 
       # Go's build cache, one per Go version (-race builds the standard library a second time,
       # instrumented, which is most of this job's compile time). Only compiled packages are

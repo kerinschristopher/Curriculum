@@ -55,6 +55,7 @@ RELEASE = ("HelmRelease", "kube-prometheus-stack")
 CHART_SOURCE = ("OCIRepository", "kube-prometheus-stack")
 BASE_VALUES = ("ConfigMap", "kube-prometheus-stack-values")
 KIND_VALUES = ("ConfigMap", "kube-prometheus-stack-values-kind")
+SAMPLE_API_ENVS = ("dev", "stage", "prod")
 
 
 def test_every_env_overlay_pins_sample_api_by_digest():
@@ -68,6 +69,45 @@ def test_every_env_overlay_pins_sample_api_by_digest():
         if "newTag" not in image or not DIGEST.fullmatch(image.get("digest", "")):
             unpinned.append(path.parent.name)
     assert unpinned == []
+
+
+def sample_api_objects(env):
+    """What Flux applies for `env`'s apps entry point, keyed by (kind, name)."""
+    return {(doc["kind"], doc["metadata"]["name"]): doc for doc in rendered(f"Acme/platform/apps/overlays/{env}")}
+
+
+def test_the_service_exposes_the_metrics_port_the_app_listens_on():
+    # P1e (FR2): the app serves /metrics on :8081 (main.go, P1d), and Prometheus reaches it through the
+    # Service's `metrics` port (P4c's ServiceMonitor names it). A named targetPort is looked up in the container.
+    for env in SAMPLE_API_ENVS:
+        objects = sample_api_objects(env)
+        [container] = objects[("Deployment", "sample-api")]["spec"]["template"]["spec"]["containers"]
+        ports = {port["name"]: port["containerPort"] for port in container["ports"]}
+        assert ports.get("metrics") == 8081, (env, ports)
+        targets = {port["name"]: port["targetPort"] for port in objects[("Service", "sample-api")]["spec"]["ports"]}
+        assert ports.get(targets.get("metrics"), targets.get("metrics")) == 8081, (env, targets)
+
+
+def env_value(objects, container, name):
+    """`name`'s value in `container`, following a configMapKeyRef into the rendered ConfigMap; None if unset."""
+    for var in container.get("env", []):
+        if var["name"] == name:
+            if "value" in var:
+                return var["value"]
+            ref = var["valueFrom"]["configMapKeyRef"]
+            return objects[("ConfigMap", ref["name"])].get("data", {}).get(ref["key"])
+    return None
+
+
+def test_only_dev_turns_fault_injection_on():
+    # P1e (R7): /fault answers 500 only where FAULT_INJECTION=enabled (main.go, P1c), so only dev may set it.
+    # The stage and prod half is characterisation (C6): green on arrival. The mutation is in the design log.
+    found = {}
+    for env in SAMPLE_API_ENVS:
+        objects = sample_api_objects(env)
+        [container] = objects[("Deployment", "sample-api")]["spec"]["template"]["spec"]["containers"]
+        found[env] = env_value(objects, container, "FAULT_INJECTION")
+    assert found == {"dev": "enabled", "stage": None, "prod": None}
 
 
 def container_images(node):
@@ -393,6 +433,31 @@ def test_platform_applies_infrastructure_then_each_env():
         assert spec.get("deletionPolicy") == "Orphan", name
 
 
+def seconds(duration):
+    """A Go duration as Flux writes it ("10m", "1h30m", "5m0s"), in seconds; anything else fails."""
+    parts = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", duration)
+    assert duration and parts, duration
+    return sum(int(value or 0) * unit for value, unit in zip(parts.groups(), (3600, 60, 1)))
+
+
+def longest_helm_attempt(spec):
+    """The longest single Helm install or upgrade a HelmRelease allows, in seconds. install.timeout and
+    upgrade.timeout default to spec.timeout, which defaults to helm-controller's 5m; either, when set, overrides it."""
+    overall = spec.get("timeout", "5m")
+    return max(seconds(spec.get(action, {}).get("timeout", overall)) for action in ("install", "upgrade"))
+
+
+def test_infrastructure_outlasts_every_helm_attempt_it_waits_on():
+    # Carry-overs D6: infrastructure (wait: true) waits for each HelmRelease it applies to be Ready, and its
+    # clock starts before Helm's attempt does. If it isn't longer, a slow but healthy install marks
+    # infrastructure failed and holds back every apps-* (dependsOn) until its next retry.
+    outer = seconds(flux_kustomizations()["infrastructure"]["timeout"])
+    releases = [doc for doc in rendered(KIND_INFRASTRUCTURE) if doc["kind"] == "HelmRelease"]
+    assert releases, KIND_INFRASTRUCTURE
+    inner = {doc["metadata"]["name"]: longest_helm_attempt(doc["spec"]) for doc in releases}
+    assert {name: limit for name, limit in inner.items() if limit >= outer} == {}, (outer, inner)
+
+
 def test_ci_renders_exactly_the_folders_flux_applies():
     # ENTRY_POINTS is kept by hand, and the render loop and digest tests trust it: a folder Flux
     # applies but the list misses deploys unrendered and unchecked (third C3 review, finding 3).
@@ -466,9 +531,10 @@ def test_operator_resourceset_pins_the_version_helm_install_used():
     assert tag.split("@")[0] == f"v{version}", (version, tag)
     source = templates["OCIRepository"]["spec"]
     assert source["url"] == "oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator", source["url"]
-    # A tag or digest beside semver wins over it, and the input would then change nothing.
-    assert source["ref"] == {"semver": "<< inputs.version | quote >>"}, source["ref"]
-
+    # The chart's templates run as cluster-admin. With a digest, a re-pushed 0.62.1 changes nothing:
+    # the digest beats semver (Module 9 P0e, D3 = C). semver stays, tied to the input, for people to read.
+    assert source["ref"] == {"semver": "<< inputs.version | quote >>", "digest": "<< inputs.digest | quote >>"}, source["ref"]
+    assert DIGEST.fullmatch(inputs[0].get("digest", "")), inputs
 
 
 def test_operator_helmrelease_takes_over_the_helm_install_release():
@@ -511,6 +577,20 @@ def test_operator_resourceset_generates_only_the_release_and_its_source():
     assert [t["kind"] for t in resourceset["spec"]["resources"]] == ["OCIRepository", "HelmRelease"]
     spec = templates["HelmRelease"]["spec"]
     assert sorted(spec) == ["chartRef", "driftDetection", "interval", "releaseName", "valuesFrom"], sorted(spec)
+
+
+def test_the_operator_chart_at_the_digest_is_the_input_version(tmp_path):
+    # Flux pulls the digest; people and the image-tag check read the version. An upgrade that bumps the
+    # version but not the digest would keep installing the old chart beside the new image (Module 9 P0e).
+    resourceset, templates = operator_resourceset()
+    inputs = resourceset["spec"]["inputs"][0]
+    reference = f"{templates['OCIRepository']['spec']['url']}@{inputs['digest']}"
+    pull = subprocess.run(["helm", "pull", reference, "--destination", str(tmp_path)], capture_output=True, text=True)
+    if pull.returncode:
+        fail_naming_the_cause(f"Pulling {reference}", "the chart digest", pull.stderr, probe=CHART_PROBE)
+    (tgz,) = tmp_path.glob("*.tgz")
+    show = subprocess.run(["helm", "show", "chart", str(tgz)], capture_output=True, text=True, check=True)
+    assert yaml.safe_load(show.stdout)["version"] == inputs["version"]
 
 
 def test_operator_resourceset_is_applied_and_never_pruned():
@@ -614,6 +694,27 @@ def test_the_release_sets_only_known_fields():
     # chart. RetryOnFailure retries a failed install every 5m; the default rolls it back and stalls until Git changes.
     assert spec.get("install") == {"crds": "Create", "strategy": {"name": "RetryOnFailure"}}, spec.get("install")
     assert spec.get("upgrade") == {"crds": "CreateReplace", "strategy": {"name": "RetryOnFailure"}}, spec.get("upgrade")
+
+
+def test_the_release_reverts_hand_edits():
+    # Carry-overs D5, reopening L6's cycle 4: without `mode: enabled`, a kubectl edit of a chart object stays
+    # until the chart or values change, and nothing fails (`warn` only logs it). P9 proved the behaviour live
+    # (Grafana scaled to 0, put back); this guards the setting that gives it. The ignore stops every reconcile
+    # stripping the webhook's annotation from each PrometheusRule, and the webhook re-adding it (design F10).
+    # Characterisation (C6): green on arrival; the mutations are in the design log.
+    drift = monitoring_objects()[RELEASE]["spec"].get("driftDetection", {})
+    assert drift.get("mode") == "enabled", drift
+    ignore = {"paths": ["/metadata/annotations/prometheus-operator-validated"], "target": {"kind": "PrometheusRule"}}
+    assert ignore in drift.get("ignore", []), drift
+
+
+def test_kind_prometheus_keeps_two_days():
+    # Carry-overs D5: kind's Prometheus stores its samples in emptyDir, which a restart wipes, so longer
+    # history only costs the laptop memory and disk. Losing this line brings back the chart's 10d with no
+    # failure, on a VM sized for 2d (P6 measured 216 MiB). The values test proves the release reads this file.
+    # Characterisation (C6): green on arrival; the mutation is in the design log.
+    values = yaml.safe_load(monitoring_objects()[KIND_VALUES]["data"]["values.yaml"])
+    assert values["prometheus"]["prometheusSpec"].get("retention") == "2d", values["prometheus"]["prometheusSpec"]
 
 
 def test_no_flux_apply_holds_a_release_and_a_monitoring_object():
