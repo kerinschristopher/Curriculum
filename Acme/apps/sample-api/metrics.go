@@ -13,26 +13,23 @@ import (
 
 // metrics uses its own registry, not the library's global one, so each test starts from zero.
 type metrics struct {
-	reg      *prometheus.Registry
-	requests *prometheus.CounterVec
-	latency  *prometheus.HistogramVec
+	reg     *prometheus.Registry
+	latency *prometheus.HistogramVec
 }
 
 func newMetrics() *metrics {
 	m := &metrics{
 		reg: prometheus.NewRegistry(),
-		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "http_requests_total",
-			Help: "HTTP requests handled, by route, method and status code.",
-		}, []string{"route", "method", "code"}),
-		// DefBuckets without 5 s and 10 s: anything slower than 2.5 s is "+Inf" for this API.
+		// Also the request counter: its _count rises by one per request, with the same labels, so a separate
+		// counter would hold the same numbers twice. Each route/method/code set costs 12 series (10 buckets
+		// with +Inf, _sum, _count). DefBuckets without 5 s and 10 s: anything slower than 2.5 s is "+Inf".
 		latency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "http_request_duration_seconds",
 			Help:    "Time to handle HTTP requests, by route, method and status code.",
 			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5},
 		}, []string{"route", "method", "code"}),
 	}
-	m.reg.MustRegister(m.requests, m.latency,
+	m.reg.MustRegister(m.latency,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -51,9 +48,7 @@ func (m *metrics) instrument(mux *http.ServeMux) http.Handler {
 		start := time.Now()
 		mux.ServeHTTP(rec, r)
 		elapsed := time.Since(start).Seconds()
-
 		labels := []string{routeOf(r), methodOf(r), strconv.Itoa(rec.code)}
-		m.requests.WithLabelValues(labels...).Inc()
 		m.latency.WithLabelValues(labels...).Observe(elapsed)
 	})
 }

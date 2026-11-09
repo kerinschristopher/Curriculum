@@ -212,7 +212,8 @@ func instrumentedApp(t *testing.T, faults bool) (*metrics, *httptest.Server) {
 	return m, app
 }
 
-// The counter's labels come from the mux's pattern, never the raw path, so a client can't add series (R8).
+// Requests are counted by the histogram's _count, labelled from the mux's pattern, never the raw path, so a
+// client can't add series (R8). There is no separate counter: it would hold the same numbers twice.
 func TestRequestsAreCounted(t *testing.T) {
 	m, app := instrumentedApp(t, false)
 
@@ -227,13 +228,15 @@ func TestRequestsAreCounted(t *testing.T) {
 	body := scrape(m)
 
 	for _, want := range []string{
-		"# TYPE http_requests_total counter",
-		`http_requests_total{code="200",method="GET",route="/health"} 1`,
-		`http_requests_total{code="404",method="GET",route="unmatched"} 1`,
+		`http_request_duration_seconds_count{code="200",method="GET",route="/health"} 1`,
+		`http_request_duration_seconds_count{code="404",method="GET",route="unmatched"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "http_requests_total") {
+		t.Errorf("metrics output still has http_requests_total, a copy of http_request_duration_seconds_count\n--- output ---\n%s", body)
 	}
 }
 
@@ -256,8 +259,8 @@ func TestUnknownMethodsAreCountedAsOther(t *testing.T) {
 	body := scrape(m)
 
 	for _, want := range []string{
-		`http_requests_total{code="405",method="other",route="unmatched"} 1`,
-		`http_requests_total{code="405",method="POST",route="unmatched"} 1`,
+		`http_request_duration_seconds_count{code="405",method="other",route="unmatched"} 1`,
+		`http_request_duration_seconds_count{code="405",method="POST",route="unmatched"} 1`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
@@ -328,8 +331,8 @@ func TestFaultRoute(t *testing.T) {
 		wantCode  int
 		wantCount string
 	}{
-		{true, http.StatusInternalServerError, `http_requests_total{code="500",method="GET",route="/fault"} 1`},
-		{false, http.StatusNotFound, `http_requests_total{code="404",method="GET",route="unmatched"} 1`},
+		{true, http.StatusInternalServerError, `http_request_duration_seconds_count{code="500",method="GET",route="/fault"} 1`},
+		{false, http.StatusNotFound, `http_request_duration_seconds_count{code="404",method="GET",route="unmatched"} 1`},
 	} {
 		m, app := instrumentedApp(t, tc.faults)
 
@@ -401,7 +404,7 @@ func TestMetricsOnlyOnTheMetricsServer(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("metrics server GET /metrics = %d, want 200", code)
 	}
-	if want := `http_requests_total{code="200",method="GET",route="/health"} 1`; !strings.Contains(body, want) {
+	if want := `http_request_duration_seconds_count{code="200",method="GET",route="/health"} 1`; !strings.Contains(body, want) {
 		t.Errorf("metrics output lacks %q\n--- output ---\n%s", want, body)
 	}
 }
