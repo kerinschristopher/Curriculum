@@ -440,6 +440,13 @@ def seconds(duration):
     return sum(int(value or 0) * unit for value, unit in zip(parts.groups(), (3600, 60, 1)))
 
 
+def longest_helm_attempt(spec):
+    """The longest single Helm install or upgrade a HelmRelease allows, in seconds. install.timeout and
+    upgrade.timeout default to spec.timeout, which defaults to helm-controller's 5m; either, when set, overrides it."""
+    overall = spec.get("timeout", "5m")
+    return max(seconds(spec.get(action, {}).get("timeout", overall)) for action in ("install", "upgrade"))
+
+
 def test_infrastructure_outlasts_every_helm_attempt_it_waits_on():
     # Carry-overs D6: infrastructure (wait: true) waits for each HelmRelease it applies to be Ready, and its
     # clock starts before Helm's attempt does. If it isn't longer, a slow but healthy install marks
@@ -447,8 +454,7 @@ def test_infrastructure_outlasts_every_helm_attempt_it_waits_on():
     outer = seconds(flux_kustomizations()["infrastructure"]["timeout"])
     releases = [doc for doc in rendered(KIND_INFRASTRUCTURE) if doc["kind"] == "HelmRelease"]
     assert releases, KIND_INFRASTRUCTURE
-    # helm-controller's default timeout is 5m.
-    inner = {doc["metadata"]["name"]: seconds(doc["spec"].get("timeout", "5m")) for doc in releases}
+    inner = {doc["metadata"]["name"]: longest_helm_attempt(doc["spec"]) for doc in releases}
     assert {name: limit for name, limit in inner.items() if limit >= outer} == {}, (outer, inner)
 
 
