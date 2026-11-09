@@ -264,6 +264,7 @@ jobs:
           OPERATOR_CLI_SHA256: 7bb9e54d370039d8701d4271b38aed57d6c89668432b7caddce69f4e26e24c1b
           KUBERNETES_VERSION: "1.35.8"
           KUBERNETES_SCHEMAS_COMMIT: 47163ead3738a996c3e30be9691bb37b8071d9d3
+          CRDS_CATALOG_COMMIT: 49729e49e8f062933e3716a26540d41b0cd0856c
         run: |
           set -euo pipefail
           curl --retry 3 --retry-all-errors -fsSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
@@ -289,6 +290,7 @@ jobs:
             -schema-location "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${KUBERNETES_SCHEMAS_COMMIT}/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json" \
             -schema-location 'schemas/flux/{{ .ResourceKind }}{{ .KindSuffix }}.json' \
             -schema-location 'schemas/operator/{{ .ResourceKind }}{{ .KindSuffix }}.json' \
+            -schema-location "https://raw.githubusercontent.com/datreeio/CRDs-catalog/${CRDS_CATALOG_COMMIT}/{{ .Group }}/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json" \
             rendered/*.yaml
 
   # Tests for .github/scripts and the CI config: pick-rescan-images.sh (sample-api-rescan.yml, daily
