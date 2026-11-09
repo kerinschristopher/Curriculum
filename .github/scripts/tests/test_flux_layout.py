@@ -10,6 +10,7 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
 import functools
 import http.server
 import json
+import os
 import re
 import subprocess
 import sys
@@ -827,6 +828,37 @@ def test_prometheus_selects_each_env_sample_api_monitor(chart_render):
             env, spec["serviceMonitorSelector"])
         assert selects(spec["serviceMonitorNamespaceSelector"], namespace["metadata"].get("labels", {})), (
             env, spec["serviceMonitorNamespaceSelector"])
+
+
+MONITORING_CONFIG = "Acme/platform/infrastructure/monitoring-config"
+ALERT_TESTS = REPO / MONITORING_CONFIG / "sample-api-alerts.test.yaml"
+
+
+def promtool(chart_render, folder, *args):
+    """promtool from the Prometheus image the chart runs (P3b = B: values.yaml holds the one pin), run in `folder`."""
+    [prometheus] = [doc for doc in yaml.safe_load_all(chart_render) if doc and doc["kind"] == "Prometheus"]
+    image = prometheus["spec"]["image"]
+    assert TAG_AND_DIGEST.search(image), image
+    docker = subprocess.run(["docker", "info"], capture_output=True, text=True)
+    if docker.returncode:
+        pytest.fail(f"promtool runs in Docker, which isn't answering (start Docker Desktop): {docker.stderr.strip()}")
+    # As the host's user: pytest's tmp_path is mode 0700, and the image's own user couldn't read it.
+    return subprocess.run(
+        ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "--volume", f"{folder}:/work",
+         "--workdir", "/work", "--entrypoint", "/bin/promtool", image, *args],
+        capture_output=True, text=True,
+    )
+
+
+def test_sample_api_alert_behaves_as_its_promtool_tests_say(chart_render, tmp_path):
+    # FR3: the rule's maths, proved before merge. The rule is read from what Flux applies (a file the
+    # kustomization doesn't list is never applied). promtool reads plain rule files, not Kubernetes
+    # objects, so the PrometheusRule's spec is copied out: the object in Git stays the only copy.
+    [rule] = [doc for doc in rendered(MONITORING_CONFIG) if doc["kind"] == "PrometheusRule"]
+    (tmp_path / "sample-api-alerts.rules.yaml").write_text(yaml.safe_dump(rule["spec"]))
+    (tmp_path / ALERT_TESTS.name).write_text(ALERT_TESTS.read_text())
+    run = promtool(chart_render, tmp_path, "test", "rules", ALERT_TESTS.name)
+    assert run.returncode == 0, run.stdout + run.stderr
 
 
 def test_nothing_watches_the_control_plane_kind_hides(chart_render):

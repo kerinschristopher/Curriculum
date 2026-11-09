@@ -1,0 +1,25 @@
+# sample-api's error-rate alert (Module 9 FR3, curriculum :429). One rule for every environment:
+# `by (namespace)` names which one is failing. It lives here, not beside the HelmRelease, because this
+# Kustomization applies only after infrastructure (and with it the PrometheusRule CRD) is Ready (F22).
+# Tested by sample-api-alerts.test.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sample-api
+  namespace: monitoring
+spec:
+  groups:
+    - name: sample-api
+      rules:
+        - alert: SampleApiHighErrorRate
+          expr: |
+            sum by (namespace) (rate(http_request_duration_seconds_count{job="sample-api",code=~"5.."}[5m]))
+              /
+            sum by (namespace) (rate(http_request_duration_seconds_count{job="sample-api"}[5m]))
+              > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: sample-api is failing more than 5% of requests in {{ $labels.namespace }}
+            description: '{{ $value | humanizePercentage }} of requests returned 5xx over the last 5 minutes.'
