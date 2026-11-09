@@ -30,6 +30,12 @@ prometheus:
     image:
       tag: v3.16.0-distroless
       sha: 9764044e09eb2c9e1abdb12d0f0188d4efb7384b0262d3c080f0fc59045c89ba
+    # By default Prometheus loads only objects labelled release: <release> (F7). sample-api's ServiceMonitor
+    # carries no such label, so its selector is opened ({} = any ServiceMonitor, in any namespace).
+    # podMonitor, probe and scrapeConfig stay closed on purpose (least privilege; a third-party chart's monitors
+    # aren't scraped unasked): a new PodMonitor, Probe or ScrapeConfig is silently ignored until its
+    # *SelectorNilUsesHelmValues is set false here, with a test like test_prometheus_selects_each_env_sample_api_monitor.
+    serviceMonitorSelectorNilUsesHelmValues: false
 alertmanager:
   alertmanagerSpec:
     image:

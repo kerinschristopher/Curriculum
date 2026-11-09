@@ -798,6 +798,29 @@ def test_every_image_the_chart_runs_is_pinned(chart_render):
     assert sorted(image for image in images if not TAG_AND_DIGEST.search(image)) == []
 
 
+def selects(selector, labels):
+    """Whether a label selector picks `labels`. matchExpressions aren't read, so they fail loudly here."""
+    assert set(selector) <= {"matchLabels"}, selector
+    return selector.get("matchLabels", {}).items() <= labels.items()
+
+
+def test_prometheus_selects_each_env_sample_api_monitor(chart_render):
+    # P4c+ (F7): the chart's Prometheus picks only monitors labelled release: <release> unless told
+    # otherwise, so sample-api's unlabelled ServiceMonitor would never be scraped, silently. Checked
+    # against each env's real monitor and namespace, so a selector narrowed again, or a label dropped
+    # from either side, shows here.
+    [prometheus] = [doc for doc in yaml.safe_load_all(chart_render) if doc and doc["kind"] == "Prometheus"]
+    spec = prometheus["spec"]
+    for env in SAMPLE_API_ENVS:
+        objects = sample_api_objects(env)
+        monitor = objects[("ServiceMonitor", "sample-api")]
+        namespace = objects[("Namespace", monitor["metadata"]["namespace"])]
+        assert selects(spec["serviceMonitorSelector"], monitor["metadata"].get("labels", {})), (
+            env, spec["serviceMonitorSelector"])
+        assert selects(spec["serviceMonitorNamespaceSelector"], namespace["metadata"].get("labels", {})), (
+            env, spec["serviceMonitorNamespaceSelector"])
+
+
 def test_nothing_watches_the_control_plane_kind_hides(chart_render):
     # kind binds these to 127.0.0.1 (F8), so their targets are down for good and their alerts never stop firing.
     docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
