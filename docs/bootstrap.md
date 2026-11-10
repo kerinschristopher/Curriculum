@@ -81,7 +81,8 @@ flux create secret git flux-image-updates --namespace=flux-system \
 **5. Wait for everything to be Ready.** The block stops at the first wait that fails. An `apps-*` Kustomization is Ready
 once its objects are applied, not once its pods run, so the sample-api lines wait for the pods: on a fresh cluster the
 image pull can take a few minutes. Each timeout is a limit, not a delay. `infrastructure` also installs the monitoring
-chart, kube-prometheus-stack (Prometheus, Alertmanager and Grafana), and is Ready once Helm has finished. Prometheus and
+chart, kube-prometheus-stack (Prometheus, Alertmanager and Grafana), and is Ready once Helm has finished; then
+`monitoring-config` applies sample-api's alert rule and dashboard, which need the chart's CRDs. Prometheus and
 Alertmanager aren't objects the chart creates: the chart's operator creates them while the install runs, so Helm
 finishing doesn't promise they're ready, and the last lines wait for each to exist and then to be ready. The first install
 took about 2 minutes on a laptop; the 15-minute limit leaves room for a slow image pull.
@@ -89,7 +90,7 @@ took about 2 minutes on a laptop; the 15-minute limit leaves room for a slow ima
 ```bash
 (
 set -eu
-for name in infrastructure apps-dev apps-stage apps-prod; do
+for name in infrastructure monitoring-config apps-dev apps-stage apps-prod; do
   kubectl -n flux-system wait "kustomization/$name" --for=create --timeout=5m \
     && kubectl -n flux-system wait "kustomization/$name" --for=condition=Ready --timeout=15m \
     || exit 1
@@ -125,7 +126,7 @@ kubectl -n flux-system wait gitrepository/flux-image-updates --for=condition=Rea
 
 You should see:
 
-- All five Kustomizations `True`, at the same `main` commit.
+- All six Kustomizations `True`, at the same `main` commit.
 - Helm revision 2, chart `flux-operator-0.62.1+1135514a01cc`. That chart name means Flux made the revision; revision 1,
   `flux-operator-0.62.1`, is your `helm install`.
 - Helm revision 1 for `kube-prometheus-stack`, chart `kube-prometheus-stack-92.21.2+4ae2ebc21830`. Flux installed it from
@@ -135,6 +136,35 @@ You should see:
 - `sample-api` at 1/1 in dev, 2/2 in stage and 3/3 in prod.
 - `200` from the health check.
 - `condition met` for `flux-image-updates`, which proves the Secret works and GitHub accepts the key.
+
+Then check that the monitoring sees sample-api. This asks Prometheus and Grafana through port-forwards that close when it
+ends:
+
+```bash
+(
+set -eu
+pw=$(kubectl -n monitoring get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d)
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 19090:9090 >/dev/null &
+prom=$!
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 13000:80 >/dev/null &
+graf=$!
+trap 'kill "$prom" "$graf"' EXIT
+timeout 20 sh -c 'until curl -fs -o /dev/null http://localhost:19090/-/ready && curl -fs -o /dev/null http://localhost:13000/api/health; do sleep 1; done' \
+  || { echo "The port-forwards weren't ready after 20 s; stopping"; exit 1; }
+curl -fsS 'http://localhost:19090/api/v1/rules?type=alert' \
+  | python3 -c 'import json, sys
+names = [r["name"] for g in json.load(sys.stdin)["data"]["groups"] for r in g["rules"]]
+print("alert rule loaded:", "SampleApiHighErrorRate" in names)'
+curl -fsS http://localhost:19090/api/v1/query --data-urlencode 'query=count(up{job="sample-api"} == 1)' \
+  | python3 -c 'import json, sys; r = json.load(sys.stdin)["data"]["result"]; print("sample-api targets up:", r[0]["value"][1] if r else 0)'
+curl -fsS -u "admin:$pw" http://localhost:13000/api/dashboards/uid/sample-api \
+  | python3 -c 'import json, sys; m = json.load(sys.stdin)["meta"]; print("dashboard loaded, provisioned:", m["provisioned"])'
+)
+```
+
+You should see `alert rule loaded: True`, `sample-api targets up: 6` (1 + 2 + 3 pods) and `dashboard loaded, provisioned:
+True`. Prometheus picks up new rules and monitors about 30 seconds after Flux applies them, and scrapes every 30 seconds,
+so straight after step 5 it may say `False` or fewer than 6: wait a minute and run it again.
 
 ## Open Grafana
 
