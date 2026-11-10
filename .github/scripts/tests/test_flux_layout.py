@@ -832,6 +832,7 @@ def test_prometheus_selects_each_env_sample_api_monitor(chart_render):
 
 MONITORING_CONFIG = "Acme/platform/infrastructure/monitoring-config"
 ALERT_TESTS = REPO / MONITORING_CONFIG / "sample-api-alerts.test.yaml"
+SAMPLE_API_DASHBOARD = REPO / MONITORING_CONFIG / "dashboards" / "sample-api.json"
 
 
 def promtool(chart_render, folder, *args):
@@ -882,3 +883,25 @@ def test_nothing_watches_the_control_plane_kind_hides(chart_render):
              for g in d["spec"]["groups"] for r in g["rules"]]
     assert [m for m in monitors if CONTROL_PLANE.search(m)] == []
     assert [e for e in exprs if CONTROL_PLANE.search(str(e))] == []
+
+
+def test_grafana_loads_the_sample_api_dashboard(chart_render):
+    # FR4 (D4 = C): Grafana sees a dashboard only through its sidecar, which loads ConfigMaps carrying the
+    # label the chart gives it. The label is read from the chart, so a renamed one shows here, not as a
+    # dashboard missing from Grafana. The file in Git must be what Flux applies, and its uid its own: two
+    # dashboards with one uid means one silently replaces the other.
+    chart_docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
+    [grafana] = [d for d in chart_docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-grafana")]
+    [sidecar] = [c for c in grafana["spec"]["template"]["spec"]["containers"] if c["name"] == "grafana-sc-dashboard"]
+    env = {e["name"]: e.get("value") for e in sidecar["env"]}
+    label = (env["LABEL"], env["LABEL_VALUE"])
+
+    def loaded(docs):
+        return {key: text for d in docs if d["kind"] == "ConfigMap" and label in d["metadata"].get("labels", {}).items()
+                for key, text in d.get("data", {}).items()}
+
+    ours = loaded(rendered(MONITORING_CONFIG))
+    assert sorted(ours) == [SAMPLE_API_DASHBOARD.name], label
+    assert ours[SAMPLE_API_DASHBOARD.name] == SAMPLE_API_DASHBOARD.read_text()
+    defaults = {json.loads(text)["uid"] for text in loaded(chart_docs).values()}
+    assert json.loads(ours[SAMPLE_API_DASHBOARD.name])["uid"] not in defaults, sorted(defaults)
