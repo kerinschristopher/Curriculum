@@ -861,6 +861,19 @@ def test_sample_api_alert_behaves_as_its_promtool_tests_say(chart_render, tmp_pa
     assert run.returncode == 0, run.stdout + run.stderr
 
 
+def test_prometheus_loads_the_sample_api_rule(chart_render):
+    # P5 (F7 again): the chart's Prometheus loads only rules labelled release: <release> unless told
+    # otherwise, so the unlabelled rule would pass promtool and still never be evaluated, silently.
+    # Checked against the rule Flux applies and the namespace it lands in.
+    [prometheus] = [doc for doc in yaml.safe_load_all(chart_render) if doc and doc["kind"] == "Prometheus"]
+    spec = prometheus["spec"]
+    [rule] = [doc for doc in rendered(MONITORING_CONFIG) if doc["kind"] == "PrometheusRule"]
+    namespace = monitoring_objects()[("Namespace", rule["metadata"]["namespace"])]
+    assert selects(spec["ruleSelector"], rule["metadata"].get("labels", {})), spec["ruleSelector"]
+    assert selects(spec["ruleNamespaceSelector"], namespace["metadata"].get("labels", {})), (
+        spec["ruleNamespaceSelector"])
+
+
 def test_nothing_watches_the_control_plane_kind_hides(chart_render):
     # kind binds these to 127.0.0.1 (F8), so their targets are down for good and their alerts never stop firing.
     docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
