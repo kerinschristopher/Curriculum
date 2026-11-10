@@ -928,3 +928,29 @@ def test_every_sample_api_dashboard_query_is_valid_promql(chart_render, tmp_path
         yaml.safe_dump({"groups": [{"name": "sample-api-dashboard", "rules": rules}]}))
     run = promtool(chart_render, tmp_path, "check", "rules", "dashboard.rules.yaml")
     assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_every_sample_api_dashboard_query_uses_the_chart_datasource(chart_render):
+    # FR4: a panel names its datasource by uid. A uid Grafana doesn't have (an export's ${DS_PROMETHEUS},
+    # or one a UI edit made up) shows only as "datasource not found" when someone opens the panel. The uid
+    # is read from what the chart provisions, so a renamed one shows here. Grafana's own annotation
+    # source (-- Grafana --) isn't a query. Characterisation (C6): green on arrival; a wrong uid turns it red.
+    [provisioned] = [d for d in yaml.safe_load_all(chart_render) if d and d["kind"] == "ConfigMap"
+                     and d["metadata"].get("labels", {}).get("grafana_datasource") == "1"]
+    [prometheus] = [s for s in yaml.safe_load(provisioned["data"]["datasource.yaml"])["datasources"]
+                    if s["type"] == "prometheus"]
+
+    def datasources(node):
+        if isinstance(node, dict):
+            if "datasource" in node:
+                yield node["datasource"]
+            for value in node.values():
+                yield from datasources(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from datasources(item)
+
+    used = [s for s in datasources(json.loads(SAMPLE_API_DASHBOARD.read_text())) if s != {
+        "type": "grafana", "uid": "-- Grafana --"}]
+    assert used, "no datasources found in the dashboard"
+    assert sorted({s["uid"] for s in used}) == [prometheus["uid"]], used
