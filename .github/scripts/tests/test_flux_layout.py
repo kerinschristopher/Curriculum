@@ -782,19 +782,25 @@ def test_the_chart_at_the_digest_is_the_tagged_version(chart):
     assert yaml.safe_load(show.stdout)["version"] == tag
 
 
-@pytest.fixture(scope="session")
-def chart_render(chart):
-    """The chart's manifests as helm-controller renders them: values.yaml, the release's name and namespace,
-    and the kind node's Kubernetes version. Hooks included, because Helm renders them too."""
+def helm_template(chart, *values):
+    """The chart's manifests as helm-controller renders them: `values` files merged in order (the later
+    wins), the release's name and namespace, and the kind node's Kubernetes version. Hooks included,
+    because Helm renders them too."""
     release = monitoring_objects()[RELEASE]["metadata"]
     cluster = yaml.safe_load((REPO / "Acme" / "platform" / "kind" / "sample-api-cluster.yaml").read_text())
     kube_version = re.search(r":v(\d+\.\d+\.\d+)@", cluster["nodes"][0]["image"]).group(1)
     render = subprocess.run(
         ["helm", "template", release["name"], str(chart), "--namespace", release["namespace"],
-         "--values", str(MONITORING / "values.yaml"), "--kube-version", kube_version],
+         *[arg for path in values for arg in ("--values", str(path))], "--kube-version", kube_version],
         capture_output=True, text=True, check=True,
     )
     return render.stdout
+
+
+@pytest.fixture(scope="session")
+def chart_render(chart):
+    """The chart rendered with base values.yaml alone."""
+    return helm_template(chart, MONITORING / "values.yaml")
 
 
 def test_every_image_the_chart_runs_is_pinned(chart_render):
@@ -969,3 +975,29 @@ def test_the_named_cluster_health_dashboard_is_installed(chart_render):
     dashboards = [json.loads(text) for text in sidecar_dashboards(chart_docs, chart_docs).values()]
     uid, title = CLUSTER_HEALTH_DASHBOARD
     assert {d["uid"]: d["title"] for d in dashboards}.get(uid) == title, sorted(d["title"] for d in dashboards)
+
+
+@pytest.fixture(scope="session")
+def kind_chart_render(chart, tmp_path_factory):
+    """The chart as the kind cluster gets it: each ConfigMap the release's valuesFrom names, in that order
+    (the later wins), taken from what Flux applies, so a dropped valuesFrom entry shows too."""
+    objects = monitoring_objects()
+    folder = tmp_path_factory.mktemp("kind-values")
+    files = []
+    for i, source in enumerate(objects[RELEASE]["spec"]["valuesFrom"]):
+        path = folder / f"{i}-{source['name']}.yaml"
+        path.write_text(objects[(source["kind"], source["name"])]["data"][source["valuesKey"]])
+        files.append(path)
+    return helm_template(chart, *files)
+
+
+def test_kind_drops_the_alert_its_clock_sets_off(kind_chart_render):
+    # WSL2 steps the kind node's clock, which moves every process's process_start_time_seconds at each
+    # scrape (mon-test, 2026-11-10: 20 changes in 10 min, 0 restarts), so AlertmanagerClusterCrashlooping,
+    # the chart's only rule on that metric, fires for good on kind, the live cluster included. A real
+    # crashloop still shows in KubePodCrashLooping, which counts restarts, so that one must stay.
+    docs = [doc for doc in yaml.safe_load_all(kind_chart_render) if doc]
+    alerts = [r.get("alert") for d in docs if d["kind"] == "PrometheusRule"
+              for g in d["spec"]["groups"] for r in g["rules"]]
+    assert "KubePodCrashLooping" in alerts, "the chart's restart alert is missing, or no rules were found"
+    assert "AlertmanagerClusterCrashlooping" not in alerts

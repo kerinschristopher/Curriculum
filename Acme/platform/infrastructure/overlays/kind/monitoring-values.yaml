@@ -10,3 +10,9 @@ prometheus:
       requests:
         cpu: 200m
         memory: 400Mi
+
+# WSL2 steps the node's clock, so every process's start time moves at each scrape and this alert never stops
+# firing on kind (2026-11-10: 20 changes in 10 min, 0 restarts). KubePodCrashLooping still counts restarts.
+defaultRules:
+  disabled:
+    AlertmanagerClusterCrashlooping: true
