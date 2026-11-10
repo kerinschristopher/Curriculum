@@ -833,6 +833,8 @@ def test_prometheus_selects_each_env_sample_api_monitor(chart_render):
 MONITORING_CONFIG = "Acme/platform/infrastructure/monitoring-config"
 ALERT_TESTS = REPO / MONITORING_CONFIG / "sample-api-alerts.test.yaml"
 SAMPLE_API_DASHBOARD = REPO / MONITORING_CONFIG / "dashboards" / "sample-api.json"
+# D4 = C: the chart's dashboard the on-call doc names for cluster health, by uid and title.
+CLUSTER_HEALTH_DASHBOARD = ("7d57716318ee0dddbac5a7f451fb7753", "Node Exporter / Nodes")
 
 
 def promtool(chart_render, folder, *args):
@@ -885,25 +887,27 @@ def test_nothing_watches_the_control_plane_kind_hides(chart_render):
     assert [e for e in exprs if CONTROL_PLANE.search(str(e))] == []
 
 
+def sidecar_dashboards(chart_docs, docs):
+    """{file name: JSON text} for each dashboard in `docs` that Grafana's sidecar loads: ConfigMaps carrying
+    the label the chart gives the sidecar. The label is read from the chart, so a renamed one shows."""
+    [grafana] = [d for d in chart_docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-grafana")]
+    [sidecar] = [c for c in grafana["spec"]["template"]["spec"]["containers"] if c["name"] == "grafana-sc-dashboard"]
+    env = {e["name"]: e.get("value") for e in sidecar["env"]}
+    label = (env["LABEL"], env["LABEL_VALUE"])
+    return {key: text for d in docs if d["kind"] == "ConfigMap" and label in d["metadata"].get("labels", {}).items()
+            for key, text in d.get("data", {}).items()}
+
+
 def test_grafana_loads_the_sample_api_dashboard(chart_render):
     # FR4 (D4 = C): Grafana sees a dashboard only through its sidecar, which loads ConfigMaps carrying the
     # label the chart gives it. The label is read from the chart, so a renamed one shows here, not as a
     # dashboard missing from Grafana. The file in Git must be what Flux applies, and its uid its own: two
     # dashboards with one uid means one silently replaces the other.
     chart_docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
-    [grafana] = [d for d in chart_docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-grafana")]
-    [sidecar] = [c for c in grafana["spec"]["template"]["spec"]["containers"] if c["name"] == "grafana-sc-dashboard"]
-    env = {e["name"]: e.get("value") for e in sidecar["env"]}
-    label = (env["LABEL"], env["LABEL_VALUE"])
-
-    def loaded(docs):
-        return {key: text for d in docs if d["kind"] == "ConfigMap" and label in d["metadata"].get("labels", {}).items()
-                for key, text in d.get("data", {}).items()}
-
-    ours = loaded(rendered(MONITORING_CONFIG))
-    assert sorted(ours) == [SAMPLE_API_DASHBOARD.name], label
+    ours = sidecar_dashboards(chart_docs, rendered(MONITORING_CONFIG))
+    assert sorted(ours) == [SAMPLE_API_DASHBOARD.name]
     assert ours[SAMPLE_API_DASHBOARD.name] == SAMPLE_API_DASHBOARD.read_text()
-    defaults = {json.loads(text)["uid"] for text in loaded(chart_docs).values()}
+    defaults = {json.loads(text)["uid"] for text in sidecar_dashboards(chart_docs, chart_docs).values()}
     assert json.loads(ours[SAMPLE_API_DASHBOARD.name])["uid"] not in defaults, sorted(defaults)
 
 
@@ -954,3 +958,14 @@ def test_every_sample_api_dashboard_query_uses_the_chart_datasource(chart_render
         "type": "grafana", "uid": "-- Grafana --"}]
     assert used, "no datasources found in the dashboard"
     assert sorted({s["uid"] for s in used}) == [prometheus["uid"]], used
+
+
+def test_the_named_cluster_health_dashboard_is_installed(chart_render):
+    # D4 = C: the on-call doc (P8) sends people to this chart dashboard for cluster health. It arrives only
+    # while grafana.defaultDashboardsEnabled is on and the chart still ships it, so the switch turned off or
+    # a chart bump that drops or renames it would leave the doc pointing at nothing.
+    # Characterisation (C6): green on arrival; the switch off turns it red.
+    chart_docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
+    dashboards = [json.loads(text) for text in sidecar_dashboards(chart_docs, chart_docs).values()]
+    uid, title = CLUSTER_HEALTH_DASHBOARD
+    assert {d["uid"]: d["title"] for d in dashboards}.get(uid) == title, sorted(d["title"] for d in dashboards)
