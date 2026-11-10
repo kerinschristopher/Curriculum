@@ -905,3 +905,26 @@ def test_grafana_loads_the_sample_api_dashboard(chart_render):
     assert ours[SAMPLE_API_DASHBOARD.name] == SAMPLE_API_DASHBOARD.read_text()
     defaults = {json.loads(text)["uid"] for text in loaded(chart_docs).values()}
     assert json.loads(ours[SAMPLE_API_DASHBOARD.name])["uid"] not in defaults, sorted(defaults)
+
+
+def test_every_sample_api_dashboard_query_is_valid_promql(chart_render, tmp_path):
+    # FR4: Grafana sends a panel's query to Prometheus only when someone opens the dashboard, so a typo shows
+    # as an empty panel during an incident, not as a failure. Grafana fills in its variables first, so the test
+    # does too, then has promtool (the pinned Prometheus image's) parse each query as a recording rule. The
+    # variable's own query, label_values(...), is Grafana's syntax, not PromQL, so it isn't checked.
+    # Characterisation (C6): green on arrival; a broken query turns it red (recorded).
+    dashboard = json.loads(SAMPLE_API_DASHBOARD.read_text())
+    filled = {"$__rate_interval": "5m", "$namespace": "sample-api-dev"}
+    rules = []
+    for panel in [p for top in dashboard["panels"] for p in [top, *top.get("panels", [])]]:
+        for target in panel.get("targets", []):
+            expr = target["expr"]
+            for variable, value in filled.items():
+                expr = expr.replace(variable, value)
+            assert "$" not in expr, (panel["title"], expr)
+            rules.append({"record": f"dashboard:panel_{panel['id']}_{target['refId']}", "expr": expr})
+    assert rules, "no queries found in the dashboard"
+    (tmp_path / "dashboard.rules.yaml").write_text(
+        yaml.safe_dump({"groups": [{"name": "sample-api-dashboard", "rules": rules}]}))
+    run = promtool(chart_render, tmp_path, "check", "rules", "dashboard.rules.yaml")
+    assert run.returncode == 0, run.stdout + run.stderr
