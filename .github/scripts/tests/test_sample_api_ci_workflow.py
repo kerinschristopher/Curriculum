@@ -60,6 +60,10 @@ GUARDED = [
     "Acme/platform/apps/sample-api/overlays/dev/new-patch.json",
     "Acme/platform/apps/overlays/dev/extra/Kustomization",
     "Acme/infra/bootstrap/new-file.json",
+    # test_flux_layout.py's dashboard tests read this; it isn't YAML, so only a prefix rule runs them (P7).
+    "Acme/platform/infrastructure/monitoring-config/dashboards/sample-api.json",
+    # test_flux_layout.py's chart tests render the chart with these values (chart_render).
+    "Acme/platform/infrastructure/base/monitoring/values.yaml",
 ]
 
 # One path per prefix in the app filter: the app's code, its manifests, Flux's bootstrap
