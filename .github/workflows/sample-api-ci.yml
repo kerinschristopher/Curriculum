@@ -40,11 +40,11 @@ env:
   # GHCR image names must be lowercase.
   IMAGE_NAME: ghcr.io/kerinschristopher/sample-api
   # The kustomize Flux's kustomize-controller renders with; both render jobs install it, so CI
-  # renders as the cluster does. test_kustomize_pin_matches_the_flux_version ties it to FLUX_VERSION.
+  # renders as the cluster does. test_pin_matches_the_flux_version[kustomize] ties it to FLUX_VERSION.
   KUSTOMIZE_VERSION: "5.8.1"
   KUSTOMIZE_SHA256: 029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d
   # The Helm Flux's helm-controller renders charts with (v1.7.1 embeds v4.3.1); scripts-test installs it
-  # for P4b's render test. test_helm_pin_matches_the_flux_version ties it to FLUX_VERSION.
+  # for P4b's render test. test_pin_matches_the_flux_version[helm] ties it to FLUX_VERSION.
   HELM_VERSION: "4.3.1"
   HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
 

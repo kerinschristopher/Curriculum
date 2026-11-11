@@ -220,24 +220,19 @@ def test_kustomize_job_validates_against_the_versions_the_cluster_runs():
     assert (str(env.get("FLUX_VERSION")), str(env.get("OPERATOR_VERSION"))) == (flux, operator)
 
 
-def test_helm_pin_matches_the_flux_version():
-    # scripts-test installs HELM_VERSION, so P4b renders kube-prometheus-stack as helm-controller does;
-    # the runner image ships Helm 3.22.1. FLUX_VERSION is tied to flux-instance.yaml by the test above.
+@pytest.mark.parametrize(
+    "tool, table",
+    [("KUSTOMIZE", KUSTOMIZE_FOR_FLUX), ("HELM", HELM_FOR_FLUX)],
+    ids=["kustomize", "helm"],
+)
+def test_pin_matches_the_flux_version(tool, table):
+    # CI installs <tool>_VERSION, so it renders as Flux's controllers do, whatever the runner image
+    # ships (kustomize 5.8.3, Helm 3.22.1). FLUX_VERSION is tied to flux-instance.yaml by the test above.
     env = yaml.safe_load(WORKFLOW.read_text()).get("env", {})
     flux = str(kustomize_step("Validate manifests against their schemas").get("env", {}).get("FLUX_VERSION"))
-    assert flux in HELM_FOR_FLUX, f"look up the Helm that Flux {flux}'s helm-controller embeds"
-    assert str(env.get("HELM_VERSION")) == HELM_FOR_FLUX[flux], env
-    assert re.fullmatch(r"[0-9a-f]{64}", str(env.get("HELM_SHA256", ""))), env
-
-
-def test_kustomize_pin_matches_the_flux_version():
-    # Both render jobs install KUSTOMIZE_VERSION, so CI renders as Flux's controller does, whatever
-    # kubectl the runner image ships. FLUX_VERSION is tied to flux-instance.yaml by the test above.
-    env = yaml.safe_load(WORKFLOW.read_text()).get("env", {})
-    flux = str(kustomize_step("Validate manifests against their schemas").get("env", {}).get("FLUX_VERSION"))
-    assert flux in KUSTOMIZE_FOR_FLUX, f"look up the kustomize that Flux {flux}'s kustomize-controller uses"
-    assert str(env.get("KUSTOMIZE_VERSION")) == KUSTOMIZE_FOR_FLUX[flux], env
-    assert re.fullmatch(r"[0-9a-f]{64}", str(env.get("KUSTOMIZE_SHA256", ""))), env
+    assert flux in table, f"Flux {flux} has no {tool} row: look up the version its controller renders with"
+    assert str(env.get(f"{tool}_VERSION")) == table[flux], env
+    assert re.fullmatch(r"[0-9a-f]{64}", str(env.get(f"{tool}_SHA256", ""))), env
 
 
 def test_kustomize_job_installs_the_pinned_kustomize_first():
