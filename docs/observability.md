@@ -99,7 +99,7 @@ for r in json.load(sys.stdin)["data"]["result"]:
 7. **CPU throttling** and **Memory used vs limit** (panels 8-9): is a pod held back at its CPU limit, or killed at its
    memory limit? A container killed for memory shows as a restart in panel 6.
 8. **Which route?** In Explore, run "5xx by route" from [Explore starters](#explore-starters). Then read the pods' logs:
-   `kubectl -n sample-api-prod logs deploy/sample-api` (with the environment's namespace).
+   `kubectl -n sample-api-prod logs -l app=sample-api --prefix --tail=200` (with the environment's namespace).
 
 ### Make it fire on dev
 
