@@ -269,7 +269,7 @@ def test_kustomize_job_validates_against_the_cluster_kubernetes_version():
 
 
 def test_kustomize_job_validates_monitoring_kinds_at_a_fixed_commit():
-    # P3a (FR1, C12): -strict fails a kind it has no schema for, so without this location P4c's
+    # P3a (FR1, C12): kubeconform runs without -ignore-missing-schemas, so without this location P4c's
     # ServiceMonitor turns the job red ("could not find schema"). datreeio's catalog serves
     # monitoring.coreos.com's kinds; pinned by commit, as Kubernetes' schemas are, so the catalog's
     # moving main can't turn a required check red with no commit here.

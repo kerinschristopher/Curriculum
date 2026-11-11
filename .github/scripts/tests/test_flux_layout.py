@@ -104,6 +104,13 @@ def test_each_env_scrapes_its_own_sample_api_metrics_port():
         assert endpoints == [("metrics", "/metrics")], (env, endpoints)
         assert "namespaceSelector" not in monitor["spec"], (env, monitor["spec"])
         assert monitor["metadata"]["namespace"] == service["metadata"]["namespace"], env
+        # The alert and the dashboard select job="sample-api": the operator names the job after the Service only
+        # while the monitor sets no jobLabel and no relabeling writes `job`. Either would empty both silently,
+        # and the promtool tests, fed series already labelled, would stay green (pre-review).
+        assert "jobLabel" not in monitor["spec"], (env, monitor["spec"])
+        rewrites = [r for e in monitor["spec"]["endpoints"] for key in ("relabelings", "metricRelabelings")
+                    for r in e.get(key, []) if r.get("targetLabel") == "job"]
+        assert rewrites == [], (env, rewrites)
 
 
 def env_value(objects, container, name):
