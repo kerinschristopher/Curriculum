@@ -323,6 +323,42 @@ func TestHandlersBehindInstrumentCanFlush(t *testing.T) {
 	}
 }
 
+// The code label must be the status the client got. Go sends only the first status a handler sets, and a
+// Write before any WriteHeader has already sent 200, so a WriteHeader after either changes nothing (E9).
+func TestStatusLabelIsTheOneSent(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /twice", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /late", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	m := newMetrics()
+	app := m.instrument(mux)
+
+	for _, tc := range []struct {
+		path      string
+		sent      int
+		wantCount string
+	}{
+		{"/twice", http.StatusInternalServerError, `http_request_duration_seconds_count{code="500",method="GET",route="/twice"} 1`},
+		{"/late", http.StatusOK, `http_request_duration_seconds_count{code="200",method="GET",route="/late"} 1`},
+	} {
+		t.Run(strings.TrimPrefix(tc.path, "/"), func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			app.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if rec.Code != tc.sent {
+				t.Fatalf("GET %s sent %d, want %d: the test's handler is wrong, not instrument()", tc.path, rec.Code, tc.sent)
+			}
+			if body := scrape(m); !strings.Contains(body, tc.wantCount) {
+				t.Errorf("metrics output lacks %q\n--- output ---\n%s", tc.wantCount, body)
+			}
+		})
+	}
+}
+
 // /fault answers 500 only when switched on, and those 500s are counted like any route's: they are the alert's input.
 // Switched off, it is just an unknown path.
 func TestFaultRoute(t *testing.T) {

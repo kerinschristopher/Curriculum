@@ -79,15 +79,26 @@ func methodOf(r *http.Request) string {
 	return "other"
 }
 
-// statusRecorder remembers the status a handler sent; one that never calls WriteHeader sent 200.
+// statusRecorder remembers the status the client got: the first one the handler set, or 200 if it wrote a
+// body first or never called WriteHeader. Go ignores (and logs) every WriteHeader after that (E9).
 type statusRecorder struct {
 	http.ResponseWriter
 	code int
+	sent bool
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
-	s.code = code
+	if !s.sent {
+		s.code = code
+		s.sent = true
+	}
 	s.ResponseWriter.WriteHeader(code)
+}
+
+// Write sends 200 if no status was set yet, and code already holds 200.
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	s.sent = true
+	return s.ResponseWriter.Write(b)
 }
 
 // Unwrap lets http.ResponseController reach the real writer (Flush, deadlines). A type assertion such as
