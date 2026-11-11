@@ -79,8 +79,9 @@ func methodOf(r *http.Request) string {
 	return "other"
 }
 
-// statusRecorder remembers the status the client got: the first one the handler set, or 200 if it wrote a
-// body first or never called WriteHeader. Go ignores (and logs) every WriteHeader after that (E9).
+// statusRecorder remembers the status the client got: the first final one the handler set, or 200 if it
+// wrote a body or flushed first, or never called WriteHeader. Go ignores (and logs) every WriteHeader after
+// that. A 1xx other than 101 is informational: more may follow, then the real status (E9).
 type statusRecorder struct {
 	http.ResponseWriter
 	code int
@@ -88,7 +89,8 @@ type statusRecorder struct {
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
-	if !s.sent {
+	informational := code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
+	if !s.sent && !informational {
 		s.code = code
 		s.sent = true
 	}
@@ -101,6 +103,13 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
-// Unwrap lets http.ResponseController reach the real writer (Flush, deadlines). A type assertion such as
-// w.(http.Flusher) still fails on statusRecorder, so handlers use ResponseController.
+// FlushError sends 200 if no status was set yet, as Write does. http.ResponseController looks for it before
+// Unwrap, so a Flush can't send the status past the recorder.
+func (s *statusRecorder) FlushError() error {
+	s.sent = true
+	return http.NewResponseController(s.ResponseWriter).Flush()
+}
+
+// Unwrap lets http.ResponseController reach the real writer's other features (write deadlines). A type
+// assertion such as w.(http.Flusher) still fails on statusRecorder, so handlers use ResponseController.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
