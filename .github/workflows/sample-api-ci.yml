@@ -317,7 +317,7 @@ jobs:
           persist-credentials: false
 
       # The runner image ships its own kustomize (5.8.3 on 20261101.360.1); test_flux_layout.py renders
-      # with KUSTOMIZE_VERSION, as Flux does, and test_renders_use_the_pinned_kustomize checks it.
+      # with KUSTOMIZE_VERSION, as Flux does, and test_renders_use_the_pinned_tool[kustomize] checks it.
       - name: Install kustomize
         working-directory: ${{ runner.temp }}
         run: |
@@ -329,7 +329,7 @@ jobs:
           kustomize version
 
       # The runner image ships Helm 3.22.1; P4b's render test renders the chart with HELM_VERSION, as
-      # helm-controller does, and test_renders_use_the_pinned_helm checks it.
+      # helm-controller does, and test_renders_use_the_pinned_tool[helm] checks it.
       - name: Install Helm
         working-directory: ${{ runner.temp }}
         run: |

@@ -181,21 +181,21 @@ def rendered(entry):
     return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
 
 
-def test_renders_use_the_pinned_kustomize():
-    # The kustomize on PATH must be the one sample-api-ci.yml pins to Flux's version, in scripts-test
-    # and locally: the runner image ships its own (5.8.3), and kubectl bundles yet another.
+@pytest.mark.parametrize(
+    "env_key, command",
+    [
+        ("KUSTOMIZE_VERSION", ["kustomize", "version"]),
+        ("HELM_VERSION", ["helm", "version", "--template", "{{.Version}}"]),
+    ],
+    ids=["kustomize", "helm"],
+)
+def test_renders_use_the_pinned_tool(env_key, command):
+    # The kustomize and Helm on PATH must be the ones sample-api-ci.yml pins to Flux's version, in
+    # scripts-test and locally: the runner image ships its own (kustomize 5.8.3, Helm 3.22.1), and
+    # kubectl bundles yet another kustomize.
     workflow = yaml.safe_load((REPO / ".github" / "workflows" / "sample-api-ci.yml").read_text())
-    pinned = f"v{workflow['env']['KUSTOMIZE_VERSION']}"
-    version = subprocess.run(["kustomize", "version"], capture_output=True, text=True, check=True)
-    assert version.stdout.strip() == pinned, version.stdout
-
-
-def test_renders_use_the_pinned_helm():
-    # The Helm on PATH must be the one sample-api-ci.yml pins to Flux's version, in scripts-test and
-    # locally: the runner image ships Helm 3.22.1, and helm-controller renders with v4.3.1.
-    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "sample-api-ci.yml").read_text())
-    pinned = f"v{workflow['env']['HELM_VERSION']}"
-    version = subprocess.run(["helm", "version", "--template", "{{.Version}}"], capture_output=True, text=True, check=True)
+    pinned = f"v{workflow['env'][env_key]}"
+    version = subprocess.run(command, capture_output=True, text=True, check=True)
     assert version.stdout.strip() == pinned, version.stdout
 
 
