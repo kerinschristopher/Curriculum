@@ -803,13 +803,34 @@ def chart_render(chart):
     return helm_template(chart, MONITORING / "values.yaml")
 
 
+# D4 (PR #23 review): the images the chart runs, by repository; their tags and digests live only in values.yaml.
+# IMAGE_REFERENCE needs a tag, so an image with none (in a spec.image or an operator argument) is missing from
+# what the scan finds and fails the comparison, as does a new image from a chart upgrade or a scan that finds nothing.
+CHART_IMAGES = {
+    "docker.io/grafana/grafana",
+    "ghcr.io/jkroepke/kube-webhook-certgen",
+    "quay.io/kiwigrid/k8s-sidecar",
+    "quay.io/prometheus-operator/prometheus-config-reloader",
+    "quay.io/prometheus-operator/prometheus-operator",
+    "quay.io/prometheus/alertmanager",
+    "quay.io/prometheus/node-exporter",
+    "quay.io/prometheus/prometheus",
+    "quay.io/thanos/thanos",
+    "registry.k8s.io/kube-state-metrics/kube-state-metrics",
+}
+
+
+def repository(image):
+    """An image reference without its tag and digest."""
+    return re.sub(rf"(:[^/:@]+)?(@{DIGEST.pattern})?$", "", image)
+
+
 def test_every_image_the_chart_runs_is_pinned(chart_render):
     # A re-pushed tag changes what runs, and the operator runs with cluster-wide rights (NFR3).
     # test_every_container_flux_deploys_has_a_tag_and_digest reads kustomize renders, so it never sees these.
     docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
     images = set(IMAGE_REFERENCE.findall(chart_render)) | {i for doc in docs for i in container_images(doc)}
-    # Prometheus's image is in no container field, so only the scan finds it: a broken scan fails here.
-    assert any("/prometheus/prometheus:" in image for image in images), sorted(images)
+    assert {repository(image) for image in images} == CHART_IMAGES
     assert sorted(image for image in images if not TAG_AND_DIGEST.search(image)) == []
 
 
