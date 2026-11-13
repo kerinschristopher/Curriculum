@@ -1,0 +1,94 @@
+# promtool unit tests for SampleApiHighErrorRate (Module 9 P5, FR3). Not listed in kustomization.yaml, so
+# Flux never applies it. test_sample_api_alert_behaves_as_its_promtool_tests_say writes the PrometheusRule's
+# spec to sample-api-alerts.rules.yaml beside a copy of this file, then runs promtool from the pinned
+# Prometheus image. Series are per minute; the rule needs 5 minutes over the threshold.
+rule_files:
+  - sample-api-alerts.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: 10% of dev's requests fail, so it fires after 5 minutes, naming dev
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="/fault",method="GET",code="500"}'
+        values: '0+1x20'
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="unmatched",method="GET",code="404"}'
+        values: '0+9x20'
+    alert_rule_test:
+      # True from minute 1 (rate needs two samples), so still pending at 5...
+      - eval_time: 5m
+        alertname: SampleApiHighErrorRate
+        exp_alerts: []
+      # ...and firing at 6.
+      - eval_time: 6m
+        alertname: SampleApiHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: sample-api-dev
+            exp_annotations:
+              summary: sample-api is failing more than 5% of requests in sample-api-dev
+              description: '10% of requests returned 5xx over the last 5 minutes.'
+
+  - name: 1% of dev's requests fail, under the 5% threshold, so it never fires
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="/fault",method="GET",code="500"}'
+        values: '0+1x20'
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="unmatched",method="GET",code="404"}'
+        values: '0+99x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiHighErrorRate
+        exp_alerts: []
+
+  - name: no requests at all (0 of 0 is not a rate), so it never fires
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="/fault",method="GET",code="500"}'
+        values: '0x20'
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="unmatched",method="GET",code="404"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: SampleApiHighErrorRate
+        exp_alerts: []
+
+  - name: only stage fails, so only stage is named
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-stage",route="/fault",method="GET",code="500"}'
+        values: '0+1x20'
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-stage",route="unmatched",method="GET",code="404"}'
+        values: '0+9x20'
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="unmatched",method="GET",code="404"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SampleApiHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: sample-api-stage
+            exp_annotations:
+              summary: sample-api is failing more than 5% of requests in sample-api-stage
+              description: '10% of requests returned 5xx over the last 5 minutes.'
+
+  - name: the kubelet's /health probes (always 200) don't hide 10% of dev's other requests failing
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="/health",method="GET",code="200"}'
+        values: '0+18x20'
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="/fault",method="GET",code="500"}'
+        values: '0+1x20'
+      - series: 'http_request_duration_seconds_count{job="sample-api",namespace="sample-api-dev",route="unmatched",method="GET",code="404"}'
+        values: '0+9x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SampleApiHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: sample-api-dev
+            exp_annotations:
+              summary: sample-api is failing more than 5% of requests in sample-api-dev
+              description: '10% of requests returned 5xx over the last 5 minutes.'

@@ -10,6 +10,7 @@ schema check all accept a tag-only image, so nothing else notices a missing dige
 import functools
 import http.server
 import json
+import os
 import re
 import subprocess
 import sys
@@ -88,6 +89,30 @@ def test_the_service_exposes_the_metrics_port_the_app_listens_on():
         assert ports.get(targets.get("metrics"), targets.get("metrics")) == 8081, (env, targets)
 
 
+def test_each_env_scrapes_its_own_sample_api_metrics_port():
+    # P4c (FR2): a ServiceMonitor in sample-api's base, so each env's namespace gets one. It must pick the
+    # Service by its labels and name its `metrics` port (8081, test above), and stay in its own namespace:
+    # with three envs, a namespaceSelector would scrape every env's pods three times over.
+    for env in SAMPLE_API_ENVS:
+        objects = sample_api_objects(env)
+        monitor = objects.get(("ServiceMonitor", "sample-api"))
+        assert monitor, (env, sorted(objects))
+        service = objects[("Service", "sample-api")]
+        selector = monitor["spec"]["selector"]["matchLabels"]
+        assert selector.items() <= service["metadata"]["labels"].items(), (env, selector)
+        endpoints = [(e.get("port"), e.get("path", "/metrics")) for e in monitor["spec"]["endpoints"]]
+        assert endpoints == [("metrics", "/metrics")], (env, endpoints)
+        assert "namespaceSelector" not in monitor["spec"], (env, monitor["spec"])
+        assert monitor["metadata"]["namespace"] == service["metadata"]["namespace"], env
+        # The alert and the dashboard select job="sample-api": the operator names the job after the Service only
+        # while the monitor sets no jobLabel and no relabeling writes `job`. Either would empty both silently,
+        # and the promtool tests, fed series already labelled, would stay green (pre-review).
+        assert "jobLabel" not in monitor["spec"], (env, monitor["spec"])
+        rewrites = [r for e in monitor["spec"]["endpoints"] for key in ("relabelings", "metricRelabelings")
+                    for r in e.get(key, []) if r.get("targetLabel") == "job"]
+        assert rewrites == [], (env, rewrites)
+
+
 def env_value(objects, container, name):
     """`name`'s value in `container`, following a configMapKeyRef into the rendered ConfigMap; None if unset."""
     for var in container.get("env", []):
@@ -163,21 +188,21 @@ def rendered(entry):
     return tuple(doc for doc in yaml.safe_load_all(render.stdout) if doc)
 
 
-def test_renders_use_the_pinned_kustomize():
-    # The kustomize on PATH must be the one sample-api-ci.yml pins to Flux's version, in scripts-test
-    # and locally: the runner image ships its own (5.8.3), and kubectl bundles yet another.
+@pytest.mark.parametrize(
+    "env_key, command",
+    [
+        ("KUSTOMIZE_VERSION", ["kustomize", "version"]),
+        ("HELM_VERSION", ["helm", "version", "--template", "{{.Version}}"]),
+    ],
+    ids=["kustomize", "helm"],
+)
+def test_renders_use_the_pinned_tool(env_key, command):
+    # The kustomize and Helm on PATH must be the ones sample-api-ci.yml pins to Flux's version, in
+    # scripts-test and locally: the runner image ships its own (kustomize 5.8.3, Helm 3.22.1), and
+    # kubectl bundles yet another kustomize.
     workflow = yaml.safe_load((REPO / ".github" / "workflows" / "sample-api-ci.yml").read_text())
-    pinned = f"v{workflow['env']['KUSTOMIZE_VERSION']}"
-    version = subprocess.run(["kustomize", "version"], capture_output=True, text=True, check=True)
-    assert version.stdout.strip() == pinned, version.stdout
-
-
-def test_renders_use_the_pinned_helm():
-    # The Helm on PATH must be the one sample-api-ci.yml pins to Flux's version, in scripts-test and
-    # locally: the runner image ships Helm 3.22.1, and helm-controller renders with v4.3.1.
-    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "sample-api-ci.yml").read_text())
-    pinned = f"v{workflow['env']['HELM_VERSION']}"
-    version = subprocess.run(["helm", "version", "--template", "{{.Version}}"], capture_output=True, text=True, check=True)
+    pinned = f"v{workflow['env'][env_key]}"
+    version = subprocess.run(command, capture_output=True, text=True, check=True)
     assert version.stdout.strip() == pinned, version.stdout
 
 
@@ -219,7 +244,9 @@ def test_every_container_flux_deploys_has_a_tag_and_digest():
     for entry in ENTRY_POINTS:
         found[entry] = [image for doc in rendered(entry) for image in container_images(doc)]
     # Bootstrap holds no containers: test_operator_image_is_pinned_by_tag_and_digest covers its image.
-    empty = [entry for entry, images in found.items() if not images and entry != "Acme/infra/bootstrap"]
+    # monitoring-config holds only the alert rule and dashboard ConfigMaps (Module 9 D1 = C).
+    no_containers = {"Acme/infra/bootstrap", "Acme/platform/infrastructure/monitoring-config"}
+    empty = [entry for entry, images in found.items() if not images and entry not in no_containers]
     assert empty == []
     unpinned = sorted({i for images in found.values() for i in images if not TAG_AND_DIGEST.search(i)})
     assert unpinned == []
@@ -415,10 +442,16 @@ def test_platform_applies_infrastructure_then_each_env():
     kustomizations = flux_kustomizations()
     envs = sorted(path.parent.name for path in APPS_ENTRY_POINTS.glob("*/kustomization.yaml"))
     assert envs, APPS_ENTRY_POINTS
-    assert sorted(kustomizations) == sorted(["infrastructure"] + [f"apps-{env}" for env in envs])
+    assert sorted(kustomizations) == sorted(["infrastructure", "monitoring-config"] + [f"apps-{env}" for env in envs])
     assert kustomizations["infrastructure"]["path"] == "./Acme/platform/infrastructure/overlays/kind"
     # The ingress webhook must be running before any Ingress is applied.
     assert kustomizations["infrastructure"].get("wait") is True
+    # Module 9 D1 = C: the alert rule and our dashboard need the chart's CRDs, so they apply only after
+    # infrastructure is Ready (F22). wait: Ready means the rule is in the cluster, not just sent.
+    config = kustomizations["monitoring-config"]
+    assert config["path"] == "./Acme/platform/infrastructure/monitoring-config"
+    assert {"name": "infrastructure"} in config.get("dependsOn", [])
+    assert config.get("wait") is True
     for env in envs:
         spec = kustomizations[f"apps-{env}"]
         assert spec["path"] == f"./Acme/platform/apps/overlays/{env}", env
@@ -756,19 +789,47 @@ def test_the_chart_at_the_digest_is_the_tagged_version(chart):
     assert yaml.safe_load(show.stdout)["version"] == tag
 
 
-@pytest.fixture(scope="session")
-def chart_render(chart):
-    """The chart's manifests as helm-controller renders them: values.yaml, the release's name and namespace,
-    and the kind node's Kubernetes version. Hooks included, because Helm renders them too."""
+def helm_template(chart, *values):
+    """The chart's manifests as helm-controller renders them: `values` files merged in order (the later
+    wins), the release's name and namespace, and the kind node's Kubernetes version. Hooks included,
+    because Helm renders them too."""
     release = monitoring_objects()[RELEASE]["metadata"]
     cluster = yaml.safe_load((REPO / "Acme" / "platform" / "kind" / "sample-api-cluster.yaml").read_text())
     kube_version = re.search(r":v(\d+\.\d+\.\d+)@", cluster["nodes"][0]["image"]).group(1)
     render = subprocess.run(
         ["helm", "template", release["name"], str(chart), "--namespace", release["namespace"],
-         "--values", str(MONITORING / "values.yaml"), "--kube-version", kube_version],
+         *[arg for path in values for arg in ("--values", str(path))], "--kube-version", kube_version],
         capture_output=True, text=True, check=True,
     )
     return render.stdout
+
+
+@pytest.fixture(scope="session")
+def chart_render(chart):
+    """The chart rendered with base values.yaml alone."""
+    return helm_template(chart, MONITORING / "values.yaml")
+
+
+# D4 (PR #23 review): the images the chart runs, by repository; their tags and digests live only in values.yaml.
+# IMAGE_REFERENCE needs a tag, so an image with none (in a spec.image or an operator argument) is missing from
+# what the scan finds and fails the comparison, as does a new image from a chart upgrade or a scan that finds nothing.
+CHART_IMAGES = {
+    "docker.io/grafana/grafana",
+    "ghcr.io/jkroepke/kube-webhook-certgen",
+    "quay.io/kiwigrid/k8s-sidecar",
+    "quay.io/prometheus-operator/prometheus-config-reloader",
+    "quay.io/prometheus-operator/prometheus-operator",
+    "quay.io/prometheus/alertmanager",
+    "quay.io/prometheus/node-exporter",
+    "quay.io/prometheus/prometheus",
+    "quay.io/thanos/thanos",
+    "registry.k8s.io/kube-state-metrics/kube-state-metrics",
+}
+
+
+def repository(image):
+    """An image reference without its tag and digest."""
+    return re.sub(rf"(:[^/:@]+)?(@{DIGEST.pattern})?$", "", image)
 
 
 def test_every_image_the_chart_runs_is_pinned(chart_render):
@@ -776,9 +837,78 @@ def test_every_image_the_chart_runs_is_pinned(chart_render):
     # test_every_container_flux_deploys_has_a_tag_and_digest reads kustomize renders, so it never sees these.
     docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
     images = set(IMAGE_REFERENCE.findall(chart_render)) | {i for doc in docs for i in container_images(doc)}
-    # Prometheus's image is in no container field, so only the scan finds it: a broken scan fails here.
-    assert any("/prometheus/prometheus:" in image for image in images), sorted(images)
+    assert {repository(image) for image in images} == CHART_IMAGES
     assert sorted(image for image in images if not TAG_AND_DIGEST.search(image)) == []
+
+
+def selects(selector, labels):
+    """Whether a label selector picks `labels`. matchExpressions aren't read, so they fail loudly here."""
+    assert set(selector) <= {"matchLabels"}, selector
+    return selector.get("matchLabels", {}).items() <= labels.items()
+
+
+def test_prometheus_selects_each_env_sample_api_monitor(chart_render):
+    # P4c+ (F7): the chart's Prometheus picks only monitors labelled release: <release> unless told
+    # otherwise, so sample-api's unlabelled ServiceMonitor would never be scraped, silently. Checked
+    # against each env's real monitor and namespace, so a selector narrowed again, or a label dropped
+    # from either side, shows here.
+    [prometheus] = [doc for doc in yaml.safe_load_all(chart_render) if doc and doc["kind"] == "Prometheus"]
+    spec = prometheus["spec"]
+    for env in SAMPLE_API_ENVS:
+        objects = sample_api_objects(env)
+        monitor = objects[("ServiceMonitor", "sample-api")]
+        namespace = objects[("Namespace", monitor["metadata"]["namespace"])]
+        assert selects(spec["serviceMonitorSelector"], monitor["metadata"].get("labels", {})), (
+            env, spec["serviceMonitorSelector"])
+        assert selects(spec["serviceMonitorNamespaceSelector"], namespace["metadata"].get("labels", {})), (
+            env, spec["serviceMonitorNamespaceSelector"])
+
+
+MONITORING_CONFIG = "Acme/platform/infrastructure/monitoring-config"
+ALERT_TESTS = REPO / MONITORING_CONFIG / "sample-api-alerts.test.yaml"
+SAMPLE_API_DASHBOARD = REPO / MONITORING_CONFIG / "dashboards" / "sample-api.json"
+# D4 = C: the chart's dashboard the on-call doc names for cluster health, by uid and title.
+CLUSTER_HEALTH_DASHBOARD = ("7d57716318ee0dddbac5a7f451fb7753", "Node Exporter / Nodes")
+
+
+def promtool(chart_render, folder, *args):
+    """promtool from the Prometheus image the chart runs (P3b = B: values.yaml holds the one pin), run in `folder`."""
+    [prometheus] = [doc for doc in yaml.safe_load_all(chart_render) if doc and doc["kind"] == "Prometheus"]
+    image = prometheus["spec"]["image"]
+    assert TAG_AND_DIGEST.search(image), image
+    docker = subprocess.run(["docker", "info"], capture_output=True, text=True)
+    if docker.returncode:
+        pytest.fail(f"promtool runs in Docker, which isn't answering (start Docker Desktop): {docker.stderr.strip()}")
+    # As the host's user: pytest's tmp_path is mode 0700, and the image's own user couldn't read it.
+    return subprocess.run(
+        ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "--volume", f"{folder}:/work",
+         "--workdir", "/work", "--entrypoint", "/bin/promtool", image, *args],
+        capture_output=True, text=True,
+    )
+
+
+def test_sample_api_alert_behaves_as_its_promtool_tests_say(chart_render, tmp_path):
+    # FR3: the rule's maths, proved before merge. The rule is read from what Flux applies (a file the
+    # kustomization doesn't list is never applied). promtool reads plain rule files, not Kubernetes
+    # objects, so the PrometheusRule's spec is copied out: the object in Git stays the only copy.
+    [rule] = [doc for doc in rendered(MONITORING_CONFIG) if doc["kind"] == "PrometheusRule"]
+    (tmp_path / "sample-api-alerts.rules.yaml").write_text(yaml.safe_dump(rule["spec"]))
+    (tmp_path / ALERT_TESTS.name).write_text(ALERT_TESTS.read_text())
+    run = promtool(chart_render, tmp_path, "test", "rules", ALERT_TESTS.name)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_prometheus_loads_the_sample_api_rule(chart_render):
+    # P5 (F7 again): the chart's Prometheus loads only rules labelled release: <release> unless told
+    # otherwise, so the unlabelled rule would pass promtool and still never be evaluated, silently.
+    # Checked against the rule Flux applies and the namespace it lands in.
+    [prometheus] = [doc for doc in yaml.safe_load_all(chart_render) if doc and doc["kind"] == "Prometheus"]
+    spec = prometheus["spec"]
+    [rule] = [doc for doc in rendered(MONITORING_CONFIG) if doc["kind"] == "PrometheusRule"]
+    namespace = monitoring_objects()[("Namespace", rule["metadata"]["namespace"])]
+    assert selects(spec["ruleSelector"], rule["metadata"].get("labels", {})), spec["ruleSelector"]
+    assert selects(spec["ruleNamespaceSelector"], namespace["metadata"].get("labels", {})), (
+        spec["ruleNamespaceSelector"])
 
 
 def test_nothing_watches_the_control_plane_kind_hides(chart_render):
@@ -789,3 +919,113 @@ def test_nothing_watches_the_control_plane_kind_hides(chart_render):
              for g in d["spec"]["groups"] for r in g["rules"]]
     assert [m for m in monitors if CONTROL_PLANE.search(m)] == []
     assert [e for e in exprs if CONTROL_PLANE.search(str(e))] == []
+
+
+def sidecar_dashboards(chart_docs, docs):
+    """{file name: JSON text} for each dashboard in `docs` that Grafana's sidecar loads: ConfigMaps carrying
+    the label the chart gives the sidecar. The label is read from the chart, so a renamed one shows."""
+    [grafana] = [d for d in chart_docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith("-grafana")]
+    [sidecar] = [c for c in grafana["spec"]["template"]["spec"]["containers"] if c["name"] == "grafana-sc-dashboard"]
+    env = {e["name"]: e.get("value") for e in sidecar["env"]}
+    label = (env["LABEL"], env["LABEL_VALUE"])
+    return {key: text for d in docs if d["kind"] == "ConfigMap" and label in d["metadata"].get("labels", {}).items()
+            for key, text in d.get("data", {}).items()}
+
+
+def test_grafana_loads_the_sample_api_dashboard(chart_render):
+    # FR4 (D4 = C): Grafana sees a dashboard only through its sidecar, which loads ConfigMaps carrying the
+    # label the chart gives it. The label is read from the chart, so a renamed one shows here, not as a
+    # dashboard missing from Grafana. The file in Git must be what Flux applies, and its uid its own: two
+    # dashboards with one uid means one silently replaces the other.
+    chart_docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
+    ours = sidecar_dashboards(chart_docs, rendered(MONITORING_CONFIG))
+    assert sorted(ours) == [SAMPLE_API_DASHBOARD.name]
+    assert ours[SAMPLE_API_DASHBOARD.name] == SAMPLE_API_DASHBOARD.read_text()
+    defaults = {json.loads(text)["uid"] for text in sidecar_dashboards(chart_docs, chart_docs).values()}
+    assert json.loads(ours[SAMPLE_API_DASHBOARD.name])["uid"] not in defaults, sorted(defaults)
+
+
+def test_every_sample_api_dashboard_query_is_valid_promql(chart_render, tmp_path):
+    # FR4: Grafana sends a panel's query to Prometheus only when someone opens the dashboard, so a typo shows
+    # as an empty panel during an incident, not as a failure. Grafana fills in its variables first, so the test
+    # does too, then has promtool (the pinned Prometheus image's) parse each query as a recording rule. The
+    # variable's own query, label_values(...), is Grafana's syntax, not PromQL, so it isn't checked.
+    # Characterisation (C6): green on arrival; a broken query turns it red (recorded).
+    dashboard = json.loads(SAMPLE_API_DASHBOARD.read_text())
+    filled = {"$__rate_interval": "5m", "$namespace": "sample-api-dev"}
+    rules = []
+    for panel in [p for top in dashboard["panels"] for p in [top, *top.get("panels", [])]]:
+        for target in panel.get("targets", []):
+            expr = target["expr"]
+            for variable, value in filled.items():
+                expr = expr.replace(variable, value)
+            assert "$" not in expr, (panel["title"], expr)
+            rules.append({"record": f"dashboard:panel_{panel['id']}_{target['refId']}", "expr": expr})
+    assert rules, "no queries found in the dashboard"
+    (tmp_path / "dashboard.rules.yaml").write_text(
+        yaml.safe_dump({"groups": [{"name": "sample-api-dashboard", "rules": rules}]}))
+    run = promtool(chart_render, tmp_path, "check", "rules", "dashboard.rules.yaml")
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_every_sample_api_dashboard_query_uses_the_chart_datasource(chart_render):
+    # FR4: a panel names its datasource by uid. A uid Grafana doesn't have (an export's ${DS_PROMETHEUS},
+    # or one a UI edit made up) shows only as "datasource not found" when someone opens the panel. The uid
+    # is read from what the chart provisions, so a renamed one shows here. Grafana's own annotation
+    # source (-- Grafana --) isn't a query. Characterisation (C6): green on arrival; a wrong uid turns it red.
+    [provisioned] = [d for d in yaml.safe_load_all(chart_render) if d and d["kind"] == "ConfigMap"
+                     and d["metadata"].get("labels", {}).get("grafana_datasource") == "1"]
+    [prometheus] = [s for s in yaml.safe_load(provisioned["data"]["datasource.yaml"])["datasources"]
+                    if s["type"] == "prometheus"]
+
+    def datasources(node):
+        if isinstance(node, dict):
+            if "datasource" in node:
+                yield node["datasource"]
+            for value in node.values():
+                yield from datasources(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from datasources(item)
+
+    used = [s for s in datasources(json.loads(SAMPLE_API_DASHBOARD.read_text())) if s != {
+        "type": "grafana", "uid": "-- Grafana --"}]
+    assert used, "no datasources found in the dashboard"
+    assert sorted({s["uid"] for s in used}) == [prometheus["uid"]], used
+
+
+def test_the_named_cluster_health_dashboard_is_installed(chart_render):
+    # D4 = C: the on-call doc (P8) sends people to this chart dashboard for cluster health. It arrives only
+    # while grafana.defaultDashboardsEnabled is on and the chart still ships it, so the switch turned off or
+    # a chart bump that drops or renames it would leave the doc pointing at nothing.
+    # Characterisation (C6): green on arrival; the switch off turns it red.
+    chart_docs = [doc for doc in yaml.safe_load_all(chart_render) if doc]
+    dashboards = [json.loads(text) for text in sidecar_dashboards(chart_docs, chart_docs).values()]
+    uid, title = CLUSTER_HEALTH_DASHBOARD
+    assert {d["uid"]: d["title"] for d in dashboards}.get(uid) == title, sorted(d["title"] for d in dashboards)
+
+
+@pytest.fixture(scope="session")
+def kind_chart_render(chart, tmp_path_factory):
+    """The chart as the kind cluster gets it: each ConfigMap the release's valuesFrom names, in that order
+    (the later wins), taken from what Flux applies, so a dropped valuesFrom entry shows too."""
+    objects = monitoring_objects()
+    folder = tmp_path_factory.mktemp("kind-values")
+    files = []
+    for i, source in enumerate(objects[RELEASE]["spec"]["valuesFrom"]):
+        path = folder / f"{i}-{source['name']}.yaml"
+        path.write_text(objects[(source["kind"], source["name"])]["data"][source["valuesKey"]])
+        files.append(path)
+    return helm_template(chart, *files)
+
+
+def test_kind_drops_the_alert_its_clock_sets_off(kind_chart_render):
+    # WSL2 steps the kind node's clock, which moves every process's process_start_time_seconds at each
+    # scrape (mon-test, 2026-11-10: 20 changes in 10 min, 0 restarts), so AlertmanagerClusterCrashlooping,
+    # the chart's only rule on that metric, fires for good on kind, the live cluster included. A real
+    # crashloop still shows in KubePodCrashLooping, which counts restarts, so that one must stay.
+    docs = [doc for doc in yaml.safe_load_all(kind_chart_render) if doc]
+    alerts = [r.get("alert") for d in docs if d["kind"] == "PrometheusRule"
+              for g in d["spec"]["groups"] for r in g["rules"]]
+    assert "KubePodCrashLooping" in alerts, "the chart's restart alert is missing, or no rules were found"
+    assert "AlertmanagerClusterCrashlooping" not in alerts

@@ -113,18 +113,20 @@ func TestRoutes(t *testing.T) {
 		{http.MethodPost, "/health", http.StatusMethodNotAllowed},
 	}
 	for _, tc := range cases {
-		req, err := http.NewRequest(tc.method, srv.URL+tc.path, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", tc.method, tc.path, err)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != tc.want {
-			t.Errorf("%s %s = %d, want %d", tc.method, tc.path, resp.StatusCode, tc.want)
-		}
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, srv.URL+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("%s %s = %d, want %d", tc.method, tc.path, resp.StatusCode, tc.want)
+			}
+		})
 	}
 }
 
@@ -323,31 +325,90 @@ func TestHandlersBehindInstrumentCanFlush(t *testing.T) {
 	}
 }
 
+// The code label must be the status the client got. Go sends only the first final status a handler sets, and
+// a Write or a Flush before any WriteHeader has already sent 200, so a WriteHeader after either changes
+// nothing. A 1xx such as 103 Early Hints is informational: the real status still follows it (E9, pre-review).
+func TestStatusLabelIsTheOneSent(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /twice", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /late", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("GET /hints", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusEarlyHints)
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /flush", func(w http.ResponseWriter, r *http.Request) {
+		_ = http.NewResponseController(w).Flush()
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	m := newMetrics()
+	// A real server, not httptest.NewRecorder: the recorder takes a 1xx as the final status. The server logs
+	// each ignored WriteHeader ("superfluous response.WriteHeader call"); here that is expected.
+	app := httptest.NewServer(m.instrument(mux))
+	t.Cleanup(app.Close)
+
+	for _, tc := range []struct {
+		path      string
+		sent      int
+		wantCount string
+	}{
+		{"/twice", http.StatusInternalServerError, `http_request_duration_seconds_count{code="500",method="GET",route="/twice"} 1`},
+		{"/late", http.StatusOK, `http_request_duration_seconds_count{code="200",method="GET",route="/late"} 1`},
+		{"/hints", http.StatusOK, `http_request_duration_seconds_count{code="200",method="GET",route="/hints"} 1`},
+		{"/flush", http.StatusOK, `http_request_duration_seconds_count{code="200",method="GET",route="/flush"} 1`},
+	} {
+		t.Run(strings.TrimPrefix(tc.path, "/"), func(t *testing.T) {
+			resp, err := http.Get(app.URL + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tc.path, err)
+			}
+			// To the end: /flush sends its headers early, and instrument() counts the request only after the
+			// handler returns, which is before the body ends.
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.sent {
+				t.Fatalf("GET %s sent %d, want %d: the test's handler is wrong, not instrument()", tc.path, resp.StatusCode, tc.sent)
+			}
+			if body := scrape(m); !strings.Contains(body, tc.wantCount) {
+				t.Errorf("metrics output lacks %q\n--- output ---\n%s", tc.wantCount, body)
+			}
+		})
+	}
+}
+
 // /fault answers 500 only when switched on, and those 500s are counted like any route's: they are the alert's input.
 // Switched off, it is just an unknown path.
 func TestFaultRoute(t *testing.T) {
 	for _, tc := range []struct {
+		name      string
 		faults    bool
 		wantCode  int
 		wantCount string
 	}{
-		{true, http.StatusInternalServerError, `http_request_duration_seconds_count{code="500",method="GET",route="/fault"} 1`},
-		{false, http.StatusNotFound, `http_request_duration_seconds_count{code="404",method="GET",route="unmatched"} 1`},
+		{"on", true, http.StatusInternalServerError, `http_request_duration_seconds_count{code="500",method="GET",route="/fault"} 1`},
+		{"off", false, http.StatusNotFound, `http_request_duration_seconds_count{code="404",method="GET",route="unmatched"} 1`},
 	} {
-		m, app := instrumentedApp(t, tc.faults)
+		t.Run(tc.name, func(t *testing.T) {
+			m, app := instrumentedApp(t, tc.faults)
 
-		resp, err := http.Get(app.URL + "/fault")
-		if err != nil {
-			t.Fatalf("faults=%v: GET /fault: %v", tc.faults, err)
-		}
-		_ = resp.Body.Close()
+			resp, err := http.Get(app.URL + "/fault")
+			if err != nil {
+				t.Fatalf("faults=%v: GET /fault: %v", tc.faults, err)
+			}
+			_ = resp.Body.Close()
 
-		if resp.StatusCode != tc.wantCode {
-			t.Errorf("faults=%v: GET /fault = %d, want %d", tc.faults, resp.StatusCode, tc.wantCode)
-		}
-		if body := scrape(m); !strings.Contains(body, tc.wantCount) {
-			t.Errorf("faults=%v: metrics output lacks %q\n--- output ---\n%s", tc.faults, tc.wantCount, body)
-		}
+			if resp.StatusCode != tc.wantCode {
+				t.Errorf("faults=%v: GET /fault = %d, want %d", tc.faults, resp.StatusCode, tc.wantCode)
+			}
+			if body := scrape(m); !strings.Contains(body, tc.wantCount) {
+				t.Errorf("faults=%v: metrics output lacks %q\n--- output ---\n%s", tc.faults, tc.wantCount, body)
+			}
+		})
 	}
 }
 
@@ -373,7 +434,7 @@ func TestMetricsOnlyOnTheMetricsServer(t *testing.T) {
 	mets := httptest.NewServer(metricsSrv.Handler)
 	t.Cleanup(mets.Close)
 
-	get := func(base, path string) (int, string) {
+	get := func(t *testing.T, base, path string) (int, string) {
 		t.Helper()
 		resp, err := http.Get(base + path)
 		if err != nil {
@@ -395,12 +456,14 @@ func TestMetricsOnlyOnTheMetricsServer(t *testing.T) {
 		{"app", app.URL, "/metrics", http.StatusNotFound},
 		{"metrics", mets.URL, "/health", http.StatusNotFound},
 	} {
-		if got, _ := get(tc.base, tc.path); got != tc.want {
-			t.Errorf("%s server GET %s = %d, want %d", tc.server, tc.path, got, tc.want)
-		}
+		t.Run(tc.server+" "+tc.path, func(t *testing.T) {
+			if got, _ := get(t, tc.base, tc.path); got != tc.want {
+				t.Errorf("%s server GET %s = %d, want %d", tc.server, tc.path, got, tc.want)
+			}
+		})
 	}
 
-	code, body := get(mets.URL, "/metrics")
+	code, body := get(t, mets.URL, "/metrics")
 	if code != http.StatusOK {
 		t.Fatalf("metrics server GET /metrics = %d, want 200", code)
 	}
@@ -517,14 +580,16 @@ func TestServeOnPairsEachListenerWithItsServer(t *testing.T) {
 		{"metrics", metricsLn, "/metrics", http.StatusOK},
 		{"metrics", metricsLn, "/health", http.StatusNotFound},
 	} {
-		resp, err := http.Get("http://" + tc.ln.Addr().String() + tc.path)
-		if err != nil {
-			t.Fatalf("GET %s on the %s listener: %v", tc.path, tc.name, err)
-		}
-		_ = resp.Body.Close()
-		if resp.StatusCode != tc.want {
-			t.Errorf("GET %s on the %s listener = %d, want %d", tc.path, tc.name, resp.StatusCode, tc.want)
-		}
+		t.Run(tc.name+" "+tc.path, func(t *testing.T) {
+			resp, err := http.Get("http://" + tc.ln.Addr().String() + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s on the %s listener: %v", tc.path, tc.name, err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("GET %s on the %s listener = %d, want %d", tc.path, tc.name, resp.StatusCode, tc.want)
+			}
+		})
 	}
 
 	// The client keeps spare connections open; on shutdown the server waits up to 5 s for one that

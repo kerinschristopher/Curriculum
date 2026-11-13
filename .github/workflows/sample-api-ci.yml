@@ -40,11 +40,11 @@ env:
   # GHCR image names must be lowercase.
   IMAGE_NAME: ghcr.io/kerinschristopher/sample-api
   # The kustomize Flux's kustomize-controller renders with; both render jobs install it, so CI
-  # renders as the cluster does. test_kustomize_pin_matches_the_flux_version ties it to FLUX_VERSION.
+  # renders as the cluster does. test_pin_matches_the_flux_version[kustomize] ties it to FLUX_VERSION.
   KUSTOMIZE_VERSION: "5.8.1"
   KUSTOMIZE_SHA256: 029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d
   # The Helm Flux's helm-controller renders charts with (v1.7.1 embeds v4.3.1); scripts-test installs it
-  # for P4b's render test. test_helm_pin_matches_the_flux_version ties it to FLUX_VERSION.
+  # for P4b's render test. test_pin_matches_the_flux_version[helm] ties it to FLUX_VERSION.
   HELM_VERSION: "4.3.1"
   HELM_SHA256: 0403a88ae20913d11b10a2467b50087721fea7581736da6b9d3992f5357fe54b
 
@@ -243,6 +243,7 @@ jobs:
                      Acme/platform/apps/sample-api/overlays/* \
                      Acme/platform/apps/overlays/* \
                      Acme/platform/infrastructure/overlays/* \
+                     Acme/platform/infrastructure/monitoring-config \
                      Acme/infra/bootstrap; do
             echo "== $dir"
             kustomize build "$dir" > "$RUNNER_TEMP/rendered/${dir//\//_}.yaml"
@@ -264,6 +265,7 @@ jobs:
           OPERATOR_CLI_SHA256: 7bb9e54d370039d8701d4271b38aed57d6c89668432b7caddce69f4e26e24c1b
           KUBERNETES_VERSION: "1.35.8"
           KUBERNETES_SCHEMAS_COMMIT: 47163ead3738a996c3e30be9691bb37b8071d9d3
+          CRDS_CATALOG_COMMIT: 49729e49e8f062933e3716a26540d41b0cd0856c
         run: |
           set -euo pipefail
           curl --retry 3 --retry-all-errors -fsSLo kubeconform.tar.gz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
@@ -289,6 +291,7 @@ jobs:
             -schema-location "https://raw.githubusercontent.com/yannh/kubernetes-json-schema/${KUBERNETES_SCHEMAS_COMMIT}/{{ .NormalizedKubernetesVersion }}-standalone{{ .StrictSuffix }}/{{ .ResourceKind }}{{ .KindSuffix }}.json" \
             -schema-location 'schemas/flux/{{ .ResourceKind }}{{ .KindSuffix }}.json' \
             -schema-location 'schemas/operator/{{ .ResourceKind }}{{ .KindSuffix }}.json' \
+            -schema-location "https://raw.githubusercontent.com/datreeio/CRDs-catalog/${CRDS_CATALOG_COMMIT}/{{ .Group }}/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json" \
             rendered/*.yaml
 
   # Tests for .github/scripts and the CI config: pick-rescan-images.sh (sample-api-rescan.yml, daily
@@ -314,7 +317,7 @@ jobs:
           persist-credentials: false
 
       # The runner image ships its own kustomize (5.8.3 on 20261101.360.1); test_flux_layout.py renders
-      # with KUSTOMIZE_VERSION, as Flux does, and test_renders_use_the_pinned_kustomize checks it.
+      # with KUSTOMIZE_VERSION, as Flux does, and test_renders_use_the_pinned_tool[kustomize] checks it.
       - name: Install kustomize
         working-directory: ${{ runner.temp }}
         run: |
@@ -326,7 +329,7 @@ jobs:
           kustomize version
 
       # The runner image ships Helm 3.22.1; P4b's render test renders the chart with HELM_VERSION, as
-      # helm-controller does, and test_renders_use_the_pinned_helm checks it.
+      # helm-controller does, and test_renders_use_the_pinned_tool[helm] checks it.
       - name: Install Helm
         working-directory: ${{ runner.temp }}
         run: |

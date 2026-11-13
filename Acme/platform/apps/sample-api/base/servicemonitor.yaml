@@ -1,0 +1,16 @@
+# Prometheus scrapes sample-api's metrics port (:8081, /metrics; main.go) through this. It sits in the base,
+# so each env's namespace gets one, which watches only that namespace. No `release` label: Prometheus's
+# selectors are opened to unlabelled monitors instead (Module 9 design, Defaults "Selectors"; F7).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sample-api
+  labels:
+    app: sample-api
+spec:
+  selector:
+    matchLabels:
+      app: sample-api
+  endpoints:
+    - port: metrics
+      path: /metrics

@@ -1,0 +1,28 @@
+# sample-api's error-rate alert (Module 9 FR3, curriculum :429). One rule for every environment:
+# `by (namespace)` names which one is failing. It lives here, not beside the HelmRelease, because this
+# Kustomization applies only after infrastructure (and with it the PrometheusRule CRD) is Ready (F22).
+# The kubelet's /health probes are left out of both halves (L1 = B): healthHandler always answers 200,
+# so they can't add an error, only dilute the rate, and more pods (prod's 3) would dilute it more.
+# Collection and the dashboard's traffic panel still count /health; its error-ratio and latency panels leave
+# it out, as here. Tested by sample-api-alerts.test.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sample-api
+  namespace: monitoring
+spec:
+  groups:
+    - name: sample-api
+      rules:
+        - alert: SampleApiHighErrorRate
+          expr: |
+            sum by (namespace) (rate(http_request_duration_seconds_count{job="sample-api",route!="/health",code=~"5.."}[5m]))
+              /
+            sum by (namespace) (rate(http_request_duration_seconds_count{job="sample-api",route!="/health"}[5m]))
+              > 0.05
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: sample-api is failing more than 5% of requests in {{ $labels.namespace }}
+            description: '{{ $value | humanizePercentage }} of requests returned 5xx over the last 5 minutes.'
