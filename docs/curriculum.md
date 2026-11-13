@@ -8,6 +8,8 @@ Read `FOUNDATIONS.md` and complete the three prep weeks first. They cover enviro
 
 The local Kubernetes cluster used throughout the curriculum is minikube. Anywhere a tutorial mentions kind or k3d, the same exercises work on minikube with minor adjustments.
 
+There's also an optional hands-on Ansible track in `ANSIBLE.md`. It's not part of the Acme capstone, and it isn't required, but it's the fastest way to get the feel of declarative configuration management on machines you already own (your WSL host and your Windows desktop). It assumes you've finished Foundations. Do it whenever you like; it pairs well with Module 1 and Module 4.
+
 ## How to use this document
 
 Each module is one week of focused work, roughly 8 to 12 hours. Don't rush. The goal isn't to finish fast, it's to internalize how the pieces fit together so you can answer "why is it built that way?" with conviction.
